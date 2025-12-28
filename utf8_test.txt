@@ -1,0 +1,61 @@
+# UTF-8 Test File for edit
+
+## Basic ASCII
+Hello, World! 0123456789
+ABCDEFGHIJKLMNOPQRSTUVWXYZ
+abcdefghijklmnopqrstuvwxyz
+!@#$%^&*()_+-=[]{}|;':",.<>/?
+
+## Latin Extended (Accented)
+café résumé naïve coöperate
+ÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏ
+àáâãäåæçèéêëìíîï
+ñÑüÜößØø
+
+## CJK Characters (Wide - 2 columns each)
+Chinese: 中文测试 你好世界
+Japanese: 日本語テスト こんにちは
+Korean: 한국어 테스트 안녕하세요
+Mixed: 中日한
+
+## Emoji (Wide - 2 columns each)
+Simple: 😀 😎 🎉 ❤️ ⭐ 🌍 🚀
+Flags: 🇺🇸 🇯🇵 🇩🇪 🇫🇷
+Skin tones: 👋 👋🏻 👋🏼 👋🏽 👋🏾 👋🏿
+Compound: 👨‍👩‍👧‍👦 👩‍💻 🏳️‍🌈
+
+## Combining Characters
+e + combining acute: é (should be 1 grapheme)
+a + combining ring: å (should be 1 grapheme)
+Multiple combining: ệ (e + circumflex + dot below)
+
+## Greek and Cyrillic
+Greek: Ελληνικά αβγδεζηθ ΑΒΓΔΕΖΗΘ
+Cyrillic: Русский язык абвгдеж АБВГДЕЖ
+
+## Arabic and Hebrew (RTL)
+Arabic: مرحبا بالعالم
+Hebrew: שלום עולם
+
+## Special Width Characters
+Fullwidth: ＡＢＣＤ １２３４
+Halfwidth: ｱｲｳｴｵ
+
+## Box Drawing
+┌─────────┐
+│ Box     │
+│ Drawing │
+└─────────┘
+
+## Mathematical Symbols
+∀x∈ℝ: x² ≥ 0
+∑∏∫∂∇ ≠≈≡≤≥
+α β γ δ ε ζ η θ
+
+## Currency Symbols
+$ € £ ¥ ₹ ₽ ₿ ¢
+
+## Tabs and Spacing
+	Tab at start
+Word	Tab	Between
+		Double tab
