@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 4: mmap and Line Temperature
+ * Phase 5: Syntax Highlighting
  *****************************************************************************/
 
 /*****************************************************************************
@@ -32,7 +32,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.4.0"
+#define EDIT_VERSION "0.5.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -95,11 +95,59 @@ enum line_temperature {
 	LINE_TEMPERATURE_HOT = 2
 };
 
-/* A single character cell storing one Unicode codepoint. Each visible
- * character (including combining marks) occupies one cell. */
+/* Token types for syntax highlighting. Each cell is tagged with its type
+ * to determine the color used when rendering. */
+enum syntax_token {
+	SYNTAX_NORMAL = 0,    /* Default text */
+	SYNTAX_KEYWORD,       /* if, else, for, while, return, etc. */
+	SYNTAX_TYPE,          /* int, char, void, struct, etc. */
+	SYNTAX_STRING,        /* "..." and '...' */
+	SYNTAX_NUMBER,        /* 123, 0xFF, 3.14 */
+	SYNTAX_COMMENT,       /* Line and block comments */
+	SYNTAX_PREPROCESSOR,  /* #include, #define, etc. */
+	SYNTAX_FUNCTION,      /* function names (identifier before '(') */
+	SYNTAX_OPERATOR,      /* +, -, *, /, =, etc. */
+	SYNTAX_BRACKET,       /* (), [], {} */
+	SYNTAX_ESCAPE,        /* \n, \t, etc. inside strings */
+	SYNTAX_TOKEN_COUNT    /* Number of token types */
+};
+
+/* RGB color for syntax highlighting. */
+struct syntax_color {
+	uint8_t red;
+	uint8_t green;
+	uint8_t blue;
+};
+
+/* Tokyo Night color theme for syntax highlighting. */
+static const struct syntax_color THEME_COLORS[] = {
+	[SYNTAX_NORMAL]       = {0xc0, 0xca, 0xf5},  /* Light gray-blue */
+	[SYNTAX_KEYWORD]      = {0xbb, 0x9a, 0xf7},  /* Purple */
+	[SYNTAX_TYPE]         = {0x2a, 0xc3, 0xde},  /* Cyan */
+	[SYNTAX_STRING]       = {0x9e, 0xce, 0x6a},  /* Green */
+	[SYNTAX_NUMBER]       = {0xff, 0x9e, 0x64},  /* Orange */
+	[SYNTAX_COMMENT]      = {0x56, 0x5f, 0x89},  /* Gray */
+	[SYNTAX_PREPROCESSOR] = {0x7d, 0xcf, 0xff},  /* Light blue */
+	[SYNTAX_FUNCTION]     = {0x7a, 0xa2, 0xf7},  /* Blue */
+	[SYNTAX_OPERATOR]     = {0x89, 0xdd, 0xff},  /* Light cyan */
+	[SYNTAX_BRACKET]      = {0xc0, 0xca, 0xf5},  /* Same as normal */
+	[SYNTAX_ESCAPE]       = {0xff, 0x9e, 0x64},  /* Orange */
+};
+
+/* Background color for the editor. */
+static const struct syntax_color THEME_BACKGROUND = {0x1a, 0x1b, 0x26};
+
+/* Line number gutter colors. */
+static const struct syntax_color THEME_LINE_NUMBER = {0x3b, 0x42, 0x61};
+static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0x73, 0x7a, 0xa2};
+
+/* A single character cell storing one Unicode codepoint and its syntax type. */
 struct cell {
 	/* The Unicode codepoint stored in this cell. */
 	uint32_t codepoint;
+
+	/* Token type for syntax highlighting. */
+	uint16_t syntax;
 };
 
 /* A single line of text. Cold lines reference mmap content directly.
@@ -217,6 +265,291 @@ static struct editor_state editor;
 
 /* Flag set by SIGWINCH handler to indicate terminal was resized. */
 static volatile sig_atomic_t terminal_resized = 0;
+
+/*****************************************************************************
+ * Syntax Highlighting
+ *****************************************************************************/
+
+/* C language keywords - control flow and declarations. */
+static const char *C_KEYWORDS[] = {
+	"if", "else", "for", "while", "do", "switch", "case", "default",
+	"break", "continue", "return", "goto", "sizeof", "typedef",
+	"struct", "union", "enum", "static", "const", "volatile",
+	"extern", "register", "inline", "restrict", "_Atomic", "_Noreturn",
+	NULL
+};
+
+/* C language type names and common typedefs. */
+static const char *C_TYPES[] = {
+	"int", "char", "short", "long", "float", "double", "void",
+	"signed", "unsigned", "bool", "true", "false", "NULL",
+	"int8_t", "int16_t", "int32_t", "int64_t",
+	"uint8_t", "uint16_t", "uint32_t", "uint64_t",
+	"size_t", "ssize_t", "ptrdiff_t", "intptr_t", "uintptr_t",
+	"FILE", "va_list",
+	NULL
+};
+
+/* Returns true if codepoint is an ASCII letter. */
+static bool syntax_is_alpha(uint32_t cp)
+{
+	return (cp >= 'a' && cp <= 'z') || (cp >= 'A' && cp <= 'Z');
+}
+
+/* Returns true if codepoint is an ASCII digit. */
+static bool syntax_is_digit(uint32_t cp)
+{
+	return cp >= '0' && cp <= '9';
+}
+
+/* Returns true if codepoint is alphanumeric or underscore. */
+static bool syntax_is_alnum(uint32_t cp)
+{
+	return syntax_is_alpha(cp) || syntax_is_digit(cp) || cp == '_';
+}
+
+/* Returns true if codepoint could be part of a number literal. */
+static bool syntax_is_number_char(uint32_t cp)
+{
+	return syntax_is_digit(cp) || cp == '.' || cp == 'x' || cp == 'X' ||
+	       (cp >= 'a' && cp <= 'f') || (cp >= 'A' && cp <= 'F') ||
+	       cp == 'u' || cp == 'U' || cp == 'l' || cp == 'L';
+}
+
+/* Returns true if codepoint is a C operator. */
+static bool syntax_is_operator(uint32_t cp)
+{
+	return cp == '+' || cp == '-' || cp == '*' || cp == '/' ||
+	       cp == '=' || cp == '<' || cp == '>' || cp == '!' ||
+	       cp == '&' || cp == '|' || cp == '^' || cp == '~' ||
+	       cp == '%' || cp == '?' || cp == ':' || cp == ';' ||
+	       cp == ',' || cp == '.';
+}
+
+/* Returns true if codepoint is a bracket character. */
+static bool syntax_is_bracket(uint32_t cp)
+{
+	return cp == '(' || cp == ')' || cp == '[' || cp == ']' ||
+	       cp == '{' || cp == '}';
+}
+
+/* Returns true if position is at line start (only whitespace before). */
+static bool syntax_is_line_start(struct line *line, uint32_t pos)
+{
+	for (uint32_t i = 0; i < pos; i++) {
+		uint32_t cp = line->cells[i].codepoint;
+		if (cp != ' ' && cp != '\t') {
+			return false;
+		}
+	}
+	return true;
+}
+
+/* Extracts a word from cells into a buffer. Only ASCII characters. */
+static void syntax_extract_word(struct line *line, uint32_t start, uint32_t end,
+                                char *buffer, size_t buffer_size)
+{
+	size_t len = 0;
+	for (uint32_t i = start; i < end && len < buffer_size - 1; i++) {
+		uint32_t cp = line->cells[i].codepoint;
+		if (cp < 128) {
+			buffer[len++] = (char)cp;
+		}
+	}
+	buffer[len] = '\0';
+}
+
+/* Returns true if word is a C keyword. */
+static bool syntax_is_keyword(const char *word)
+{
+	for (int i = 0; C_KEYWORDS[i] != NULL; i++) {
+		if (strcmp(word, C_KEYWORDS[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Returns true if word is a C type name. */
+static bool syntax_is_type(const char *word)
+{
+	for (int i = 0; C_TYPES[i] != NULL; i++) {
+		if (strcmp(word, C_TYPES[i]) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Returns true if filename has a C/C++ extension. */
+static bool syntax_is_c_file(const char *filename)
+{
+	if (filename == NULL) {
+		return false;
+	}
+
+	const char *dot = strrchr(filename, '.');
+	if (dot == NULL) {
+		return false;
+	}
+
+	const char *ext = dot + 1;
+	return strcmp(ext, "c") == 0 || strcmp(ext, "h") == 0 ||
+	       strcmp(ext, "cpp") == 0 || strcmp(ext, "hpp") == 0 ||
+	       strcmp(ext, "cc") == 0 || strcmp(ext, "cxx") == 0;
+}
+
+/*
+ * Apply syntax highlighting to a single line. Tokenizes the line and sets
+ * the syntax field of each cell. Only works on warm/hot lines.
+ */
+static void syntax_highlight_line(struct line *line, struct buffer *buffer)
+{
+	/* Only highlight C files */
+	if (!syntax_is_c_file(buffer->filename)) {
+		return;
+	}
+
+	/* Must be warm/hot to highlight */
+	if (line->temperature == LINE_TEMPERATURE_COLD) {
+		return;
+	}
+
+	/* Reset all cells to normal */
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		line->cells[i].syntax = SYNTAX_NORMAL;
+	}
+
+	uint32_t i = 0;
+	while (i < line->cell_count) {
+		uint32_t cp = line->cells[i].codepoint;
+
+		/* Check for // comment */
+		if (cp == '/' && i + 1 < line->cell_count &&
+		    line->cells[i + 1].codepoint == '/') {
+			while (i < line->cell_count) {
+				line->cells[i].syntax = SYNTAX_COMMENT;
+				i++;
+			}
+			break;
+		}
+
+		/* Check for block comment start (highlight to end of line) */
+		if (cp == '/' && i + 1 < line->cell_count &&
+		    line->cells[i + 1].codepoint == '*') {
+			while (i < line->cell_count) {
+				line->cells[i].syntax = SYNTAX_COMMENT;
+				/* Check for block comment ending */
+				if (line->cells[i].codepoint == '/' && i >= 1 &&
+				    line->cells[i - 1].codepoint == '*') {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+
+		/* Check for string literal */
+		if (cp == '"' || cp == '\'') {
+			uint32_t quote = cp;
+			line->cells[i].syntax = SYNTAX_STRING;
+			i++;
+			while (i < line->cell_count) {
+				cp = line->cells[i].codepoint;
+				if (cp == '\\' && i + 1 < line->cell_count) {
+					line->cells[i].syntax = SYNTAX_ESCAPE;
+					i++;
+					line->cells[i].syntax = SYNTAX_ESCAPE;
+					i++;
+					continue;
+				}
+				line->cells[i].syntax = SYNTAX_STRING;
+				if (cp == quote) {
+					i++;
+					break;
+				}
+				i++;
+			}
+			continue;
+		}
+
+		/* Check for preprocessor directive */
+		if (cp == '#' && syntax_is_line_start(line, i)) {
+			while (i < line->cell_count) {
+				line->cells[i].syntax = SYNTAX_PREPROCESSOR;
+				i++;
+			}
+			break;
+		}
+
+		/* Check for number literal */
+		if (syntax_is_digit(cp) ||
+		    (cp == '.' && i + 1 < line->cell_count &&
+		     syntax_is_digit(line->cells[i + 1].codepoint))) {
+			while (i < line->cell_count &&
+			       syntax_is_number_char(line->cells[i].codepoint)) {
+				line->cells[i].syntax = SYNTAX_NUMBER;
+				i++;
+			}
+			continue;
+		}
+
+		/* Check for identifier (keyword, type, or function) */
+		if (syntax_is_alpha(cp) || cp == '_') {
+			uint32_t start = i;
+			while (i < line->cell_count &&
+			       syntax_is_alnum(line->cells[i].codepoint)) {
+				i++;
+			}
+
+			/* Extract word and classify */
+			char word[64];
+			syntax_extract_word(line, start, i, word, sizeof(word));
+
+			enum syntax_token type = SYNTAX_NORMAL;
+			if (syntax_is_keyword(word)) {
+				type = SYNTAX_KEYWORD;
+			} else if (syntax_is_type(word)) {
+				type = SYNTAX_TYPE;
+			} else {
+				/* Check if followed by '(' - it's a function */
+				uint32_t j = i;
+				while (j < line->cell_count &&
+				       (line->cells[j].codepoint == ' ' ||
+				        line->cells[j].codepoint == '\t')) {
+					j++;
+				}
+				if (j < line->cell_count &&
+				    line->cells[j].codepoint == '(') {
+					type = SYNTAX_FUNCTION;
+				}
+			}
+
+			for (uint32_t j = start; j < i; j++) {
+				line->cells[j].syntax = type;
+			}
+			continue;
+		}
+
+		/* Check for operator */
+		if (syntax_is_operator(cp)) {
+			line->cells[i].syntax = SYNTAX_OPERATOR;
+			i++;
+			continue;
+		}
+
+		/* Check for bracket */
+		if (syntax_is_bracket(cp)) {
+			line->cells[i].syntax = SYNTAX_BRACKET;
+			i++;
+			continue;
+		}
+
+		/* Default: skip */
+		i++;
+	}
+}
 
 /*****************************************************************************
  * Terminal Handling
@@ -542,7 +875,8 @@ static void line_append_cells_from_line(struct line *dest, struct line *src)
 /*
  * Warms a cold line by decoding its UTF-8 content from mmap into cells.
  * Does nothing if the line is already warm or hot. After warming, the
- * line's cells array contains the decoded codepoints.
+ * line's cells array contains the decoded codepoints and syntax highlighting
+ * is applied.
  */
 static void line_warm(struct line *line, struct buffer *buffer)
 {
@@ -563,6 +897,9 @@ static void line_warm(struct line *line, struct buffer *buffer)
 	}
 
 	line->temperature = LINE_TEMPERATURE_WARM;
+
+	/* Apply syntax highlighting */
+	syntax_highlight_line(line, buffer);
 }
 
 /*
@@ -760,6 +1097,9 @@ static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, ui
 	line_insert_cell(line, column, codepoint);
 	line->temperature = LINE_TEMPERATURE_HOT;
 	buffer->is_modified = true;
+
+	/* Re-highlight the modified line */
+	syntax_highlight_line(line, buffer);
 }
 
 /* Deletes the grapheme cluster at the specified position. If at end of line,
@@ -782,6 +1122,8 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 		}
 		line->temperature = LINE_TEMPERATURE_HOT;
 		buffer->is_modified = true;
+		/* Re-highlight the modified line */
+		syntax_highlight_line(line, buffer);
 	} else if (row + 1 < buffer->line_count) {
 		/* Join with next line */
 		struct line *next_line = &buffer->lines[row + 1];
@@ -789,6 +1131,8 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 		line_append_cells_from_line(line, next_line);
 		line->temperature = LINE_TEMPERATURE_HOT;
 		buffer_delete_line(buffer, row + 1);
+		/* Re-highlight the joined line */
+		syntax_highlight_line(line, buffer);
 	}
 }
 
@@ -826,6 +1170,10 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 		/* Truncate original line */
 		line->cell_count = column;
 		line->temperature = LINE_TEMPERATURE_HOT;
+
+		/* Re-highlight both lines after split */
+		syntax_highlight_line(line, buffer);
+		syntax_highlight_line(new_line, buffer);
 	}
 }
 
@@ -1310,10 +1658,22 @@ static void editor_save(void)
  *****************************************************************************/
 
 /*
+ * Output an ANSI true-color escape sequence for the given syntax token type.
+ */
+static void render_set_syntax_color(struct output_buffer *output, enum syntax_token type)
+{
+	struct syntax_color color = THEME_COLORS[type];
+	char escape[32];
+	int len = snprintf(escape, sizeof(escape), "\x1b[38;2;%d;%d;%dm",
+	                   color.red, color.green, color.blue);
+	output_buffer_append(output, escape, len);
+}
+
+/*
  * Render a single line's content to the output buffer. Warms the line if
  * cold. Handles horizontal scrolling by skipping to column_offset, expands
  * tabs to spaces, and encodes each cell's codepoint to UTF-8. Wide
- * characters that don't fit are replaced with spaces.
+ * characters that don't fit are replaced with spaces. Uses syntax colors.
  */
 static void render_line_content(struct output_buffer *output, struct line *line,
                                 struct buffer *buffer, uint32_t column_offset, int max_width)
@@ -1341,10 +1701,21 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		cell_index++;
 	}
 
+	/* Track current color to minimize escape sequences */
+	enum syntax_token current_syntax = SYNTAX_NORMAL;
+	render_set_syntax_color(output, current_syntax);
+
 	/* Render visible content */
 	int rendered_width = 0;
 	while (cell_index < line->cell_count && rendered_width < max_width) {
 		uint32_t codepoint = line->cells[cell_index].codepoint;
+		enum syntax_token syntax = line->cells[cell_index].syntax;
+
+		/* Change color if syntax type changed */
+		if (syntax != current_syntax) {
+			render_set_syntax_color(output, syntax);
+			current_syntax = syntax;
+		}
 
 		int width;
 		if (codepoint == '\t') {
@@ -1378,6 +1749,9 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		visual_column += width;
 		cell_index++;
 	}
+
+	/* Reset to normal color to prevent bleeding into next element */
+	render_set_syntax_color(output, SYNTAX_NORMAL);
 }
 
 /*
@@ -1431,6 +1805,14 @@ static void render_draw_rows(struct output_buffer *output)
 		} else {
 			/* Draw line number if enabled */
 			if (editor.show_line_numbers && editor.gutter_width > 0) {
+				/* Use brighter color for current line */
+				struct syntax_color ln_color = (file_row == editor.cursor_row)
+					? THEME_LINE_NUMBER_ACTIVE : THEME_LINE_NUMBER;
+				char color_escape[32];
+				snprintf(color_escape, sizeof(color_escape), "\x1b[38;2;%d;%d;%dm",
+				         ln_color.red, ln_color.green, ln_color.blue);
+				output_buffer_append_string(output, color_escape);
+
 				char line_number_buffer[16];
 				snprintf(line_number_buffer, sizeof(line_number_buffer), "%*u ",
 				         editor.gutter_width - 1, file_row + 1);
@@ -1456,8 +1838,8 @@ static void render_draw_rows(struct output_buffer *output)
  */
 static void render_draw_status_bar(struct output_buffer *output)
 {
-	/* Reverse video */
-	output_buffer_append_string(output, "\x1b[7m");
+	/* Reset all attributes then set reverse video */
+	output_buffer_append_string(output, "\x1b[0m\x1b[7m");
 
 	char left_status[256];
 	char right_status[64];
@@ -1528,6 +1910,12 @@ static void render_refresh_screen(void)
 	output_buffer_append_string(&output, "\x1b[?25l");
 	/* Move cursor to home */
 	output_buffer_append_string(&output, "\x1b[H");
+
+	/* Set background color for the entire screen */
+	char bg_escape[32];
+	snprintf(bg_escape, sizeof(bg_escape), "\x1b[48;2;%d;%d;%dm",
+	         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue);
+	output_buffer_append_string(&output, bg_escape);
 
 	render_draw_rows(&output);
 	render_draw_status_bar(&output);
