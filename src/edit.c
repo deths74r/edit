@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 3: Cell Architecture
+ * Phase 4: mmap and Line Temperature
  *****************************************************************************/
 
 /*****************************************************************************
@@ -21,6 +21,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <termios.h>
 #include <time.h>
 #include <unistd.h>
@@ -29,7 +32,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.3.0"
+#define EDIT_VERSION "0.4.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -79,6 +82,19 @@ enum key_code {
 	KEY_F2 = -91
 };
 
+/* Line temperature indicates whether a line's content is backed by mmap
+ * or has been materialized into cells. Cold lines use no memory for content. */
+enum line_temperature {
+	/* Line content is in mmap, no cells allocated. */
+	LINE_TEMPERATURE_COLD = 0,
+
+	/* Cells exist, decoded from mmap but not yet edited. */
+	LINE_TEMPERATURE_WARM = 1,
+
+	/* Line has been edited, mmap content is stale. */
+	LINE_TEMPERATURE_HOT = 2
+};
+
 /* A single character cell storing one Unicode codepoint. Each visible
  * character (including combining marks) occupies one cell. */
 struct cell {
@@ -86,8 +102,8 @@ struct cell {
 	uint32_t codepoint;
 };
 
-/* A single line of text, stored as an array of cells. The cell architecture
- * simplifies cursor positioning since column index equals cell index. */
+/* A single line of text. Cold lines reference mmap content directly.
+ * Warm/hot lines have cells allocated. */
 struct line {
 	/* Dynamic array of cells containing the line's characters. */
 	struct cell *cells;
@@ -97,10 +113,19 @@ struct line {
 
 	/* Allocated capacity of the cells array. */
 	uint32_t cell_capacity;
+
+	/* Byte offset into mmap where this line's content starts. */
+	size_t mmap_offset;
+
+	/* Byte length of line content in mmap (excluding newline). */
+	uint32_t mmap_length;
+
+	/* Temperature indicates whether cells are allocated/edited. */
+	enum line_temperature temperature;
 };
 
 /* The text buffer holding all lines of the file being edited. Manages
- * file I/O and tracks modification state. */
+ * file I/O, mmap backing, and tracks modification state. */
 struct buffer {
 	/* Dynamic array of lines in the buffer. */
 	struct line *lines;
@@ -116,6 +141,15 @@ struct buffer {
 
 	/* True if the buffer has unsaved changes. */
 	bool is_modified;
+
+	/* File descriptor for mmap, or -1 if no file mapped. */
+	int file_descriptor;
+
+	/* Base pointer to memory-mapped file content. */
+	char *mmap_base;
+
+	/* Size of the memory-mapped region in bytes. */
+	size_t mmap_size;
 };
 
 /* Accumulates output bytes before flushing to the terminal. Batching
@@ -416,12 +450,16 @@ static int input_read_key(void)
  * Line Operations
  *****************************************************************************/
 
-/* Initializes a line with empty cell array. */
+/* Initializes a line as hot with empty cell array. New lines start hot
+ * since they have no mmap backing. */
 static void line_init(struct line *line)
 {
 	line->cells = NULL;
 	line->cell_count = 0;
 	line->cell_capacity = 0;
+	line->mmap_offset = 0;
+	line->mmap_length = 0;
+	line->temperature = LINE_TEMPERATURE_HOT;
 }
 
 /* Frees all memory associated with a line and resets its fields. */
@@ -431,6 +469,9 @@ static void line_free(struct line *line)
 	line->cells = NULL;
 	line->cell_count = 0;
 	line->cell_capacity = 0;
+	line->mmap_offset = 0;
+	line->mmap_length = 0;
+	line->temperature = LINE_TEMPERATURE_COLD;
 }
 
 /* Ensures the line can hold at least 'required' cells, reallocating if needed. */
@@ -489,12 +530,65 @@ static void line_append_cell(struct line *line, uint32_t codepoint)
 	line_insert_cell(line, line->cell_count, codepoint);
 }
 
-/* Appends all cells from src line to the end of dest line. */
+/* Appends all cells from src line to the end of dest line. Both lines
+ * must already be warm or hot. */
 static void line_append_cells_from_line(struct line *dest, struct line *src)
 {
 	for (uint32_t i = 0; i < src->cell_count; i++) {
 		line_append_cell(dest, src->cells[i].codepoint);
 	}
+}
+
+/*
+ * Warms a cold line by decoding its UTF-8 content from mmap into cells.
+ * Does nothing if the line is already warm or hot. After warming, the
+ * line's cells array contains the decoded codepoints.
+ */
+static void line_warm(struct line *line, struct buffer *buffer)
+{
+	if (line->temperature != LINE_TEMPERATURE_COLD) {
+		return;
+	}
+
+	const char *text = buffer->mmap_base + line->mmap_offset;
+	size_t length = line->mmap_length;
+
+	/* Decode UTF-8 to cells */
+	size_t offset = 0;
+	while (offset < length) {
+		uint32_t codepoint;
+		int bytes = utflite_decode(text + offset, length - offset, &codepoint);
+		line_append_cell(line, codepoint);
+		offset += bytes;
+	}
+
+	line->temperature = LINE_TEMPERATURE_WARM;
+}
+
+/*
+ * Get the cell count for a line. For cold lines, counts codepoints without
+ * allocating cells. For warm/hot lines, returns the stored count.
+ */
+static uint32_t line_get_cell_count(struct line *line, struct buffer *buffer)
+{
+	if (line->temperature == LINE_TEMPERATURE_COLD) {
+		/* Count codepoints without allocating cells */
+		const char *text = buffer->mmap_base + line->mmap_offset;
+		size_t length = line->mmap_length;
+		uint32_t count = 0;
+		size_t offset = 0;
+
+		while (offset < length) {
+			uint32_t codepoint;
+			int bytes = utflite_decode(text + offset, length - offset, &codepoint);
+			count++;
+			offset += bytes;
+		}
+
+		return count;
+	}
+
+	return line->cell_count;
 }
 
 /*****************************************************************************
@@ -519,9 +613,11 @@ static bool codepoint_is_combining_mark(uint32_t codepoint)
 }
 
 /* Moves the cursor left to the start of the previous grapheme cluster,
- * skipping over any combining marks. Returns the new column position. */
-static uint32_t cursor_prev_grapheme(struct line *line, uint32_t column)
+ * skipping over any combining marks. Warms the line if cold. */
+static uint32_t cursor_prev_grapheme(struct line *line, struct buffer *buffer, uint32_t column)
 {
+	line_warm(line, buffer);
+
 	if (column == 0 || line->cell_count == 0) {
 		return 0;
 	}
@@ -535,9 +631,11 @@ static uint32_t cursor_prev_grapheme(struct line *line, uint32_t column)
 }
 
 /* Moves the cursor right to the start of the next grapheme cluster,
- * skipping over any combining marks. Returns the new column position. */
-static uint32_t cursor_next_grapheme(struct line *line, uint32_t column)
+ * skipping over any combining marks. Warms the line if cold. */
+static uint32_t cursor_next_grapheme(struct line *line, struct buffer *buffer, uint32_t column)
 {
+	line_warm(line, buffer);
+
 	if (column >= line->cell_count) {
 		return line->cell_count;
 	}
@@ -562,9 +660,13 @@ static void buffer_init(struct buffer *buffer)
 	buffer->line_capacity = INITIAL_BUFFER_CAPACITY;
 	buffer->filename = NULL;
 	buffer->is_modified = false;
+	buffer->file_descriptor = -1;
+	buffer->mmap_base = NULL;
+	buffer->mmap_size = 0;
 }
 
-/* Frees all lines and memory associated with the buffer. */
+/* Frees all lines and memory associated with the buffer, including
+ * unmapping any memory-mapped file. */
 static void buffer_free(struct buffer *buffer)
 {
 	for (uint32_t index = 0; index < buffer->line_count; index++) {
@@ -572,10 +674,22 @@ static void buffer_free(struct buffer *buffer)
 	}
 	free(buffer->lines);
 	free(buffer->filename);
+
+	/* Unmap file if mapped */
+	if (buffer->mmap_base != NULL) {
+		munmap(buffer->mmap_base, buffer->mmap_size);
+	}
+	if (buffer->file_descriptor >= 0) {
+		close(buffer->file_descriptor);
+	}
+
 	buffer->lines = NULL;
 	buffer->filename = NULL;
 	buffer->line_count = 0;
 	buffer->line_capacity = 0;
+	buffer->file_descriptor = -1;
+	buffer->mmap_base = NULL;
+	buffer->mmap_size = 0;
 }
 
 /* Ensures the buffer can hold at least 'required' lines. */
@@ -610,36 +724,6 @@ static void buffer_insert_empty_line(struct buffer *buffer, uint32_t position)
 	buffer->is_modified = true;
 }
 
-/* Inserts a new line from UTF-8 text, decoding it into cells. */
-static void buffer_insert_line_from_utf8(struct buffer *buffer, uint32_t position,
-                                         const char *text, size_t length)
-{
-	if (position > buffer->line_count) {
-		position = buffer->line_count;
-	}
-
-	buffer_ensure_capacity(buffer, buffer->line_count + 1);
-
-	if (position < buffer->line_count) {
-		memmove(&buffer->lines[position + 1], &buffer->lines[position],
-		        (buffer->line_count - position) * sizeof(struct line));
-	}
-
-	line_init(&buffer->lines[position]);
-
-	/* Decode UTF-8 text into cells */
-	size_t offset = 0;
-	while (offset < length) {
-		uint32_t codepoint;
-		int bytes = utflite_decode(text + offset, length - offset, &codepoint);
-		line_append_cell(&buffer->lines[position], codepoint);
-		offset += bytes;
-	}
-
-	buffer->line_count++;
-	buffer->is_modified = true;
-}
-
 /* Deletes the line at the specified position, freeing its memory. */
 static void buffer_delete_line(struct buffer *buffer, uint32_t position)
 {
@@ -658,7 +742,8 @@ static void buffer_delete_line(struct buffer *buffer, uint32_t position)
 	buffer->is_modified = true;
 }
 
-/* Inserts a single codepoint at the specified row and column. */
+/* Inserts a single codepoint at the specified row and column. Warms the
+ * line if cold and marks it as hot since content is being modified. */
 static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, uint32_t column,
                                          uint32_t codepoint)
 {
@@ -671,12 +756,14 @@ static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, ui
 	}
 
 	struct line *line = &buffer->lines[row];
+	line_warm(line, buffer);
 	line_insert_cell(line, column, codepoint);
+	line->temperature = LINE_TEMPERATURE_HOT;
 	buffer->is_modified = true;
 }
 
 /* Deletes the grapheme cluster at the specified position. If at end of line,
- * joins with the next line instead. */
+ * joins with the next line instead. Warms lines and marks as hot. */
 static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row, uint32_t column)
 {
 	if (row >= buffer->line_count) {
@@ -684,19 +771,23 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 	}
 
 	struct line *line = &buffer->lines[row];
+	line_warm(line, buffer);
 
 	if (column < line->cell_count) {
 		/* Find the end of this grapheme (skip over combining marks) */
-		uint32_t end = cursor_next_grapheme(line, column);
+		uint32_t end = cursor_next_grapheme(line, buffer, column);
 		/* Delete cells from end backwards */
 		for (uint32_t i = end; i > column; i--) {
 			line_delete_cell(line, column);
 		}
+		line->temperature = LINE_TEMPERATURE_HOT;
 		buffer->is_modified = true;
 	} else if (row + 1 < buffer->line_count) {
 		/* Join with next line */
 		struct line *next_line = &buffer->lines[row + 1];
+		line_warm(next_line, buffer);
 		line_append_cells_from_line(line, next_line);
+		line->temperature = LINE_TEMPERATURE_HOT;
 		buffer_delete_line(buffer, row + 1);
 	}
 }
@@ -705,7 +796,7 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
  * Split a line at the given column position, creating a new line.
  * The portion of the line after the cursor moves to the new line below.
  * If cursor is at end of line, creates an empty line. If row equals
- * line_count, appends a new empty line at the end.
+ * line_count, appends a new empty line at the end. Warms line and marks hot.
  */
 static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t column)
 {
@@ -719,6 +810,7 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 	}
 
 	struct line *line = &buffer->lines[row];
+	line_warm(line, buffer);
 
 	if (column >= line->cell_count) {
 		buffer_insert_empty_line(buffer, row + 1);
@@ -733,6 +825,7 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 
 		/* Truncate original line */
 		line->cell_count = column;
+		line->temperature = LINE_TEMPERATURE_HOT;
 	}
 }
 
@@ -744,32 +837,83 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 static void editor_set_status_message(const char *format, ...);
 
 /*
- * Load a file from disk into a buffer. Reads the file line by line,
- * decoding UTF-8 into cells. Strips trailing newlines and carriage returns.
- * Sets the buffer's filename and marks it as unmodified. Returns true on
- * success, false if the file couldn't be opened.
+ * Build the line index by scanning the mmap for newlines. Each line is
+ * created as cold with just offset and length - no cells allocated.
+ */
+static void file_build_line_index(struct buffer *buffer)
+{
+	if (buffer->mmap_size == 0) {
+		/* Empty file - no lines to index */
+		return;
+	}
+
+	size_t line_start = 0;
+
+	for (size_t i = 0; i <= buffer->mmap_size; i++) {
+		bool is_newline = (i < buffer->mmap_size && buffer->mmap_base[i] == '\n');
+		bool is_eof = (i == buffer->mmap_size);
+
+		if (is_newline || is_eof) {
+			/* Found end of line - strip trailing CR if present */
+			size_t line_end = i;
+			if (line_end > line_start && buffer->mmap_base[line_end - 1] == '\r') {
+				line_end--;
+			}
+
+			buffer_ensure_capacity(buffer, buffer->line_count + 1);
+
+			struct line *line = &buffer->lines[buffer->line_count];
+			line->cells = NULL;
+			line->cell_count = 0;
+			line->cell_capacity = 0;
+			line->mmap_offset = line_start;
+			line->mmap_length = line_end - line_start;
+			line->temperature = LINE_TEMPERATURE_COLD;
+
+			buffer->line_count++;
+			line_start = i + 1;
+		}
+	}
+}
+
+/*
+ * Load a file from disk into a buffer using mmap. The file is memory-mapped
+ * and lines are created as cold references into the mmap. Only lines that
+ * are accessed will have cells allocated. Returns true on success, false
+ * if the file couldn't be opened.
  */
 static bool file_open(struct buffer *buffer, const char *filename)
 {
-	FILE *file = fopen(filename, "r");
-	if (file == NULL) {
+	int fd = open(filename, O_RDONLY);
+	if (fd < 0) {
 		return false;
 	}
 
-	char *line_buffer = NULL;
-	size_t line_buffer_capacity = 0;
-	ssize_t line_length;
-
-	while ((line_length = getline(&line_buffer, &line_buffer_capacity, file)) != -1) {
-		/* Strip trailing newline and carriage return */
-		while (line_length > 0 && (line_buffer[line_length - 1] == '\n' || line_buffer[line_length - 1] == '\r')) {
-			line_length--;
-		}
-		buffer_insert_line_from_utf8(buffer, buffer->line_count, line_buffer, line_length);
+	struct stat st;
+	if (fstat(fd, &st) < 0) {
+		close(fd);
+		return false;
 	}
 
-	free(line_buffer);
-	fclose(file);
+	size_t file_size = st.st_size;
+	char *mapped = NULL;
+
+	if (file_size > 0) {
+		mapped = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+		if (mapped == MAP_FAILED) {
+			close(fd);
+			return false;
+		}
+		/* Hint: we'll access this randomly as user scrolls */
+		madvise(mapped, file_size, MADV_RANDOM);
+	}
+
+	buffer->file_descriptor = fd;
+	buffer->mmap_base = mapped;
+	buffer->mmap_size = file_size;
+
+	/* Build line index by scanning for newlines */
+	file_build_line_index(buffer);
 
 	buffer->filename = strdup(filename);
 	buffer->is_modified = false;
@@ -778,15 +922,31 @@ static bool file_open(struct buffer *buffer, const char *filename)
 }
 
 /*
- * Write a buffer's contents to disk. Encodes each cell's codepoint back
- * to UTF-8 and writes with newlines between lines. Updates the status
- * message with bytes written. Returns true on success, false if no
- * filename is set or the file couldn't be opened.
+ * Write a buffer's contents to disk. All lines are warmed first since
+ * opening the file for writing will invalidate any mmap. The mmap is
+ * then unmapped before writing. Updates the status message with bytes
+ * written. Returns true on success, false if save fails.
  */
 static bool file_save(struct buffer *buffer)
 {
 	if (buffer->filename == NULL) {
 		return false;
+	}
+
+	/* Warm all cold lines before we invalidate the mmap */
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		line_warm(&buffer->lines[row], buffer);
+	}
+
+	/* Unmap file before overwriting - opening with "w" truncates it */
+	if (buffer->mmap_base != NULL) {
+		munmap(buffer->mmap_base, buffer->mmap_size);
+		buffer->mmap_base = NULL;
+		buffer->mmap_size = 0;
+	}
+	if (buffer->file_descriptor >= 0) {
+		close(buffer->file_descriptor);
+		buffer->file_descriptor = -1;
 	}
 
 	FILE *file = fopen(buffer->filename, "w");
@@ -799,6 +959,7 @@ static bool file_save(struct buffer *buffer)
 	for (uint32_t row = 0; row < buffer->line_count; row++) {
 		struct line *line = &buffer->lines[row];
 
+		/* All lines are warm/hot now - write from cells */
 		for (uint32_t col = 0; col < line->cell_count; col++) {
 			char utf8_buffer[UTFLITE_MAX_BYTES];
 			int bytes = utflite_encode(line->cells[col].codepoint, utf8_buffer);
@@ -906,22 +1067,21 @@ static void editor_set_status_message(const char *format, ...)
 
 /*
  * Return the number of cells in a line. This is the logical length used
- * for cursor positioning, not the rendered width. Returns 0 for invalid
- * row numbers.
+ * for cursor positioning, not the rendered width. For cold lines, counts
+ * codepoints without allocating cells. Returns 0 for invalid row numbers.
  */
 static uint32_t editor_get_line_length(uint32_t row)
 {
 	if (row >= editor.buffer.line_count) {
 		return 0;
 	}
-	return editor.buffer.lines[row].cell_count;
+	return line_get_cell_count(&editor.buffer.lines[row], &editor.buffer);
 }
 
 /*
  * Convert a cell column position to a rendered screen column. Accounts
  * for tab expansion and character display widths (CJK characters take 2
- * columns, combining marks take 0). Used for horizontal scrolling and
- * cursor positioning.
+ * columns, combining marks take 0). Warms the line to access cells.
  */
 static uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 {
@@ -930,6 +1090,7 @@ static uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 	}
 
 	struct line *line = &editor.buffer.lines[row];
+	line_warm(line, &editor.buffer);
 	uint32_t render_column = 0;
 
 	for (uint32_t i = 0; i < column && i < line->cell_count; i++) {
@@ -992,7 +1153,7 @@ static void editor_move_cursor(int key)
 	switch (key) {
 		case KEY_ARROW_LEFT:
 			if (editor.cursor_column > 0 && current_line) {
-				editor.cursor_column = cursor_prev_grapheme(current_line, editor.cursor_column);
+				editor.cursor_column = cursor_prev_grapheme(current_line, &editor.buffer, editor.cursor_column);
 			} else if (editor.cursor_row > 0) {
 				editor.cursor_row--;
 				editor.cursor_column = editor_get_line_length(editor.cursor_row);
@@ -1001,7 +1162,7 @@ static void editor_move_cursor(int key)
 
 		case KEY_ARROW_RIGHT:
 			if (editor.cursor_column < line_length && current_line) {
-				editor.cursor_column = cursor_next_grapheme(current_line, editor.cursor_column);
+				editor.cursor_column = cursor_next_grapheme(current_line, &editor.buffer, editor.cursor_column);
 			} else if (editor.cursor_row < editor.buffer.line_count - 1) {
 				editor.cursor_row++;
 				editor.cursor_column = 0;
@@ -1105,7 +1266,7 @@ static void editor_handle_backspace(void)
 
 	if (editor.cursor_column > 0) {
 		struct line *line = &editor.buffer.lines[editor.cursor_row];
-		uint32_t new_column = cursor_prev_grapheme(line, editor.cursor_column);
+		uint32_t new_column = cursor_prev_grapheme(line, &editor.buffer, editor.cursor_column);
 		editor.cursor_column = new_column;
 		buffer_delete_grapheme_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column);
 	} else {
@@ -1113,7 +1274,10 @@ static void editor_handle_backspace(void)
 		uint32_t previous_line_length = editor_get_line_length(editor.cursor_row - 1);
 		struct line *previous_line = &editor.buffer.lines[editor.cursor_row - 1];
 		struct line *current_line = &editor.buffer.lines[editor.cursor_row];
+		line_warm(previous_line, &editor.buffer);
+		line_warm(current_line, &editor.buffer);
 		line_append_cells_from_line(previous_line, current_line);
+		previous_line->temperature = LINE_TEMPERATURE_HOT;
 		buffer_delete_line(&editor.buffer, editor.cursor_row);
 		editor.cursor_row--;
 		editor.cursor_column = previous_line_length;
@@ -1146,14 +1310,16 @@ static void editor_save(void)
  *****************************************************************************/
 
 /*
- * Render a single line's content to the output buffer. Handles horizontal
- * scrolling by skipping to column_offset, expands tabs to spaces, and
- * encodes each cell's codepoint to UTF-8. Wide characters that don't fit
- * are replaced with spaces. Limits output to max_width columns.
+ * Render a single line's content to the output buffer. Warms the line if
+ * cold. Handles horizontal scrolling by skipping to column_offset, expands
+ * tabs to spaces, and encodes each cell's codepoint to UTF-8. Wide
+ * characters that don't fit are replaced with spaces.
  */
 static void render_line_content(struct output_buffer *output, struct line *line,
-                                uint32_t column_offset, int max_width)
+                                struct buffer *buffer, uint32_t column_offset, int max_width)
 {
+	line_warm(line, buffer);
+
 	int visual_column = 0;
 	uint32_t cell_index = 0;
 
@@ -1275,7 +1441,7 @@ static void render_draw_rows(struct output_buffer *output)
 			if (file_row < editor.buffer.line_count) {
 				struct line *line = &editor.buffer.lines[file_row];
 				int text_area_width = editor.screen_columns - editor.gutter_width;
-				render_line_content(output, line, editor.column_offset, text_area_width);
+				render_line_content(output, line, &editor.buffer, editor.column_offset, text_area_width);
 			}
 		}
 
