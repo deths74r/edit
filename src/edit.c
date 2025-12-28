@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 2: UTF-8 Support
+ * Phase 3: Cell Architecture
  *****************************************************************************/
 
 /*****************************************************************************
@@ -29,7 +29,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Editor constants */
-#define EDIT_VERSION "0.2.0"
+#define EDIT_VERSION "0.3.0"
 #define TAB_STOP_WIDTH 8
 #define QUIT_CONFIRM_COUNT 3
 #define STATUS_MESSAGE_TIMEOUT 5
@@ -61,10 +61,14 @@ enum key_code {
 	KEY_F2 = -91
 };
 
+struct cell {
+	uint32_t codepoint;
+};
+
 struct line {
-	char *characters;
-	size_t length;
-	size_t capacity;
+	struct cell *cells;
+	uint32_t cell_count;
+	uint32_t cell_capacity;
 };
 
 struct buffer {
@@ -320,99 +324,122 @@ static int input_read_key(void)
 
 static void line_init(struct line *line)
 {
-	line->characters = malloc(INITIAL_LINE_CAPACITY);
-	line->characters[0] = '\0';
-	line->length = 0;
-	line->capacity = INITIAL_LINE_CAPACITY;
+	line->cells = NULL;
+	line->cell_count = 0;
+	line->cell_capacity = 0;
 }
 
 static void line_free(struct line *line)
 {
-	free(line->characters);
-	line->characters = NULL;
-	line->length = 0;
-	line->capacity = 0;
+	free(line->cells);
+	line->cells = NULL;
+	line->cell_count = 0;
+	line->cell_capacity = 0;
 }
 
-static void line_ensure_capacity(struct line *line, size_t required)
+static void line_ensure_capacity(struct line *line, uint32_t required)
 {
-	if (required > line->capacity) {
-		size_t new_capacity = line->capacity * 2;
-		while (new_capacity < required) {
-			new_capacity *= 2;
-		}
-		line->characters = realloc(line->characters, new_capacity);
-		line->capacity = new_capacity;
-	}
-}
-
-static void line_insert_bytes(struct line *line, size_t position, const char *bytes, size_t byte_count)
-{
-	if (position > line->length) {
-		position = line->length;
-	}
-
-	line_ensure_capacity(line, line->length + byte_count + 1);
-	memmove(line->characters + position + byte_count, line->characters + position,
-	        line->length - position + 1);
-	memcpy(line->characters + position, bytes, byte_count);
-	line->length += byte_count;
-}
-
-static void line_delete_bytes(struct line *line, size_t position, size_t byte_count)
-{
-	if (position >= line->length) {
+	if (required <= line->cell_capacity) {
 		return;
 	}
-	if (position + byte_count > line->length) {
-		byte_count = line->length - position;
+
+	uint32_t new_capacity = line->cell_capacity ? line->cell_capacity * 2 : INITIAL_LINE_CAPACITY;
+	while (new_capacity < required) {
+		new_capacity *= 2;
 	}
 
-	memmove(line->characters + position, line->characters + position + byte_count,
-	        line->length - position - byte_count + 1);
-	line->length -= byte_count;
+	line->cells = realloc(line->cells, new_capacity * sizeof(struct cell));
+	line->cell_capacity = new_capacity;
 }
 
-static uint32_t line_get_grapheme_count(struct line *line)
+static void line_insert_cell(struct line *line, uint32_t position, uint32_t codepoint)
 {
-	uint32_t count = 0;
-	int offset = 0;
-
-	while (offset < (int)line->length) {
-		offset = utflite_next_grapheme(line->characters, line->length, offset);
-		count++;
+	if (position > line->cell_count) {
+		position = line->cell_count;
 	}
 
-	return count;
-}
+	line_ensure_capacity(line, line->cell_count + 1);
 
-static size_t line_column_to_byte_offset(struct line *line, uint32_t column)
-{
-	int offset = 0;
-	uint32_t current_column = 0;
-
-	while (offset < (int)line->length && current_column < column) {
-		offset = utflite_next_grapheme(line->characters, line->length, offset);
-		current_column++;
+	if (position < line->cell_count) {
+		memmove(&line->cells[position + 1], &line->cells[position],
+		        (line->cell_count - position) * sizeof(struct cell));
 	}
 
-	return (size_t)offset;
+	line->cells[position] = (struct cell){.codepoint = codepoint};
+	line->cell_count++;
 }
 
-static void line_append_string(struct line *line, const char *text, size_t length)
+static void line_delete_cell(struct line *line, uint32_t position)
 {
-	line_ensure_capacity(line, line->length + length + 1);
-	memcpy(line->characters + line->length, text, length);
-	line->length += length;
-	line->characters[line->length] = '\0';
+	if (position >= line->cell_count) {
+		return;
+	}
+
+	if (position < line->cell_count - 1) {
+		memmove(&line->cells[position], &line->cells[position + 1],
+		        (line->cell_count - position - 1) * sizeof(struct cell));
+	}
+
+	line->cell_count--;
 }
 
-static void line_set_content(struct line *line, const char *text, size_t length)
+static void line_append_cell(struct line *line, uint32_t codepoint)
 {
-	line_ensure_capacity(line, length + 1);
-	memcpy(line->characters, text, length);
-	line->length = length;
-	line->characters[length] = '\0';
+	line_insert_cell(line, line->cell_count, codepoint);
+}
+
+static void line_append_cells_from_line(struct line *dest, struct line *src)
+{
+	for (uint32_t i = 0; i < src->cell_count; i++) {
+		line_append_cell(dest, src->cells[i].codepoint);
+	}
+}
+
+/*****************************************************************************
+ * Grapheme Boundary Functions
+ *****************************************************************************/
+
+static bool codepoint_is_combining_mark(uint32_t codepoint)
+{
+	/* Combining Diacritical Marks: U+0300-U+036F */
+	if (codepoint >= 0x0300 && codepoint <= 0x036F) return true;
+	/* Combining Diacritical Marks Extended: U+1AB0-U+1AFF */
+	if (codepoint >= 0x1AB0 && codepoint <= 0x1AFF) return true;
+	/* Combining Diacritical Marks Supplement: U+1DC0-U+1DFF */
+	if (codepoint >= 0x1DC0 && codepoint <= 0x1DFF) return true;
+	/* Combining Diacritical Marks for Symbols: U+20D0-U+20FF */
+	if (codepoint >= 0x20D0 && codepoint <= 0x20FF) return true;
+	/* Combining Half Marks: U+FE20-U+FE2F */
+	if (codepoint >= 0xFE20 && codepoint <= 0xFE2F) return true;
+	return false;
+}
+
+static uint32_t cursor_prev_grapheme(struct line *line, uint32_t column)
+{
+	if (column == 0 || line->cell_count == 0) {
+		return 0;
+	}
+
+	column--;
+	while (column > 0 && codepoint_is_combining_mark(line->cells[column].codepoint)) {
+		column--;
+	}
+
+	return column;
+}
+
+static uint32_t cursor_next_grapheme(struct line *line, uint32_t column)
+{
+	if (column >= line->cell_count) {
+		return line->cell_count;
+	}
+
+	column++;
+	while (column < line->cell_count && codepoint_is_combining_mark(line->cells[column].codepoint)) {
+		column++;
+	}
+
+	return column;
 }
 
 /*****************************************************************************
@@ -453,7 +480,7 @@ static void buffer_ensure_capacity(struct buffer *buffer, uint32_t required)
 	}
 }
 
-static void buffer_insert_line(struct buffer *buffer, uint32_t position, const char *text, size_t length)
+static void buffer_insert_empty_line(struct buffer *buffer, uint32_t position)
 {
 	if (position > buffer->line_count) {
 		position = buffer->line_count;
@@ -467,7 +494,35 @@ static void buffer_insert_line(struct buffer *buffer, uint32_t position, const c
 	}
 
 	line_init(&buffer->lines[position]);
-	line_set_content(&buffer->lines[position], text, length);
+	buffer->line_count++;
+	buffer->is_modified = true;
+}
+
+static void buffer_insert_line_from_utf8(struct buffer *buffer, uint32_t position,
+                                         const char *text, size_t length)
+{
+	if (position > buffer->line_count) {
+		position = buffer->line_count;
+	}
+
+	buffer_ensure_capacity(buffer, buffer->line_count + 1);
+
+	if (position < buffer->line_count) {
+		memmove(&buffer->lines[position + 1], &buffer->lines[position],
+		        (buffer->line_count - position) * sizeof(struct line));
+	}
+
+	line_init(&buffer->lines[position]);
+
+	/* Decode UTF-8 text into cells */
+	size_t offset = 0;
+	while (offset < length) {
+		uint32_t codepoint;
+		int bytes = utflite_decode(text + offset, length - offset, &codepoint);
+		line_append_cell(&buffer->lines[position], codepoint);
+		offset += bytes;
+	}
+
 	buffer->line_count++;
 	buffer->is_modified = true;
 }
@@ -489,20 +544,19 @@ static void buffer_delete_line(struct buffer *buffer, uint32_t position)
 	buffer->is_modified = true;
 }
 
-static void buffer_insert_bytes_at_column(struct buffer *buffer, uint32_t row, uint32_t column,
-                                          const char *bytes, size_t byte_count)
+static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, uint32_t column,
+                                         uint32_t codepoint)
 {
 	if (row > buffer->line_count) {
 		row = buffer->line_count;
 	}
 
 	if (row == buffer->line_count) {
-		buffer_insert_line(buffer, buffer->line_count, "", 0);
+		buffer_insert_empty_line(buffer, buffer->line_count);
 	}
 
 	struct line *line = &buffer->lines[row];
-	size_t byte_offset = line_column_to_byte_offset(line, column);
-	line_insert_bytes(line, byte_offset, bytes, byte_count);
+	line_insert_cell(line, column, codepoint);
 	buffer->is_modified = true;
 }
 
@@ -513,18 +567,19 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 	}
 
 	struct line *line = &buffer->lines[row];
-	uint32_t grapheme_count = line_get_grapheme_count(line);
 
-	if (column < grapheme_count) {
-		/* Find byte range of the grapheme at this column */
-		size_t start_offset = line_column_to_byte_offset(line, column);
-		size_t end_offset = line_column_to_byte_offset(line, column + 1);
-		line_delete_bytes(line, start_offset, end_offset - start_offset);
+	if (column < line->cell_count) {
+		/* Find the end of this grapheme (skip over combining marks) */
+		uint32_t end = cursor_next_grapheme(line, column);
+		/* Delete cells from end backwards */
+		for (uint32_t i = end; i > column; i--) {
+			line_delete_cell(line, column);
+		}
 		buffer->is_modified = true;
 	} else if (row + 1 < buffer->line_count) {
 		/* Join with next line */
 		struct line *next_line = &buffer->lines[row + 1];
-		line_append_string(line, next_line->characters, next_line->length);
+		line_append_cells_from_line(line, next_line);
 		buffer_delete_line(buffer, row + 1);
 	}
 }
@@ -536,19 +591,25 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 	}
 
 	if (row == buffer->line_count) {
-		buffer_insert_line(buffer, buffer->line_count, "", 0);
+		buffer_insert_empty_line(buffer, buffer->line_count);
 		return;
 	}
 
 	struct line *line = &buffer->lines[row];
-	size_t byte_offset = line_column_to_byte_offset(line, column);
 
-	if (byte_offset >= line->length) {
-		buffer_insert_line(buffer, row + 1, "", 0);
+	if (column >= line->cell_count) {
+		buffer_insert_empty_line(buffer, row + 1);
 	} else {
-		buffer_insert_line(buffer, row + 1, line->characters + byte_offset, line->length - byte_offset);
-		line->length = byte_offset;
-		line->characters[byte_offset] = '\0';
+		/* Insert new line and copy cells after cursor */
+		buffer_insert_empty_line(buffer, row + 1);
+		struct line *new_line = &buffer->lines[row + 1];
+
+		for (uint32_t i = column; i < line->cell_count; i++) {
+			line_append_cell(new_line, line->cells[i].codepoint);
+		}
+
+		/* Truncate original line */
+		line->cell_count = column;
 	}
 }
 
@@ -574,7 +635,7 @@ static bool file_open(struct buffer *buffer, const char *filename)
 		while (line_length > 0 && (line_buffer[line_length - 1] == '\n' || line_buffer[line_length - 1] == '\r')) {
 			line_length--;
 		}
-		buffer_insert_line(buffer, buffer->line_count, line_buffer, line_length);
+		buffer_insert_line_from_utf8(buffer, buffer->line_count, line_buffer, line_length);
 	}
 
 	free(line_buffer);
@@ -599,11 +660,18 @@ static bool file_save(struct buffer *buffer)
 
 	size_t total_bytes = 0;
 
-	for (uint32_t index = 0; index < buffer->line_count; index++) {
-		struct line *line = &buffer->lines[index];
-		fwrite(line->characters, 1, line->length, file);
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		struct line *line = &buffer->lines[row];
+
+		for (uint32_t col = 0; col < line->cell_count; col++) {
+			char utf8_buffer[UTFLITE_MAX_BYTES];
+			int bytes = utflite_encode(line->cells[col].codepoint, utf8_buffer);
+			fwrite(utf8_buffer, 1, bytes, file);
+			total_bytes += bytes;
+		}
+
 		fwrite("\n", 1, 1, file);
-		total_bytes += line->length + 1;
+		total_bytes++;
 	}
 
 	fclose(file);
@@ -684,10 +752,10 @@ static uint32_t editor_get_line_length(uint32_t row)
 	if (row >= editor.buffer.line_count) {
 		return 0;
 	}
-	return line_get_grapheme_count(&editor.buffer.lines[row]);
+	return editor.buffer.lines[row].cell_count;
 }
 
-static uint32_t editor_get_render_column(uint32_t row, uint32_t grapheme_column)
+static uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 {
 	if (row >= editor.buffer.line_count) {
 		return 0;
@@ -695,13 +763,9 @@ static uint32_t editor_get_render_column(uint32_t row, uint32_t grapheme_column)
 
 	struct line *line = &editor.buffer.lines[row];
 	uint32_t render_column = 0;
-	int byte_offset = 0;
-	uint32_t current_grapheme = 0;
 
-	while (byte_offset < (int)line->length && current_grapheme < grapheme_column) {
-		uint32_t codepoint;
-		int bytes = utflite_decode(line->characters + byte_offset,
-		                           line->length - byte_offset, &codepoint);
+	for (uint32_t i = 0; i < column && i < line->cell_count; i++) {
+		uint32_t codepoint = line->cells[i].codepoint;
 
 		if (codepoint == '\t') {
 			render_column += TAB_STOP_WIDTH - (render_column % TAB_STOP_WIDTH);
@@ -712,12 +776,6 @@ static uint32_t editor_get_render_column(uint32_t row, uint32_t grapheme_column)
 			}
 			render_column += width;
 		}
-
-		/* Move to next grapheme */
-		byte_offset = utflite_next_grapheme(line->characters, line->length, byte_offset);
-		current_grapheme++;
-
-		(void)bytes;  /* Suppress unused warning */
 	}
 
 	return render_column;
@@ -748,11 +806,13 @@ static void editor_scroll(void)
 static void editor_move_cursor(int key)
 {
 	uint32_t line_length = editor_get_line_length(editor.cursor_row);
+	struct line *current_line = editor.cursor_row < editor.buffer.line_count
+	                            ? &editor.buffer.lines[editor.cursor_row] : NULL;
 
 	switch (key) {
 		case KEY_ARROW_LEFT:
-			if (editor.cursor_column > 0) {
-				editor.cursor_column--;
+			if (editor.cursor_column > 0 && current_line) {
+				editor.cursor_column = cursor_prev_grapheme(current_line, editor.cursor_column);
 			} else if (editor.cursor_row > 0) {
 				editor.cursor_row--;
 				editor.cursor_column = editor_get_line_length(editor.cursor_row);
@@ -760,8 +820,8 @@ static void editor_move_cursor(int key)
 			break;
 
 		case KEY_ARROW_RIGHT:
-			if (editor.cursor_column < line_length) {
-				editor.cursor_column++;
+			if (editor.cursor_column < line_length && current_line) {
+				editor.cursor_column = cursor_next_grapheme(current_line, editor.cursor_column);
 			} else if (editor.cursor_row < editor.buffer.line_count - 1) {
 				editor.cursor_row++;
 				editor.cursor_column = 0;
@@ -816,18 +876,7 @@ static void editor_move_cursor(int key)
 
 static void editor_insert_character(uint32_t codepoint)
 {
-	char utf8_buffer[UTFLITE_MAX_BYTES];
-	int byte_count = utflite_encode(codepoint, utf8_buffer);
-
-	if (byte_count == 0) {
-		return;  /* Invalid codepoint */
-	}
-
-	if (editor.cursor_row == editor.buffer.line_count) {
-		buffer_insert_line(&editor.buffer, editor.buffer.line_count, "", 0);
-	}
-	buffer_insert_bytes_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column,
-	                              utf8_buffer, byte_count);
+	buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
 	editor.cursor_column++;
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 }
@@ -857,14 +906,16 @@ static void editor_handle_backspace(void)
 	}
 
 	if (editor.cursor_column > 0) {
-		editor.cursor_column--;
+		struct line *line = &editor.buffer.lines[editor.cursor_row];
+		uint32_t new_column = cursor_prev_grapheme(line, editor.cursor_column);
+		editor.cursor_column = new_column;
 		buffer_delete_grapheme_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column);
 	} else {
 		/* Join with previous line */
 		uint32_t previous_line_length = editor_get_line_length(editor.cursor_row - 1);
 		struct line *previous_line = &editor.buffer.lines[editor.cursor_row - 1];
 		struct line *current_line = &editor.buffer.lines[editor.cursor_row];
-		line_append_string(previous_line, current_line->characters, current_line->length);
+		line_append_cells_from_line(previous_line, current_line);
 		buffer_delete_line(&editor.buffer, editor.cursor_row);
 		editor.cursor_row--;
 		editor.cursor_column = previous_line_length;
@@ -895,13 +946,11 @@ static void render_line_content(struct output_buffer *output, struct line *line,
                                 uint32_t column_offset, int max_width)
 {
 	int visual_column = 0;
-	int byte_index = 0;
+	uint32_t cell_index = 0;
 
 	/* Skip to column_offset (for horizontal scrolling) */
-	while (byte_index < (int)line->length && visual_column < (int)column_offset) {
-		uint32_t codepoint;
-		int bytes = utflite_decode(line->characters + byte_index,
-		                           line->length - byte_index, &codepoint);
+	while (cell_index < line->cell_count && visual_column < (int)column_offset) {
+		uint32_t codepoint = line->cells[cell_index].codepoint;
 
 		int width;
 		if (codepoint == '\t') {
@@ -914,15 +963,13 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		}
 
 		visual_column += width;
-		byte_index += bytes;
+		cell_index++;
 	}
 
 	/* Render visible content */
 	int rendered_width = 0;
-	while (byte_index < (int)line->length && rendered_width < max_width) {
-		uint32_t codepoint;
-		int bytes = utflite_decode(line->characters + byte_index,
-		                           line->length - byte_index, &codepoint);
+	while (cell_index < line->cell_count && rendered_width < max_width) {
+		uint32_t codepoint = line->cells[cell_index].codepoint;
 
 		int width;
 		if (codepoint == '\t') {
@@ -940,7 +987,9 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 
 			/* Only render if we have room for the full character width */
 			if (rendered_width + width <= max_width) {
-				output_buffer_append(output, line->characters + byte_index, bytes);
+				char utf8_buffer[UTFLITE_MAX_BYTES];
+				int bytes = utflite_encode(codepoint, utf8_buffer);
+				output_buffer_append(output, utf8_buffer, bytes);
 				rendered_width += width;
 			} else {
 				/* Not enough room for wide character, fill with spaces */
@@ -952,7 +1001,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		}
 
 		visual_column += width;
-		byte_index += bytes;
+		cell_index++;
 	}
 }
 
