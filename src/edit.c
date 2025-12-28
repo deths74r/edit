@@ -535,15 +535,15 @@ static uint32_t find_next_word_start(struct line *line, uint32_t column)
 		return line->cell_count;
 	}
 
-	/* Skip current word */
-	while (column < line->cell_count &&
-	       neighbor_get_class(line->cells[column].neighbor) != CHAR_CLASS_WHITESPACE) {
-		column++;
-	}
+	/* Move past current position */
+	column++;
 
-	/* Skip whitespace */
-	while (column < line->cell_count &&
-	       neighbor_get_class(line->cells[column].neighbor) == CHAR_CLASS_WHITESPACE) {
+	/* Skip until we find a non-whitespace word start */
+	while (column < line->cell_count) {
+		if (neighbor_get_class(line->cells[column].neighbor) != CHAR_CLASS_WHITESPACE &&
+		    cell_is_word_start(&line->cells[column])) {
+			break;
+		}
 		column++;
 	}
 

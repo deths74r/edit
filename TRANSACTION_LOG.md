@@ -111,7 +111,13 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - Ctrl+Left at column 0 now jumps to end of previous line
 - Ctrl+Right at end of line now jumps to start of next line
 
-**Status**: Phase 6 complete with line-wrapping word movement
+**Action [User]**: Asked about Ctrl+Left/Right asymmetry, requested fix
+
+**Action [Claude]**: Fixed `find_next_word_start` to use token boundaries like `find_prev_word_start`:
+- Now both directions stop at punctuation, brackets, word starts
+- Example: `hello, world` → stops at `hello`, `,`, `world` in both directions
+
+**Status**: Phase 6 complete with symmetric word movement
 
 ---
 
