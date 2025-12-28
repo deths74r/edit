@@ -105,7 +105,13 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Action [Claude]**: Added `__attribute__((unused))` to `cell_is_word_end` function
 
-**Status**: Phase 6 complete and merged, build clean
+**Action [User]**: Requested Ctrl+Arrow word movement to wrap across lines
+
+**Action [Claude]**: Modified KEY_CTRL_ARROW_LEFT and KEY_CTRL_ARROW_RIGHT handlers:
+- Ctrl+Left at column 0 now jumps to end of previous line
+- Ctrl+Right at end of line now jumps to start of next line
+
+**Status**: Phase 6 complete with line-wrapping word movement
 
 ---
 

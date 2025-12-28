@@ -2118,16 +2118,33 @@ static void editor_move_cursor(int key)
 		case KEY_CTRL_ARROW_LEFT:
 			if (current_line) {
 				line_warm(current_line, &editor.buffer);
+				uint32_t old_col = editor.cursor_column;
 				editor.cursor_column = find_prev_word_start(current_line,
 					editor.cursor_column);
+				/* If stuck at start of line, wrap to previous line */
+				if (editor.cursor_column == 0 && old_col == 0 &&
+				    editor.cursor_row > 0) {
+					editor.cursor_row--;
+					struct line *prev = &editor.buffer.lines[editor.cursor_row];
+					line_warm(prev, &editor.buffer);
+					editor.cursor_column = prev->cell_count;
+				}
 			}
 			break;
 
 		case KEY_CTRL_ARROW_RIGHT:
 			if (current_line) {
 				line_warm(current_line, &editor.buffer);
+				uint32_t old_col = editor.cursor_column;
+				uint32_t len = current_line->cell_count;
 				editor.cursor_column = find_next_word_start(current_line,
 					editor.cursor_column);
+				/* If stuck at end of line, wrap to next line */
+				if (editor.cursor_column == len && old_col == len &&
+				    editor.cursor_row < editor.buffer.line_count - 1) {
+					editor.cursor_row++;
+					editor.cursor_column = 0;
+				}
 			}
 			break;
 
