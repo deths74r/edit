@@ -101,7 +101,11 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Action [Claude]**: Merged `neighbor-pair-entanglement` to `main` (fast-forward)
 
-**Status**: Phase 6 complete and merged
+**Action [User]**: Requested fix for unused function warning
+
+**Action [Claude]**: Added `__attribute__((unused))` to `cell_is_word_end` function
+
+**Status**: Phase 6 complete and merged, build clean
 
 ---
 

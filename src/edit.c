@@ -497,7 +497,8 @@ static bool cell_is_word_start(struct cell *cell)
 	return pos == TOKEN_POSITION_START || pos == TOKEN_POSITION_SOLO;
 }
 
-/* Is this cell at the end of a word? */
+/* Is this cell at the end of a word? (Reserved for double-click selection) */
+__attribute__((unused))
 static bool cell_is_word_end(struct cell *cell)
 {
 	enum token_position pos = neighbor_get_position(cell->neighbor);
