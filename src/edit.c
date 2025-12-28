@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 7: Selection
+ * Phase 8: Adaptive Scroll Speed
  *****************************************************************************/
 
 /*****************************************************************************
@@ -32,7 +32,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.7.0"
+#define EDIT_VERSION "0.8.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -42,6 +42,14 @@
 
 /* Seconds before status bar message disappears. */
 #define STATUS_MESSAGE_TIMEOUT 5
+
+/* Adaptive scroll configuration */
+#define SCROLL_VELOCITY_DECAY 0.7       /* Exponential smoothing factor (0-1) */
+#define SCROLL_MIN_LINES 1              /* Minimum lines to scroll */
+#define SCROLL_MAX_LINES 20             /* Maximum lines to scroll */
+#define SCROLL_VELOCITY_SLOW 4.0        /* Events/sec threshold for min scroll */
+#define SCROLL_VELOCITY_FAST 18.0       /* Events/sec threshold for max scroll */
+#define SCROLL_VELOCITY_TIMEOUT 0.4     /* Seconds of inactivity before velocity resets */
 
 /* Converts a letter to its Ctrl+key equivalent (e.g., 'q' -> Ctrl-Q). */
 #define CONTROL_KEY(k) ((k) & 0x1f)
@@ -398,6 +406,11 @@ static time_t last_click_time = 0;
 static uint32_t last_click_row = 0;
 static uint32_t last_click_col = 0;
 static int click_count = 0;
+
+/* Scroll velocity tracking for adaptive scroll speed. */
+static struct timespec last_scroll_time = {0, 0};
+static double scroll_velocity = 0.0;
+static int last_scroll_direction = 0;  /* -1 = up, 1 = down, 0 = none */
 
 /* Forward declarations for functions used in input_read_key. */
 static struct mouse_input input_parse_sgr_mouse(void);
@@ -2248,12 +2261,14 @@ static uint32_t editor_get_render_column(uint32_t row, uint32_t column)
  */
 static void editor_scroll(void)
 {
-	/* Vertical scrolling */
-	if (editor.cursor_row < editor.row_offset) {
-		editor.row_offset = editor.cursor_row;
-	}
-	if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
-		editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+	/* Vertical scrolling (skip if selection active - allow cursor off-screen) */
+	if (!editor.selection_active) {
+		if (editor.cursor_row < editor.row_offset) {
+			editor.row_offset = editor.cursor_row;
+		}
+		if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
+			editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+		}
 	}
 
 	/* Horizontal scrolling - use render column to account for tabs */
@@ -2793,6 +2808,74 @@ static struct mouse_input input_parse_sgr_mouse(void)
 }
 
 /*
+ * Calculate adaptive scroll amount based on scroll velocity.
+ * Tracks time between scroll events and uses exponential smoothing
+ * to determine if user is scrolling slowly (precision) or quickly
+ * (navigation). Returns number of lines to scroll.
+ *
+ * The algorithm:
+ * 1. Measure time since last scroll event
+ * 2. Calculate instantaneous velocity (events per second)
+ * 3. Apply exponential moving average for smoothing
+ * 4. Map velocity to scroll amount via linear interpolation
+ * 5. Reset on direction change or timeout
+ */
+static uint32_t calculate_adaptive_scroll(int direction)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* Calculate time delta in seconds */
+	double dt = (double)(now.tv_sec - last_scroll_time.tv_sec) +
+	            (double)(now.tv_nsec - last_scroll_time.tv_nsec) / 1.0e9;
+
+	/* Check if this is the first scroll (timestamp was never set) */
+	bool first_scroll = (last_scroll_time.tv_sec == 0 && last_scroll_time.tv_nsec == 0);
+
+	/* Update timestamp */
+	last_scroll_time = now;
+
+	/* Reset velocity on direction change, first scroll, or timeout */
+	if (direction != last_scroll_direction ||
+	    dt > SCROLL_VELOCITY_TIMEOUT ||
+	    dt <= 0 ||
+	    first_scroll) {
+		scroll_velocity = SCROLL_VELOCITY_SLOW;
+		last_scroll_direction = direction;
+		return SCROLL_MIN_LINES;
+	}
+
+	last_scroll_direction = direction;
+
+	/* Calculate instantaneous velocity (events per second) */
+	double instant_velocity = 1.0 / dt;
+
+	/* Clamp instant velocity to reasonable bounds to avoid spikes */
+	if (instant_velocity > 100.0) {
+		instant_velocity = 100.0;
+	}
+
+	/* Exponential moving average for smoothing */
+	scroll_velocity = SCROLL_VELOCITY_DECAY * scroll_velocity +
+	                  (1.0 - SCROLL_VELOCITY_DECAY) * instant_velocity;
+
+	/* Map velocity to scroll amount */
+	if (scroll_velocity <= SCROLL_VELOCITY_SLOW) {
+		return SCROLL_MIN_LINES;
+	}
+
+	if (scroll_velocity >= SCROLL_VELOCITY_FAST) {
+		return SCROLL_MAX_LINES;
+	}
+
+	/* Linear interpolation between min and max */
+	double t = (scroll_velocity - SCROLL_VELOCITY_SLOW) /
+	           (SCROLL_VELOCITY_FAST - SCROLL_VELOCITY_SLOW);
+
+	return SCROLL_MIN_LINES + (uint32_t)(t * (SCROLL_MAX_LINES - SCROLL_MIN_LINES));
+}
+
+/*
  * Handle a mouse event by updating cursor position and selection state.
  * Handles click, drag, scroll, and multi-click for word/line selection.
  */
@@ -2881,27 +2964,50 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 			/* Selection complete; leave it active */
 			break;
 
-		case MOUSE_SCROLL_UP:
-			if (editor.row_offset >= 3) {
-				editor.row_offset -= 3;
+		case MOUSE_SCROLL_UP: {
+			uint32_t scroll_amount = calculate_adaptive_scroll(-1);
+
+			if (editor.row_offset >= scroll_amount) {
+				editor.row_offset -= scroll_amount;
 			} else {
 				editor.row_offset = 0;
 			}
-			/* Keep cursor on screen */
-			if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
-				editor.cursor_row = editor.row_offset + editor.screen_rows - 1;
-			}
-			break;
 
-		case MOUSE_SCROLL_DOWN:
-			if (editor.row_offset + editor.screen_rows < editor.buffer.line_count) {
-				editor.row_offset += 3;
-			}
-			/* Keep cursor on screen */
-			if (editor.cursor_row < editor.row_offset) {
-				editor.cursor_row = editor.row_offset;
+			/* Keep cursor on screen (only if no selection) */
+			if (!editor.selection_active) {
+				if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
+					editor.cursor_row = editor.row_offset + editor.screen_rows - 1;
+					if (editor.cursor_row >= editor.buffer.line_count && editor.buffer.line_count > 0) {
+						editor.cursor_row = editor.buffer.line_count - 1;
+					}
+				}
 			}
 			break;
+		}
+
+		case MOUSE_SCROLL_DOWN: {
+			uint32_t scroll_amount = calculate_adaptive_scroll(1);
+
+			/* Calculate maximum valid offset */
+			uint32_t max_offset = 0;
+			if (editor.buffer.line_count > editor.screen_rows) {
+				max_offset = editor.buffer.line_count - editor.screen_rows;
+			}
+
+			if (editor.row_offset + scroll_amount <= max_offset) {
+				editor.row_offset += scroll_amount;
+			} else {
+				editor.row_offset = max_offset;
+			}
+
+			/* Keep cursor on screen (only if no selection) */
+			if (!editor.selection_active) {
+				if (editor.cursor_row < editor.row_offset) {
+					editor.cursor_row = editor.row_offset;
+				}
+			}
+			break;
+		}
 
 		default:
 			break;

@@ -202,16 +202,59 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Test [Claude]**: Verified editor renders correctly with Phase 7 changes
 
-**Status**: Phase 7 complete, ready for commit
+**Status**: Phase 7 complete, merged to main
+
+---
+
+### Phase 8: Adaptive Scroll Speed (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 8
+- Velocity-based adaptive mouse scroll speed
+- Slow scrolling for precision, fast scrolling for navigation
+
+**Action [Claude]**: Created branch `adaptive-scroll`
+
+**Action [Claude]**: Updated header to Phase 8, version to 0.8.0
+
+**Action [Claude]**: Added adaptive scroll constants:
+- `SCROLL_VELOCITY_DECAY` (0.7) - exponential smoothing factor
+- `SCROLL_MIN_LINES` (1) - minimum lines to scroll
+- `SCROLL_MAX_LINES` (20) - maximum lines to scroll
+- `SCROLL_VELOCITY_SLOW` (4.0) - events/sec threshold for min scroll
+- `SCROLL_VELOCITY_FAST` (18.0) - events/sec threshold for max scroll
+- `SCROLL_VELOCITY_TIMEOUT` (0.4) - seconds before velocity resets
+
+**Action [Claude]**: Added scroll velocity tracking state:
+- `last_scroll_time` - timestamp of last scroll event
+- `scroll_velocity` - smoothed velocity value
+- `last_scroll_direction` - direction of last scroll (-1/0/1)
+
+**Action [Claude]**: Added `calculate_adaptive_scroll()` function:
+- Uses `clock_gettime(CLOCK_MONOTONIC)` for timing
+- Exponential moving average for velocity smoothing
+- Linear interpolation from velocity to scroll amount
+- Resets on direction change, timeout, or first scroll
+
+**Action [Claude]**: Updated `MOUSE_SCROLL_UP` handler:
+- Uses adaptive scroll amount instead of fixed 3 lines
+- Improved edge case handling for cursor position
+
+**Action [Claude]**: Updated `MOUSE_SCROLL_DOWN` handler:
+- Uses adaptive scroll amount instead of fixed 3 lines
+- Calculates max_offset to prevent over-scrolling
+
+**Test [Claude]**: Verified build succeeds with no warnings
+
+**Status**: Phase 8 complete, ready for commit
 
 ---
 
 ## Current State
 
-- **Branch**: `selection`
-- **Version**: 0.7.0
+- **Branch**: `adaptive-scroll`
+- **Version**: 0.8.0
 - **Build**: Clean (no warnings)
-- **Last Commit**: Pending - Phase 7: Selection (on selection branch)
+- **Last Commit**: Pending - Phase 8: Adaptive Scroll Speed
 
 ---
 
@@ -233,8 +276,9 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains Phase 1-6
-- `selection` - Phase 7 implementation (pending commit/merge)
+- `main` - stable, contains Phase 1-7
+- `adaptive-scroll` - Phase 8 implementation (pending commit/merge)
+- `selection` - merged to main
 - `neighbor-pair-entanglement` - merged to main
 
 ### Build Commands
