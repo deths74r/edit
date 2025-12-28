@@ -121,12 +121,97 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 7: Selection (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 7
+- Text selection with Shift+Arrow keys
+- Mouse support (click, drag, scroll, double-click, triple-click)
+- Selection highlighting
+- Selection deletion/replacement
+
+**Action [Claude]**: Created branch `selection`
+
+**Action [Claude]**: Updated header to Phase 7, version to 0.7.0
+
+**Action [Claude]**: Added selection key codes:
+- `KEY_SHIFT_ARROW_UP/DOWN/LEFT/RIGHT`
+- `KEY_SHIFT_HOME/END`
+- `KEY_SHIFT_PAGE_UP/DOWN`
+- `KEY_CTRL_SHIFT_ARROW_LEFT/RIGHT`
+- `KEY_MOUSE_EVENT`
+
+**Action [Claude]**: Added mouse event types:
+- `MOUSE_LEFT_PRESS`, `MOUSE_LEFT_RELEASE`, `MOUSE_LEFT_DRAG`
+- `MOUSE_SCROLL_UP`, `MOUSE_SCROLL_DOWN`
+
+**Action [Claude]**: Added `struct mouse_input` for parsed mouse events
+
+**Action [Claude]**: Added selection fields to `struct editor_state`:
+- `selection_anchor_row`, `selection_anchor_column`
+- `selection_active`
+
+**Action [Claude]**: Added `THEME_SELECTION` color (Tokyo Night: #283b50)
+
+**Action [Claude]**: Updated `input_read_key()`:
+- Handle modifier codes (2=Shift, 5=Ctrl, 6=Ctrl+Shift)
+- Parse SGR extended mouse sequences
+
+**Action [Claude]**: Added terminal mouse functions:
+- `terminal_enable_mouse()` - enables click, drag, SGR modes
+- `terminal_disable_mouse()` - disables mouse tracking
+
+**Action [Claude]**: Added selection functions:
+- `selection_start()` - begin selection at current cursor
+- `selection_clear()` - deactivate selection
+- `selection_get_range()` - get ordered start/end positions
+- `selection_contains()` - check if position is in selection
+- `selection_is_empty()` - check if selection has zero extent
+
+**Action [Claude]**: Updated `render_line_content()`:
+- Added `file_row` parameter
+- Render selection background when position in selection range
+
+**Action [Claude]**: Updated `editor_move_cursor()`:
+- Shift+Arrow keys extend selection
+- Ctrl+Shift+Arrow for word selection
+- Plain arrow keys clear selection
+
+**Action [Claude]**: Added `editor_delete_selection()`:
+- Handles multi-line selection deletion
+- Joins partial lines at boundaries
+
+**Action [Claude]**: Updated editing functions to delete selection first:
+- `editor_insert_char()`
+- `editor_insert_newline()`
+- Backspace/Delete handlers
+
+**Action [Claude]**: Added mouse handling functions:
+- `screen_column_to_cell()` - convert screen X to cell column
+- `editor_select_word()` - select word at position using neighbor layer
+- `editor_select_line()` - select entire line
+- `input_parse_sgr_mouse()` - parse SGR mouse sequences
+- `editor_handle_mouse()` - process mouse events
+
+**Action [Claude]**: Added Escape key to clear selection
+
+**Bug Fix [Claude]**: Fixed duplicate `else if` blocks in input handling
+
+**Bug Fix [Claude]**: Fixed unused `terminal_disable_mouse` warning
+
+**Test [Claude]**: Verified build succeeds with no warnings
+
+**Test [Claude]**: Verified editor renders correctly with Phase 7 changes
+
+**Status**: Phase 7 complete, ready for commit
+
+---
+
 ## Current State
 
-- **Branch**: `main`
-- **Version**: 0.6.0
-- **Build**: Clean (1 expected warning)
-- **Last Commit**: dc09108 - Phase 6: Neighbor Layer and Pair Entanglement
+- **Branch**: `selection`
+- **Version**: 0.7.0
+- **Build**: Clean (no warnings)
+- **Last Commit**: Pending - Phase 7: Selection (on selection branch)
 
 ---
 
@@ -149,6 +234,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ### Branches
 - `main` - stable, contains Phase 1-6
+- `selection` - Phase 7 implementation (pending commit/merge)
 - `neighbor-pair-entanglement` - merged to main
 
 ### Build Commands

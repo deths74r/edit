@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 6: Neighbor Layer and Pair Entanglement
+ * Phase 7: Selection
  *****************************************************************************/
 
 /*****************************************************************************
@@ -32,7 +32,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.6.0"
+#define EDIT_VERSION "0.7.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -83,7 +83,24 @@ enum key_code {
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
-	KEY_CTRL_ARROW_RIGHT = -69
+	KEY_CTRL_ARROW_RIGHT = -69,
+
+	/* Shift+Arrow keys for selection. */
+	KEY_SHIFT_ARROW_UP = -60,
+	KEY_SHIFT_ARROW_DOWN = -59,
+	KEY_SHIFT_ARROW_LEFT = -58,
+	KEY_SHIFT_ARROW_RIGHT = -57,
+	KEY_SHIFT_HOME = -56,
+	KEY_SHIFT_END = -55,
+	KEY_SHIFT_PAGE_UP = -54,
+	KEY_SHIFT_PAGE_DOWN = -53,
+
+	/* Ctrl+Shift+Arrow for word selection. */
+	KEY_CTRL_SHIFT_ARROW_LEFT = -52,
+	KEY_CTRL_SHIFT_ARROW_RIGHT = -51,
+
+	/* Mouse events (handled internally, not returned). */
+	KEY_MOUSE_EVENT = -3
 };
 
 /* Line temperature indicates whether a line's content is backed by mmap
@@ -154,6 +171,28 @@ enum pair_role {
 	PAIR_ROLE_CLOSER = 2    /* Closing delimiter */
 };
 
+/* Mouse event types for input handling. */
+enum mouse_event {
+	MOUSE_NONE = 0,
+	MOUSE_LEFT_PRESS,
+	MOUSE_LEFT_RELEASE,
+	MOUSE_LEFT_DRAG,
+	MOUSE_SCROLL_UP,
+	MOUSE_SCROLL_DOWN
+};
+
+/* Mouse input data from SGR mouse events. */
+struct mouse_input {
+	/* Type of mouse event. */
+	enum mouse_event event;
+
+	/* Screen row (0-based). */
+	uint32_t row;
+
+	/* Screen column (0-based). */
+	uint32_t column;
+};
+
 /*
  * Neighbor field layout (8 bits):
  * Bits 0-2: Character class (0-7)
@@ -202,6 +241,9 @@ static const struct syntax_color THEME_COLORS[] = {
 
 /* Background color for the editor. */
 static const struct syntax_color THEME_BACKGROUND = {0x1a, 0x1b, 0x26};
+
+/* Selection highlight background color (darker blue). */
+static const struct syntax_color THEME_SELECTION = {0x28, 0x3b, 0x50};
 
 /* Line number gutter colors. */
 static const struct syntax_color THEME_LINE_NUMBER = {0x3b, 0x42, 0x61};
@@ -329,6 +371,13 @@ struct editor_state {
 
 	/* Remaining Ctrl-Q presses needed to quit with unsaved changes. */
 	int quit_confirm_counter;
+
+	/* Selection anchor position (fixed point when extending selection). */
+	uint32_t selection_anchor_row;
+	uint32_t selection_anchor_column;
+
+	/* Whether a selection is currently active. */
+	bool selection_active;
 };
 
 /*****************************************************************************
@@ -343,6 +392,16 @@ static struct editor_state editor;
 
 /* Flag set by SIGWINCH handler to indicate terminal was resized. */
 static volatile sig_atomic_t terminal_resized = 0;
+
+/* Mouse click tracking for double/triple-click detection. */
+static time_t last_click_time = 0;
+static uint32_t last_click_row = 0;
+static uint32_t last_click_col = 0;
+static int click_count = 0;
+
+/* Forward declarations for functions used in input_read_key. */
+static struct mouse_input input_parse_sgr_mouse(void);
+static void editor_handle_mouse(struct mouse_input *mouse);
 
 /*****************************************************************************
  * Neighbor Layer and Pair Entanglement
@@ -1107,10 +1166,14 @@ static void syntax_highlight_line(struct line *line, struct buffer *buffer,
  * Terminal Handling
  *****************************************************************************/
 
+/* Forward declaration for mouse cleanup. */
+static void terminal_disable_mouse(void);
+
 /* Restores the terminal to its original settings. Called automatically
  * at exit via atexit() to ensure the terminal is usable after the editor. */
 static void terminal_disable_raw_mode(void)
 {
+	terminal_disable_mouse();
 	tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_terminal_settings);
 }
 
@@ -1161,6 +1224,23 @@ static void terminal_clear_screen(void)
 {
 	write(STDOUT_FILENO, "\x1b[2J", 4);
 	write(STDOUT_FILENO, "\x1b[H", 3);
+}
+
+/* Enables mouse tracking using SGR extended mode. This allows us to receive
+ * click, drag, and scroll events with coordinates that work beyond column 223. */
+static void terminal_enable_mouse(void)
+{
+	write(STDOUT_FILENO, "\x1b[?1000h", 8);  /* Enable button events */
+	write(STDOUT_FILENO, "\x1b[?1002h", 8);  /* Enable button + drag events */
+	write(STDOUT_FILENO, "\x1b[?1006h", 8);  /* Enable SGR extended mode */
+}
+
+/* Disables mouse tracking. Called at cleanup to restore terminal state. */
+static void terminal_disable_mouse(void)
+{
+	write(STDOUT_FILENO, "\x1b[?1006l", 8);
+	write(STDOUT_FILENO, "\x1b[?1002l", 8);
+	write(STDOUT_FILENO, "\x1b[?1000l", 8);
 }
 
 /*****************************************************************************
@@ -1262,19 +1342,41 @@ static int input_read_key(void)
 						case '8': return KEY_END;
 					}
 				} else if (sequence[2] == ';') {
-					/* Modified arrow key: \x1b[1;5C = Ctrl+Right */
-					char modifier, direction;
+					/* Modified key sequences */
+					char modifier, final;
 					if (read(STDIN_FILENO, &modifier, 1) != 1) {
 						return '\x1b';
 					}
-					if (read(STDIN_FILENO, &direction, 1) != 1) {
+					if (read(STDIN_FILENO, &final, 1) != 1) {
 						return '\x1b';
 					}
-					if (modifier == '5') {  /* Ctrl modifier */
-						switch (direction) {
-							case 'C': return KEY_CTRL_ARROW_RIGHT;
-							case 'D': return KEY_CTRL_ARROW_LEFT;
+					if (sequence[1] == '1') {
+						/* \x1b[1;{mod}{key} - modified arrow/Home/End */
+						if (modifier == '2') {  /* Shift */
+							switch (final) {
+								case 'A': return KEY_SHIFT_ARROW_UP;
+								case 'B': return KEY_SHIFT_ARROW_DOWN;
+								case 'C': return KEY_SHIFT_ARROW_RIGHT;
+								case 'D': return KEY_SHIFT_ARROW_LEFT;
+								case 'H': return KEY_SHIFT_HOME;
+								case 'F': return KEY_SHIFT_END;
+							}
+						} else if (modifier == '5') {  /* Ctrl */
+							switch (final) {
+								case 'C': return KEY_CTRL_ARROW_RIGHT;
+								case 'D': return KEY_CTRL_ARROW_LEFT;
+							}
+						} else if (modifier == '6') {  /* Ctrl+Shift */
+							switch (final) {
+								case 'C': return KEY_CTRL_SHIFT_ARROW_RIGHT;
+								case 'D': return KEY_CTRL_SHIFT_ARROW_LEFT;
+							}
 						}
+					} else if ((sequence[1] == '5' || sequence[1] == '6') &&
+					           modifier == '2' && final == '~') {
+						/* \x1b[5;2~ or \x1b[6;2~ - Shift+PageUp/Down */
+						if (sequence[1] == '5') return KEY_SHIFT_PAGE_UP;
+						if (sequence[1] == '6') return KEY_SHIFT_PAGE_DOWN;
 					}
 				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
 					/* Two-digit escape sequence like \x1b[12~ for F2 */
@@ -1287,6 +1389,13 @@ static int input_read_key(void)
 						}
 					}
 				}
+			} else if (sequence[1] == '<') {
+				/* SGR mouse event: \x1b[<button;column;row{M|m} */
+				struct mouse_input mouse = input_parse_sgr_mouse();
+				if (mouse.event != MOUSE_NONE) {
+					editor_handle_mouse(&mouse);
+				}
+				return KEY_MOUSE_EVENT;
 			} else {
 				switch (sequence[1]) {
 					case 'A': return KEY_ARROW_UP;
@@ -1934,6 +2043,95 @@ static void editor_init(void)
 	editor.status_message[0] = '\0';
 	editor.status_message_time = 0;
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
+	editor.selection_anchor_row = 0;
+	editor.selection_anchor_column = 0;
+	editor.selection_active = false;
+}
+
+/* Start a new selection at the current cursor position. The anchor is set
+ * to the cursor position and selection becomes active. */
+static void selection_start(void)
+{
+	editor.selection_anchor_row = editor.cursor_row;
+	editor.selection_anchor_column = editor.cursor_column;
+	editor.selection_active = true;
+}
+
+/* Clear the current selection. After this, no text is selected. */
+static void selection_clear(void)
+{
+	editor.selection_active = false;
+}
+
+/* Get the normalized selection range (start always before end). The selection
+ * spans from (start_row, start_col) to (end_row, end_col) where start <= end. */
+static void selection_get_range(uint32_t *start_row, uint32_t *start_col,
+                                uint32_t *end_row, uint32_t *end_col)
+{
+	uint32_t anchor_row = editor.selection_anchor_row;
+	uint32_t anchor_col = editor.selection_anchor_column;
+	uint32_t cursor_row = editor.cursor_row;
+	uint32_t cursor_col = editor.cursor_column;
+
+	if (anchor_row < cursor_row ||
+	    (anchor_row == cursor_row && anchor_col <= cursor_col)) {
+		*start_row = anchor_row;
+		*start_col = anchor_col;
+		*end_row = cursor_row;
+		*end_col = cursor_col;
+	} else {
+		*start_row = cursor_row;
+		*start_col = cursor_col;
+		*end_row = anchor_row;
+		*end_col = anchor_col;
+	}
+}
+
+/* Check if a cell position is within the selection. Returns false if no
+ * selection is active or if the position is outside the selected range. */
+static bool selection_contains(uint32_t row, uint32_t column)
+{
+	if (!editor.selection_active) {
+		return false;
+	}
+
+	uint32_t start_row, start_col, end_row, end_col;
+	selection_get_range(&start_row, &start_col, &end_row, &end_col);
+
+	/* Empty selection */
+	if (start_row == end_row && start_col == end_col) {
+		return false;
+	}
+
+	if (row < start_row || row > end_row) {
+		return false;
+	}
+
+	if (row == start_row && row == end_row) {
+		/* Single line selection */
+		return column >= start_col && column < end_col;
+	}
+
+	if (row == start_row) {
+		return column >= start_col;
+	}
+
+	if (row == end_row) {
+		return column < end_col;
+	}
+
+	/* Row is between start and end */
+	return true;
+}
+
+/* Check if the current selection is empty (anchor equals cursor). */
+static bool selection_is_empty(void)
+{
+	if (!editor.selection_active) {
+		return true;
+	}
+	return editor.selection_anchor_row == editor.cursor_row &&
+	       editor.selection_anchor_column == editor.cursor_column;
 }
 
 /*
@@ -2075,14 +2273,71 @@ static void editor_scroll(void)
  * Left/Right navigate by grapheme cluster within a line and wrap to
  * adjacent lines at boundaries. Up/Down move vertically. After movement,
  * the cursor is snapped to end of line if it would be past the line length.
+ * Shift+key extends selection, plain movement clears selection.
  */
 static void editor_move_cursor(int key)
 {
+	/* Determine if this is a selection-extending key and get base key */
+	bool extend_selection = false;
+	int base_key = key;
+
+	switch (key) {
+		case KEY_SHIFT_ARROW_UP:
+			extend_selection = true;
+			base_key = KEY_ARROW_UP;
+			break;
+		case KEY_SHIFT_ARROW_DOWN:
+			extend_selection = true;
+			base_key = KEY_ARROW_DOWN;
+			break;
+		case KEY_SHIFT_ARROW_LEFT:
+			extend_selection = true;
+			base_key = KEY_ARROW_LEFT;
+			break;
+		case KEY_SHIFT_ARROW_RIGHT:
+			extend_selection = true;
+			base_key = KEY_ARROW_RIGHT;
+			break;
+		case KEY_SHIFT_HOME:
+			extend_selection = true;
+			base_key = KEY_HOME;
+			break;
+		case KEY_SHIFT_END:
+			extend_selection = true;
+			base_key = KEY_END;
+			break;
+		case KEY_SHIFT_PAGE_UP:
+			extend_selection = true;
+			base_key = KEY_PAGE_UP;
+			break;
+		case KEY_SHIFT_PAGE_DOWN:
+			extend_selection = true;
+			base_key = KEY_PAGE_DOWN;
+			break;
+		case KEY_CTRL_SHIFT_ARROW_LEFT:
+			extend_selection = true;
+			base_key = KEY_CTRL_ARROW_LEFT;
+			break;
+		case KEY_CTRL_SHIFT_ARROW_RIGHT:
+			extend_selection = true;
+			base_key = KEY_CTRL_ARROW_RIGHT;
+			break;
+	}
+
+	/* Handle selection start/clear */
+	if (extend_selection) {
+		if (!editor.selection_active) {
+			selection_start();
+		}
+	} else {
+		selection_clear();
+	}
+
 	uint32_t line_length = editor_get_line_length(editor.cursor_row);
 	struct line *current_line = editor.cursor_row < editor.buffer.line_count
 	                            ? &editor.buffer.lines[editor.cursor_row] : NULL;
 
-	switch (key) {
+	switch (base_key) {
 		case KEY_ARROW_LEFT:
 			if (editor.cursor_column > 0 && current_line) {
 				editor.cursor_column = cursor_prev_grapheme(current_line, &editor.buffer, editor.cursor_column);
@@ -2181,12 +2436,82 @@ static void editor_move_cursor(int key)
 }
 
 /*
+ * Delete the currently selected text. Handles both single-line and
+ * multi-line selections. Moves cursor to the start of the deleted region.
+ */
+static void editor_delete_selection(void)
+{
+	if (!editor.selection_active || selection_is_empty()) {
+		return;
+	}
+
+	uint32_t start_row, start_col, end_row, end_col;
+	selection_get_range(&start_row, &start_col, &end_row, &end_col);
+
+	if (start_row == end_row) {
+		/* Single line selection - delete cells from end to start */
+		struct line *line = &editor.buffer.lines[start_row];
+		line_warm(line, &editor.buffer);
+
+		for (uint32_t i = end_col; i > start_col; i--) {
+			line_delete_cell(line, start_col);
+		}
+		line->temperature = LINE_TEMPERATURE_HOT;
+		neighbor_compute_line(line);
+		syntax_highlight_line(line, &editor.buffer, start_row);
+	} else {
+		/* Multi-line selection */
+		/* 1. Truncate start line at start_col */
+		struct line *start_line = &editor.buffer.lines[start_row];
+		line_warm(start_line, &editor.buffer);
+		start_line->cell_count = start_col;
+
+		/* 2. Append content after end_col from end line */
+		struct line *end_line = &editor.buffer.lines[end_row];
+		line_warm(end_line, &editor.buffer);
+
+		for (uint32_t i = end_col; i < end_line->cell_count; i++) {
+			line_append_cell(start_line, end_line->cells[i].codepoint);
+		}
+
+		/* 3. Delete lines from start_row+1 to end_row inclusive */
+		for (uint32_t i = end_row; i > start_row; i--) {
+			buffer_delete_line(&editor.buffer, i);
+		}
+
+		start_line->temperature = LINE_TEMPERATURE_HOT;
+		neighbor_compute_line(start_line);
+		buffer_compute_pairs(&editor.buffer);
+
+		/* Re-highlight affected lines */
+		for (uint32_t row = start_row; row < editor.buffer.line_count; row++) {
+			if (editor.buffer.lines[row].temperature != LINE_TEMPERATURE_COLD) {
+				syntax_highlight_line(&editor.buffer.lines[row], &editor.buffer, row);
+			}
+		}
+	}
+
+	/* Move cursor to start of deleted region */
+	editor.cursor_row = start_row;
+	editor.cursor_column = start_col;
+
+	editor.buffer.is_modified = true;
+	selection_clear();
+	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
+}
+
+/*
  * Insert a character at the current cursor position and advance the
- * cursor. Resets the quit confirmation counter since the buffer was
- * modified.
+ * cursor. If there's an active selection, deletes it first. Resets
+ * the quit confirmation counter since the buffer was modified.
  */
 static void editor_insert_character(uint32_t codepoint)
 {
+	/* Delete selection first if active */
+	if (editor.selection_active && !selection_is_empty()) {
+		editor_delete_selection();
+	}
+
 	buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
 	editor.cursor_column++;
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
@@ -2194,10 +2519,16 @@ static void editor_insert_character(uint32_t codepoint)
 
 /*
  * Handle Enter key by splitting the current line at the cursor position.
- * Moves cursor to the beginning of the newly created line below.
+ * Moves cursor to the beginning of the newly created line below. If there's
+ * an active selection, deletes it first.
  */
 static void editor_insert_newline(void)
 {
+	/* Delete selection first if active */
+	if (editor.selection_active && !selection_is_empty()) {
+		editor_delete_selection();
+	}
+
 	buffer_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
 	editor.cursor_row++;
 	editor.cursor_column = 0;
@@ -2206,10 +2537,17 @@ static void editor_insert_newline(void)
 
 /*
  * Handle Delete key by removing the grapheme cluster at the cursor
- * position. Does nothing if cursor is past the end of the buffer.
+ * position. If there's an active selection, deletes the selection instead.
+ * Does nothing if cursor is past the end of the buffer.
  */
 static void editor_delete_character(void)
 {
+	/* Delete selection if active */
+	if (editor.selection_active && !selection_is_empty()) {
+		editor_delete_selection();
+		return;
+	}
+
 	if (editor.cursor_row >= editor.buffer.line_count) {
 		return;
 	}
@@ -2219,12 +2557,19 @@ static void editor_delete_character(void)
 }
 
 /*
- * Handle Backspace key. If within a line, deletes the grapheme cluster
+ * Handle Backspace key. If there's an active selection, deletes the
+ * selection. Otherwise, if within a line, deletes the grapheme cluster
  * before the cursor. If at the start of a line, joins this line with
  * the previous line. Does nothing at the start of the buffer.
  */
 static void editor_handle_backspace(void)
 {
+	/* Delete selection if active */
+	if (editor.selection_active && !selection_is_empty()) {
+		editor_delete_selection();
+		return;
+	}
+
 	if (editor.cursor_row == 0 && editor.cursor_column == 0) {
 		return;
 	}
@@ -2270,6 +2615,291 @@ static void editor_save(void)
 	}
 }
 
+/*
+ * Convert a visual screen column to a cell index within a line. Accounts
+ * for tab expansion and character widths. Used for mouse click positioning.
+ */
+static uint32_t screen_column_to_cell(uint32_t row, uint32_t target_visual_column)
+{
+	if (row >= editor.buffer.line_count) {
+		return 0;
+	}
+
+	struct line *line = &editor.buffer.lines[row];
+	line_warm(line, &editor.buffer);
+
+	uint32_t visual_column = 0;
+	uint32_t cell_index = 0;
+
+	while (cell_index < line->cell_count && visual_column < target_visual_column) {
+		uint32_t cp = line->cells[cell_index].codepoint;
+		int width;
+
+		if (cp == '\t') {
+			width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
+		} else {
+			width = utflite_codepoint_width(cp);
+			if (width < 0) {
+				width = 1;
+			}
+		}
+
+		/* If clicking in the middle of a wide character, round to nearest */
+		if (visual_column + width > target_visual_column) {
+			if (target_visual_column - visual_column > (uint32_t)width / 2) {
+				cell_index++;
+			}
+			break;
+		}
+
+		visual_column += width;
+		cell_index++;
+	}
+
+	return cell_index;
+}
+
+/*
+ * Select the word at the given position using neighbor layer data.
+ * Does nothing if position is whitespace.
+ */
+static void editor_select_word(uint32_t row, uint32_t column)
+{
+	if (row >= editor.buffer.line_count) {
+		return;
+	}
+
+	struct line *line = &editor.buffer.lines[row];
+	line_warm(line, &editor.buffer);
+
+	if (line->cell_count == 0) {
+		return;
+	}
+
+	if (column >= line->cell_count) {
+		column = line->cell_count - 1;
+	}
+
+	/* Use neighbor layer to find word boundaries */
+	enum character_class click_class = neighbor_get_class(line->cells[column].neighbor);
+
+	/* Don't select whitespace as a "word" */
+	if (click_class == CHAR_CLASS_WHITESPACE) {
+		editor.cursor_column = column;
+		selection_clear();
+		return;
+	}
+
+	/* Find word start */
+	uint32_t word_start = column;
+	while (word_start > 0) {
+		enum character_class prev_class = neighbor_get_class(line->cells[word_start - 1].neighbor);
+		if (!classes_form_word(prev_class, click_class) && prev_class != click_class) {
+			break;
+		}
+		word_start--;
+	}
+
+	/* Find word end */
+	uint32_t word_end = column;
+	while (word_end < line->cell_count - 1) {
+		enum character_class next_class = neighbor_get_class(line->cells[word_end + 1].neighbor);
+		if (!classes_form_word(click_class, next_class) && next_class != click_class) {
+			break;
+		}
+		word_end++;
+	}
+	word_end++;  /* End is exclusive */
+
+	/* Set selection */
+	editor.selection_anchor_row = row;
+	editor.selection_anchor_column = word_start;
+	editor.cursor_row = row;
+	editor.cursor_column = word_end;
+	editor.selection_active = true;
+}
+
+/*
+ * Select an entire line including trailing newline conceptually.
+ */
+static void editor_select_line(uint32_t row)
+{
+	if (row >= editor.buffer.line_count) {
+		return;
+	}
+
+	struct line *line = &editor.buffer.lines[row];
+	line_warm(line, &editor.buffer);
+
+	editor.selection_anchor_row = row;
+	editor.selection_anchor_column = 0;
+	editor.cursor_row = row;
+	editor.cursor_column = line->cell_count;
+	editor.selection_active = true;
+}
+
+/*
+ * Parse SGR mouse event after reading \x1b[<. Returns the parsed mouse
+ * input or sets event to MOUSE_NONE on parse failure.
+ */
+static struct mouse_input input_parse_sgr_mouse(void)
+{
+	struct mouse_input mouse = {.event = MOUSE_NONE, .row = 0, .column = 0};
+	char buffer[32];
+	int len = 0;
+
+	/* Read until 'M' (press) or 'm' (release) */
+	while (len < 31) {
+		if (read(STDIN_FILENO, &buffer[len], 1) != 1) {
+			return mouse;
+		}
+		if (buffer[len] == 'M' || buffer[len] == 'm') {
+			break;
+		}
+		len++;
+	}
+
+	char final = buffer[len];
+	buffer[len] = '\0';
+
+	/* Parse button;column;row */
+	int button, col, row;
+	if (sscanf(buffer, "%d;%d;%d", &button, &col, &row) != 3) {
+		return mouse;
+	}
+
+	/* Convert to 0-based coordinates */
+	mouse.column = (col > 0) ? (uint32_t)(col - 1) : 0;
+	mouse.row = (row > 0) ? (uint32_t)(row - 1) : 0;
+
+	/* Decode button field */
+	int button_number = button & 0x03;
+	bool is_drag = (button & 0x20) != 0;
+	bool is_scroll = (button & 0x40) != 0;
+
+	if (is_scroll) {
+		mouse.event = (button_number == 0) ? MOUSE_SCROLL_UP : MOUSE_SCROLL_DOWN;
+	} else if (button_number == 0) {
+		if (is_drag) {
+			mouse.event = MOUSE_LEFT_DRAG;
+		} else if (final == 'M') {
+			mouse.event = MOUSE_LEFT_PRESS;
+		} else {
+			mouse.event = MOUSE_LEFT_RELEASE;
+		}
+	}
+
+	return mouse;
+}
+
+/*
+ * Handle a mouse event by updating cursor position and selection state.
+ * Handles click, drag, scroll, and multi-click for word/line selection.
+ */
+static void editor_handle_mouse(struct mouse_input *mouse)
+{
+	switch (mouse->event) {
+		case MOUSE_LEFT_PRESS: {
+			/* Convert screen position to buffer position */
+			uint32_t file_row = mouse->row + editor.row_offset;
+			uint32_t screen_col = mouse->column;
+
+			/* Account for gutter */
+			if (screen_col < editor.gutter_width) {
+				screen_col = 0;
+			} else {
+				screen_col -= editor.gutter_width;
+			}
+
+			/* Clamp to valid row */
+			if (file_row >= editor.buffer.line_count) {
+				if (editor.buffer.line_count > 0) {
+					file_row = editor.buffer.line_count - 1;
+				} else {
+					file_row = 0;
+				}
+			}
+
+			uint32_t cell_col = screen_column_to_cell(file_row, screen_col + editor.column_offset);
+
+			/* Detect double/triple click */
+			time_t now = time(NULL);
+			if (now - last_click_time <= 1 &&
+			    last_click_row == file_row &&
+			    last_click_col == cell_col) {
+				click_count++;
+			} else {
+				click_count = 1;
+			}
+			last_click_time = now;
+			last_click_row = file_row;
+			last_click_col = cell_col;
+
+			if (click_count == 2) {
+				/* Double-click: select word using neighbor layer */
+				editor.cursor_row = file_row;
+				editor_select_word(file_row, cell_col);
+			} else if (click_count >= 3) {
+				/* Triple-click: select entire line */
+				editor_select_line(file_row);
+				click_count = 0;  /* Reset */
+			} else {
+				/* Single click: position cursor and start selection */
+				editor.cursor_row = file_row;
+				editor.cursor_column = cell_col;
+				selection_start();
+			}
+			break;
+		}
+
+		case MOUSE_LEFT_DRAG: {
+			/* Update cursor position; anchor stays fixed */
+			uint32_t file_row = mouse->row + editor.row_offset;
+			uint32_t screen_col = mouse->column;
+
+			if (screen_col < editor.gutter_width) {
+				screen_col = 0;
+			} else {
+				screen_col -= editor.gutter_width;
+			}
+
+			if (file_row >= editor.buffer.line_count && editor.buffer.line_count > 0) {
+				file_row = editor.buffer.line_count - 1;
+			}
+
+			editor.cursor_row = file_row;
+			editor.cursor_column = screen_column_to_cell(file_row, screen_col + editor.column_offset);
+
+			/* Ensure selection is active during drag */
+			if (!editor.selection_active) {
+				selection_start();
+			}
+			break;
+		}
+
+		case MOUSE_LEFT_RELEASE:
+			/* Selection complete; leave it active */
+			break;
+
+		case MOUSE_SCROLL_UP:
+			if (editor.row_offset >= 3) {
+				editor.row_offset -= 3;
+			} else {
+				editor.row_offset = 0;
+			}
+			break;
+
+		case MOUSE_SCROLL_DOWN:
+			if (editor.row_offset + editor.screen_rows < editor.buffer.line_count) {
+				editor.row_offset += 3;
+			}
+			break;
+
+		default:
+			break;
+	}
+}
+
 /*****************************************************************************
  * Rendering
  *****************************************************************************/
@@ -2290,10 +2920,12 @@ static void render_set_syntax_color(struct output_buffer *output, enum syntax_to
  * Render a single line's content to the output buffer. Warms the line if
  * cold. Handles horizontal scrolling by skipping to column_offset, expands
  * tabs to spaces, and encodes each cell's codepoint to UTF-8. Wide
- * characters that don't fit are replaced with spaces. Uses syntax colors.
+ * characters that don't fit are replaced with spaces. Uses syntax colors
+ * and highlights selected cells with a distinct background.
  */
 static void render_line_content(struct output_buffer *output, struct line *line,
-                                struct buffer *buffer, uint32_t column_offset, int max_width)
+                                struct buffer *buffer, uint32_t file_row,
+                                uint32_t column_offset, int max_width)
 {
 	line_warm(line, buffer);
 
@@ -2318,8 +2950,11 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		cell_index++;
 	}
 
-	/* Track current color to minimize escape sequences */
+	/* Track current state to minimize escape sequences */
 	enum syntax_token current_syntax = SYNTAX_NORMAL;
+	bool current_selected = false;
+
+	/* Set initial foreground color */
 	render_set_syntax_color(output, current_syntax);
 
 	/* Render visible content */
@@ -2327,11 +2962,28 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	while (cell_index < line->cell_count && rendered_width < max_width) {
 		uint32_t codepoint = line->cells[cell_index].codepoint;
 		enum syntax_token syntax = line->cells[cell_index].syntax;
+		bool selected = selection_contains(file_row, cell_index);
 
-		/* Change color if syntax type changed */
-		if (syntax != current_syntax) {
-			render_set_syntax_color(output, syntax);
+		/* Change colors if syntax or selection changed */
+		if (syntax != current_syntax || selected != current_selected) {
+			char escape[64];
+			struct syntax_color fg = THEME_COLORS[syntax];
+			if (selected) {
+				/* Selection: selection background + syntax foreground */
+				snprintf(escape, sizeof(escape),
+				         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm",
+				         THEME_SELECTION.red, THEME_SELECTION.green, THEME_SELECTION.blue,
+				         fg.red, fg.green, fg.blue);
+			} else {
+				/* Normal: normal background + syntax foreground */
+				snprintf(escape, sizeof(escape),
+				         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm",
+				         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue,
+				         fg.red, fg.green, fg.blue);
+			}
+			output_buffer_append_string(output, escape);
 			current_syntax = syntax;
+			current_selected = selected;
 		}
 
 		int width;
@@ -2367,7 +3019,11 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		cell_index++;
 	}
 
-	/* Reset to normal color to prevent bleeding into next element */
+	/* Reset background to normal to prevent bleeding into next element */
+	char reset[32];
+	snprintf(reset, sizeof(reset), "\x1b[48;2;%d;%d;%dm",
+	         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue);
+	output_buffer_append_string(output, reset);
 	render_set_syntax_color(output, SYNTAX_NORMAL);
 }
 
@@ -2440,7 +3096,7 @@ static void render_draw_rows(struct output_buffer *output)
 			if (file_row < editor.buffer.line_count) {
 				struct line *line = &editor.buffer.lines[file_row];
 				int text_area_width = editor.screen_columns - editor.gutter_width;
-				render_line_content(output, line, &editor.buffer, editor.column_offset, text_area_width);
+				render_line_content(output, line, &editor.buffer, file_row, editor.column_offset, text_area_width);
 			}
 		}
 
@@ -2610,6 +3266,16 @@ static void editor_process_keypress(void)
 		case KEY_END:
 		case KEY_PAGE_UP:
 		case KEY_PAGE_DOWN:
+		case KEY_SHIFT_ARROW_UP:
+		case KEY_SHIFT_ARROW_DOWN:
+		case KEY_SHIFT_ARROW_LEFT:
+		case KEY_SHIFT_ARROW_RIGHT:
+		case KEY_SHIFT_HOME:
+		case KEY_SHIFT_END:
+		case KEY_SHIFT_PAGE_UP:
+		case KEY_SHIFT_PAGE_DOWN:
+		case KEY_CTRL_SHIFT_ARROW_LEFT:
+		case KEY_CTRL_SHIFT_ARROW_RIGHT:
 			editor_move_cursor(key);
 			break;
 
@@ -2627,8 +3293,16 @@ static void editor_process_keypress(void)
 			break;
 
 		case '\x1b':
+			/* Escape clears selection */
+			selection_clear();
+			break;
+
 		case CONTROL_KEY('l'):
-			/* Escape and Ctrl-L: ignore */
+			/* Ctrl-L: ignore (refresh) */
+			break;
+
+		case KEY_MOUSE_EVENT:
+			/* Mouse events are handled in input_read_key via editor_handle_mouse */
 			break;
 
 		default:
@@ -2650,6 +3324,7 @@ static void editor_process_keypress(void)
 int main(int argument_count, char *argument_values[])
 {
 	terminal_enable_raw_mode();
+	terminal_enable_mouse();
 
 	/* Set up signal handler for window resize */
 	struct sigaction signal_action;
