@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 5: Syntax Highlighting
+ * Phase 6: Neighbor Layer and Pair Entanglement
  *****************************************************************************/
 
 /*****************************************************************************
@@ -32,7 +32,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.5.0"
+#define EDIT_VERSION "0.6.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -79,7 +79,11 @@ enum key_code {
 	KEY_DELETE = -92,
 
 	/* Function keys. */
-	KEY_F2 = -91
+	KEY_F2 = -91,
+
+	/* Ctrl+Arrow keys for word movement. */
+	KEY_CTRL_ARROW_LEFT = -70,
+	KEY_CTRL_ARROW_RIGHT = -69
 };
 
 /* Line temperature indicates whether a line's content is backed by mmap
@@ -112,6 +116,68 @@ enum syntax_token {
 	SYNTAX_TOKEN_COUNT    /* Number of token types */
 };
 
+/* Character classes for word boundary detection. */
+enum character_class {
+	CHAR_CLASS_WHITESPACE = 0,  /* Space, tab */
+	CHAR_CLASS_LETTER = 1,      /* a-z, A-Z, unicode letters */
+	CHAR_CLASS_DIGIT = 2,       /* 0-9 */
+	CHAR_CLASS_UNDERSCORE = 3,  /* _ (often part of identifiers) */
+	CHAR_CLASS_PUNCTUATION = 4, /* Operators, symbols */
+	CHAR_CLASS_BRACKET = 5,     /* ()[]{}  */
+	CHAR_CLASS_QUOTE = 6,       /* " ' ` */
+	CHAR_CLASS_OTHER = 7        /* Everything else */
+};
+
+/* Token position within a word (sequence of same-class characters). */
+enum token_position {
+	TOKEN_POSITION_SOLO = 0,    /* Single character token: "(" or "+" */
+	TOKEN_POSITION_START = 1,   /* First char of multi-char: "hello" -> 'h' */
+	TOKEN_POSITION_MIDDLE = 2,  /* Middle char: "hello" -> 'e', 'l', 'l' */
+	TOKEN_POSITION_END = 3      /* Last char: "hello" -> 'o' */
+};
+
+/* Pair types for matched delimiters. */
+enum pair_type {
+	PAIR_TYPE_NONE = 0,
+	PAIR_TYPE_COMMENT,      /* Block comments */
+	PAIR_TYPE_PAREN,        /* ( ... ) */
+	PAIR_TYPE_BRACKET,      /* [ ... ] */
+	PAIR_TYPE_BRACE,        /* { ... } */
+	PAIR_TYPE_DOUBLE_QUOTE, /* " ... " */
+	PAIR_TYPE_SINGLE_QUOTE  /* ' ... ' */
+};
+
+/* Role of a delimiter in a pair. */
+enum pair_role {
+	PAIR_ROLE_NONE = 0,
+	PAIR_ROLE_OPENER = 1,   /* Opening delimiter */
+	PAIR_ROLE_CLOSER = 2    /* Closing delimiter */
+};
+
+/*
+ * Neighbor field layout (8 bits):
+ * Bits 0-2: Character class (0-7)
+ * Bits 3-4: Token position (0-3)
+ * Bits 5-7: Reserved
+ */
+#define NEIGHBOR_CLASS_MASK     0x07
+#define NEIGHBOR_CLASS_SHIFT    0
+#define NEIGHBOR_POSITION_MASK  0x18
+#define NEIGHBOR_POSITION_SHIFT 3
+
+/*
+ * Context field layout (32 bits):
+ * Bits 0-23:  Pair ID (up to 16 million unique pairs)
+ * Bits 24-26: Pair type (0-7)
+ * Bits 27-28: Pair role (0-3)
+ * Bits 29-31: Reserved
+ */
+#define CONTEXT_PAIR_ID_MASK    0x00FFFFFF
+#define CONTEXT_PAIR_TYPE_MASK  0x07000000
+#define CONTEXT_PAIR_TYPE_SHIFT 24
+#define CONTEXT_PAIR_ROLE_MASK  0x18000000
+#define CONTEXT_PAIR_ROLE_SHIFT 27
+
 /* RGB color for syntax highlighting. */
 struct syntax_color {
 	uint8_t red;
@@ -141,13 +207,22 @@ static const struct syntax_color THEME_BACKGROUND = {0x1a, 0x1b, 0x26};
 static const struct syntax_color THEME_LINE_NUMBER = {0x3b, 0x42, 0x61};
 static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0x73, 0x7a, 0xa2};
 
-/* A single character cell storing one Unicode codepoint and its syntax type. */
+/* A single character cell storing one Unicode codepoint and metadata. */
 struct cell {
 	/* The Unicode codepoint stored in this cell. */
 	uint32_t codepoint;
 
 	/* Token type for syntax highlighting. */
 	uint16_t syntax;
+
+	/* Character class and token position for word boundaries. */
+	uint8_t neighbor;
+
+	/* Reserved for future use. */
+	uint8_t flags;
+
+	/* Pair ID and type for matched delimiters. */
+	uint32_t context;
 };
 
 /* A single line of text. Cold lines reference mmap content directly.
@@ -198,6 +273,9 @@ struct buffer {
 
 	/* Size of the memory-mapped region in bytes. */
 	size_t mmap_size;
+
+	/* Counter for generating unique pair IDs. */
+	uint32_t next_pair_id;
 };
 
 /* Accumulates output bytes before flushing to the terminal. Batching
@@ -265,6 +343,462 @@ static struct editor_state editor;
 
 /* Flag set by SIGWINCH handler to indicate terminal was resized. */
 static volatile sig_atomic_t terminal_resized = 0;
+
+/*****************************************************************************
+ * Neighbor Layer and Pair Entanglement
+ *****************************************************************************/
+
+/* Extract character class from neighbor field. */
+static inline enum character_class neighbor_get_class(uint8_t neighbor)
+{
+	return (neighbor & NEIGHBOR_CLASS_MASK) >> NEIGHBOR_CLASS_SHIFT;
+}
+
+/* Extract token position from neighbor field. */
+static inline enum token_position neighbor_get_position(uint8_t neighbor)
+{
+	return (neighbor & NEIGHBOR_POSITION_MASK) >> NEIGHBOR_POSITION_SHIFT;
+}
+
+/* Encode character class and token position into neighbor field. */
+static inline uint8_t neighbor_encode(enum character_class class, enum token_position position)
+{
+	return (class << NEIGHBOR_CLASS_SHIFT) | (position << NEIGHBOR_POSITION_SHIFT);
+}
+
+/* Extract pair ID from context field. */
+static inline uint32_t context_get_pair_id(uint32_t context)
+{
+	return context & CONTEXT_PAIR_ID_MASK;
+}
+
+/* Extract pair type from context field. */
+static inline enum pair_type context_get_pair_type(uint32_t context)
+{
+	return (context & CONTEXT_PAIR_TYPE_MASK) >> CONTEXT_PAIR_TYPE_SHIFT;
+}
+
+/* Extract pair role from context field. */
+static inline enum pair_role context_get_pair_role(uint32_t context)
+{
+	return (context & CONTEXT_PAIR_ROLE_MASK) >> CONTEXT_PAIR_ROLE_SHIFT;
+}
+
+/* Encode pair ID, type, and role into context field. */
+static inline uint32_t context_encode(uint32_t pair_id, enum pair_type type, enum pair_role role)
+{
+	return (pair_id & CONTEXT_PAIR_ID_MASK) |
+	       ((uint32_t)type << CONTEXT_PAIR_TYPE_SHIFT) |
+	       ((uint32_t)role << CONTEXT_PAIR_ROLE_SHIFT);
+}
+
+/* Classify a codepoint into a character class. */
+static enum character_class classify_codepoint(uint32_t cp)
+{
+	if (cp == ' ' || cp == '\t') {
+		return CHAR_CLASS_WHITESPACE;
+	}
+	if (cp == '_') {
+		return CHAR_CLASS_UNDERSCORE;
+	}
+	if (cp >= 'a' && cp <= 'z') {
+		return CHAR_CLASS_LETTER;
+	}
+	if (cp >= 'A' && cp <= 'Z') {
+		return CHAR_CLASS_LETTER;
+	}
+	if (cp >= '0' && cp <= '9') {
+		return CHAR_CLASS_DIGIT;
+	}
+	if (cp == '(' || cp == ')' || cp == '[' || cp == ']' ||
+	    cp == '{' || cp == '}') {
+		return CHAR_CLASS_BRACKET;
+	}
+	if (cp == '"' || cp == '\'' || cp == '`') {
+		return CHAR_CLASS_QUOTE;
+	}
+	/* ASCII punctuation */
+	if ((cp >= '!' && cp <= '/') || (cp >= ':' && cp <= '@') ||
+	    (cp >= '[' && cp <= '`') || (cp >= '{' && cp <= '~')) {
+		return CHAR_CLASS_PUNCTUATION;
+	}
+	/* Unicode letters (simplified - covers common ranges) */
+	if (cp >= 0x00C0 && cp <= 0x024F) {
+		return CHAR_CLASS_LETTER;  /* Latin Extended */
+	}
+	if (cp >= 0x0400 && cp <= 0x04FF) {
+		return CHAR_CLASS_LETTER;  /* Cyrillic */
+	}
+	if (cp >= 0x4E00 && cp <= 0x9FFF) {
+		return CHAR_CLASS_LETTER;  /* CJK */
+	}
+
+	return CHAR_CLASS_OTHER;
+}
+
+/* Check if two character classes form a word together. */
+static bool classes_form_word(enum character_class a, enum character_class b)
+{
+	/* Letters, digits, and underscores form words together */
+	bool a_is_word_char = (a == CHAR_CLASS_LETTER || a == CHAR_CLASS_DIGIT ||
+	                       a == CHAR_CLASS_UNDERSCORE);
+	bool b_is_word_char = (b == CHAR_CLASS_LETTER || b == CHAR_CLASS_DIGIT ||
+	                       b == CHAR_CLASS_UNDERSCORE);
+	return a_is_word_char && b_is_word_char;
+}
+
+/* Compute neighbor data (character class and token position) for a line. */
+static void neighbor_compute_line(struct line *line)
+{
+	if (line->cell_count == 0) {
+		return;
+	}
+
+	/* First pass: assign character classes */
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		enum character_class class = classify_codepoint(line->cells[i].codepoint);
+		line->cells[i].neighbor = neighbor_encode(class, TOKEN_POSITION_SOLO);
+	}
+
+	/* Second pass: compute token positions */
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		enum character_class my_class = neighbor_get_class(line->cells[i].neighbor);
+
+		bool has_prev = (i > 0);
+		bool has_next = (i < line->cell_count - 1);
+
+		enum character_class prev_class = has_prev ?
+			neighbor_get_class(line->cells[i - 1].neighbor) : CHAR_CLASS_WHITESPACE;
+		enum character_class next_class = has_next ?
+			neighbor_get_class(line->cells[i + 1].neighbor) : CHAR_CLASS_WHITESPACE;
+
+		bool joins_prev = has_prev && classes_form_word(prev_class, my_class);
+		bool joins_next = has_next && classes_form_word(my_class, next_class);
+
+		enum token_position position;
+		if (!joins_prev && !joins_next) {
+			position = TOKEN_POSITION_SOLO;
+		} else if (!joins_prev && joins_next) {
+			position = TOKEN_POSITION_START;
+		} else if (joins_prev && joins_next) {
+			position = TOKEN_POSITION_MIDDLE;
+		} else {
+			position = TOKEN_POSITION_END;
+		}
+
+		line->cells[i].neighbor = neighbor_encode(my_class, position);
+	}
+}
+
+/* Is this cell at the start of a word? */
+static bool cell_is_word_start(struct cell *cell)
+{
+	enum token_position pos = neighbor_get_position(cell->neighbor);
+	return pos == TOKEN_POSITION_START || pos == TOKEN_POSITION_SOLO;
+}
+
+/* Is this cell at the end of a word? */
+static bool cell_is_word_end(struct cell *cell)
+{
+	enum token_position pos = neighbor_get_position(cell->neighbor);
+	return pos == TOKEN_POSITION_END || pos == TOKEN_POSITION_SOLO;
+}
+
+/* Find start of previous word. */
+static uint32_t find_prev_word_start(struct line *line, uint32_t column)
+{
+	if (column == 0 || line->cell_count == 0) {
+		return 0;
+	}
+
+	column--;
+
+	/* Skip whitespace */
+	while (column > 0 &&
+	       neighbor_get_class(line->cells[column].neighbor) == CHAR_CLASS_WHITESPACE) {
+		column--;
+	}
+
+	/* Find start of this word */
+	while (column > 0 && !cell_is_word_start(&line->cells[column])) {
+		column--;
+	}
+
+	return column;
+}
+
+/* Find start of next word. */
+static uint32_t find_next_word_start(struct line *line, uint32_t column)
+{
+	if (column >= line->cell_count) {
+		return line->cell_count;
+	}
+
+	/* Skip current word */
+	while (column < line->cell_count &&
+	       neighbor_get_class(line->cells[column].neighbor) != CHAR_CLASS_WHITESPACE) {
+		column++;
+	}
+
+	/* Skip whitespace */
+	while (column < line->cell_count &&
+	       neighbor_get_class(line->cells[column].neighbor) == CHAR_CLASS_WHITESPACE) {
+		column++;
+	}
+
+	return column;
+}
+
+/* Allocate a unique pair ID. */
+static uint32_t buffer_allocate_pair_id(struct buffer *buffer)
+{
+	return ++buffer->next_pair_id;
+}
+
+/* Forward declarations for pair computation. */
+static void line_warm(struct line *line, struct buffer *buffer);
+
+/*
+ * Scan the entire buffer to match pairs. This handles block comments,
+ * and brackets: (), [], {}. Call after loading a file or after edits
+ * that might affect pairs.
+ */
+static void buffer_compute_pairs(struct buffer *buffer)
+{
+	/* Reset all pair IDs and warm all lines first */
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		struct line *line = &buffer->lines[row];
+		if (line->temperature == LINE_TEMPERATURE_COLD) {
+			line_warm(line, buffer);
+		}
+		for (uint32_t col = 0; col < line->cell_count; col++) {
+			line->cells[col].context = 0;
+		}
+	}
+
+	buffer->next_pair_id = 0;
+
+	/* Stack for bracket matching */
+	struct {
+		uint32_t row;
+		uint32_t col;
+		uint32_t pair_id;
+		enum pair_type type;
+	} stack[256];
+	int stack_top = 0;
+
+	/* Are we inside a block comment? */
+	bool in_block_comment = false;
+	uint32_t comment_pair_id = 0;
+
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		struct line *line = &buffer->lines[row];
+
+		for (uint32_t col = 0; col < line->cell_count; col++) {
+			uint32_t cp = line->cells[col].codepoint;
+
+			/* Check for block comment start */
+			if (!in_block_comment && cp == '/' && col + 1 < line->cell_count &&
+			    line->cells[col + 1].codepoint == '*') {
+				in_block_comment = true;
+				comment_pair_id = buffer_allocate_pair_id(buffer);
+
+				/* Mark the '/' and '*' as opener */
+				line->cells[col].context = context_encode(comment_pair_id,
+					PAIR_TYPE_COMMENT, PAIR_ROLE_OPENER);
+				col++;
+				line->cells[col].context = context_encode(comment_pair_id,
+					PAIR_TYPE_COMMENT, PAIR_ROLE_OPENER);
+				continue;
+			}
+
+			/* Check for block comment end */
+			if (in_block_comment && cp == '*' && col + 1 < line->cell_count &&
+			    line->cells[col + 1].codepoint == '/') {
+				/* Mark the '*' and '/' as closer */
+				line->cells[col].context = context_encode(comment_pair_id,
+					PAIR_TYPE_COMMENT, PAIR_ROLE_CLOSER);
+				col++;
+				line->cells[col].context = context_encode(comment_pair_id,
+					PAIR_TYPE_COMMENT, PAIR_ROLE_CLOSER);
+				in_block_comment = false;
+				continue;
+			}
+
+			/* Skip other processing if inside block comment */
+			if (in_block_comment) {
+				continue;
+			}
+
+			/* Opening brackets */
+			if (cp == '(' || cp == '[' || cp == '{') {
+				enum pair_type type = (cp == '(') ? PAIR_TYPE_PAREN :
+				                      (cp == '[') ? PAIR_TYPE_BRACKET :
+				                      PAIR_TYPE_BRACE;
+				uint32_t pair_id = buffer_allocate_pair_id(buffer);
+
+				line->cells[col].context = context_encode(pair_id, type,
+					PAIR_ROLE_OPENER);
+
+				if (stack_top < 256) {
+					stack[stack_top].row = row;
+					stack[stack_top].col = col;
+					stack[stack_top].pair_id = pair_id;
+					stack[stack_top].type = type;
+					stack_top++;
+				}
+				continue;
+			}
+
+			/* Closing brackets */
+			if (cp == ')' || cp == ']' || cp == '}') {
+				enum pair_type type = (cp == ')') ? PAIR_TYPE_PAREN :
+				                      (cp == ']') ? PAIR_TYPE_BRACKET :
+				                      PAIR_TYPE_BRACE;
+
+				/* Find matching opener on stack */
+				int match = -1;
+				for (int i = stack_top - 1; i >= 0; i--) {
+					if (stack[i].type == type) {
+						match = i;
+						break;
+					}
+				}
+
+				if (match >= 0) {
+					uint32_t pair_id = stack[match].pair_id;
+					line->cells[col].context = context_encode(pair_id, type,
+						PAIR_ROLE_CLOSER);
+
+					/* Remove from stack (and any unmatched openers above it) */
+					stack_top = match;
+				} else {
+					/* Unmatched closer */
+					line->cells[col].context = 0;
+				}
+				continue;
+			}
+		}
+	}
+}
+
+/*
+ * Given a cell with a pair context, find its matching partner.
+ * Returns true if found, with partner position in out_row/out_col.
+ */
+static bool buffer_find_pair_partner(struct buffer *buffer,
+                                     uint32_t row, uint32_t col,
+                                     uint32_t *out_row, uint32_t *out_col)
+{
+	if (row >= buffer->line_count) {
+		return false;
+	}
+
+	struct line *line = &buffer->lines[row];
+	if (col >= line->cell_count) {
+		return false;
+	}
+
+	uint32_t context = line->cells[col].context;
+	uint32_t pair_id = context_get_pair_id(context);
+	enum pair_role role = context_get_pair_role(context);
+
+	if (pair_id == 0 || role == PAIR_ROLE_NONE) {
+		return false;
+	}
+
+	/* Search direction depends on role */
+	bool search_forward = (role == PAIR_ROLE_OPENER);
+
+	if (search_forward) {
+		/* Search forward for closer */
+		for (uint32_t r = row; r < buffer->line_count; r++) {
+			struct line *search_line = &buffer->lines[r];
+			if (search_line->temperature == LINE_TEMPERATURE_COLD) {
+				line_warm(search_line, buffer);
+			}
+
+			uint32_t start_col = (r == row) ? col + 1 : 0;
+			for (uint32_t c = start_col; c < search_line->cell_count; c++) {
+				if (context_get_pair_id(search_line->cells[c].context) == pair_id &&
+				    context_get_pair_role(search_line->cells[c].context) == PAIR_ROLE_CLOSER) {
+					*out_row = r;
+					*out_col = c;
+					return true;
+				}
+			}
+		}
+	} else {
+		/* Search backward for opener */
+		for (int r = row; r >= 0; r--) {
+			struct line *search_line = &buffer->lines[r];
+			if (search_line->temperature == LINE_TEMPERATURE_COLD) {
+				line_warm(search_line, buffer);
+			}
+
+			int start_col = (r == (int)row) ? (int)col - 1 :
+				(int)search_line->cell_count - 1;
+			for (int c = start_col; c >= 0; c--) {
+				if (context_get_pair_id(search_line->cells[c].context) == pair_id &&
+				    context_get_pair_role(search_line->cells[c].context) == PAIR_ROLE_OPENER) {
+					*out_row = r;
+					*out_col = c;
+					return true;
+				}
+			}
+		}
+	}
+
+	return false;
+}
+
+/*
+ * Check if a position is inside a block comment by examining pair context.
+ * Scans backward for an unclosed comment opener.
+ */
+static bool syntax_is_in_block_comment(struct buffer *buffer, uint32_t row, uint32_t col)
+{
+	/* Scan backwards for an unclosed block comment opener */
+	for (int r = row; r >= 0; r--) {
+		struct line *line = &buffer->lines[r];
+		if (line->temperature == LINE_TEMPERATURE_COLD) {
+			line_warm(line, buffer);
+		}
+
+		int end_col = (r == (int)row) ? (int)col - 1 : (int)line->cell_count - 1;
+
+		for (int c = end_col; c >= 0; c--) {
+			uint32_t context = line->cells[c].context;
+			enum pair_type type = context_get_pair_type(context);
+			enum pair_role role = context_get_pair_role(context);
+
+			if (type == PAIR_TYPE_COMMENT) {
+				if (role == PAIR_ROLE_CLOSER) {
+					/* Found a closer before us, so we're not in that comment */
+					return false;
+				}
+				if (role == PAIR_ROLE_OPENER) {
+					/* Found an opener - check if it closes after our position */
+					uint32_t partner_row, partner_col;
+					if (buffer_find_pair_partner(buffer, r, c,
+					                             &partner_row, &partner_col)) {
+						/* Has a closer - are we before it? */
+						if (partner_row > row ||
+						    (partner_row == row && partner_col >= col)) {
+							return true;  /* We're inside this comment */
+						}
+						/* Closer is before us, keep searching */
+					} else {
+						/* Unclosed comment - we're inside it */
+						return true;
+					}
+				}
+			}
+		}
+	}
+
+	return false;
+}
 
 /*****************************************************************************
  * Syntax Highlighting
@@ -401,9 +935,10 @@ static bool syntax_is_c_file(const char *filename)
 
 /*
  * Apply syntax highlighting to a single line. Tokenizes the line and sets
- * the syntax field of each cell. Only works on warm/hot lines.
+ * the syntax field of each cell. Uses pair context for multiline comments.
  */
-static void syntax_highlight_line(struct line *line, struct buffer *buffer)
+static void syntax_highlight_line(struct line *line, struct buffer *buffer,
+                                  uint32_t row)
 {
 	/* Only highlight C files */
 	if (!syntax_is_c_file(buffer->filename)) {
@@ -420,9 +955,30 @@ static void syntax_highlight_line(struct line *line, struct buffer *buffer)
 		line->cells[i].syntax = SYNTAX_NORMAL;
 	}
 
+	/* Check if line starts inside a block comment */
+	bool in_block_comment = syntax_is_in_block_comment(buffer, row, 0);
+
 	uint32_t i = 0;
 	while (i < line->cell_count) {
 		uint32_t cp = line->cells[i].codepoint;
+
+		/* If inside block comment, everything is comment until we exit */
+		if (in_block_comment) {
+			line->cells[i].syntax = SYNTAX_COMMENT;
+
+			/* Check for block comment end */
+			if (cp == '*' && i + 1 < line->cell_count &&
+			    line->cells[i + 1].codepoint == '/') {
+				line->cells[i].syntax = SYNTAX_COMMENT;
+				i++;
+				line->cells[i].syntax = SYNTAX_COMMENT;
+				i++;
+				in_block_comment = false;
+				continue;
+			}
+			i++;
+			continue;
+		}
 
 		/* Check for // comment */
 		if (cp == '/' && i + 1 < line->cell_count &&
@@ -434,19 +990,14 @@ static void syntax_highlight_line(struct line *line, struct buffer *buffer)
 			break;
 		}
 
-		/* Check for block comment start (highlight to end of line) */
+		/* Check for block comment start */
 		if (cp == '/' && i + 1 < line->cell_count &&
 		    line->cells[i + 1].codepoint == '*') {
-			while (i < line->cell_count) {
-				line->cells[i].syntax = SYNTAX_COMMENT;
-				/* Check for block comment ending */
-				if (line->cells[i].codepoint == '/' && i >= 1 &&
-				    line->cells[i - 1].codepoint == '*') {
-					i++;
-					break;
-				}
-				i++;
-			}
+			in_block_comment = true;
+			line->cells[i].syntax = SYNTAX_COMMENT;
+			i++;
+			line->cells[i].syntax = SYNTAX_COMMENT;
+			i++;
 			continue;
 		}
 
@@ -709,6 +1260,21 @@ static int input_read_key(void)
 						case '7': return KEY_HOME;
 						case '8': return KEY_END;
 					}
+				} else if (sequence[2] == ';') {
+					/* Modified arrow key: \x1b[1;5C = Ctrl+Right */
+					char modifier, direction;
+					if (read(STDIN_FILENO, &modifier, 1) != 1) {
+						return '\x1b';
+					}
+					if (read(STDIN_FILENO, &direction, 1) != 1) {
+						return '\x1b';
+					}
+					if (modifier == '5') {  /* Ctrl modifier */
+						switch (direction) {
+							case 'C': return KEY_CTRL_ARROW_RIGHT;
+							case 'D': return KEY_CTRL_ARROW_LEFT;
+						}
+					}
 				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
 					/* Two-digit escape sequence like \x1b[12~ for F2 */
 					if (read(STDIN_FILENO, &sequence[3], 1) != 1) {
@@ -898,8 +1464,10 @@ static void line_warm(struct line *line, struct buffer *buffer)
 
 	line->temperature = LINE_TEMPERATURE_WARM;
 
-	/* Apply syntax highlighting */
-	syntax_highlight_line(line, buffer);
+	/* Compute neighbor data for word boundaries */
+	neighbor_compute_line(line);
+
+	/* Note: syntax highlighting is called separately after pairs are computed */
 }
 
 /*
@@ -1098,8 +1666,11 @@ static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, ui
 	line->temperature = LINE_TEMPERATURE_HOT;
 	buffer->is_modified = true;
 
+	/* Recompute neighbors for this line */
+	neighbor_compute_line(line);
+
 	/* Re-highlight the modified line */
-	syntax_highlight_line(line, buffer);
+	syntax_highlight_line(line, buffer, row);
 }
 
 /* Deletes the grapheme cluster at the specified position. If at end of line,
@@ -1122,8 +1693,9 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 		}
 		line->temperature = LINE_TEMPERATURE_HOT;
 		buffer->is_modified = true;
-		/* Re-highlight the modified line */
-		syntax_highlight_line(line, buffer);
+		/* Recompute neighbors and re-highlight */
+		neighbor_compute_line(line);
+		syntax_highlight_line(line, buffer, row);
 	} else if (row + 1 < buffer->line_count) {
 		/* Join with next line */
 		struct line *next_line = &buffer->lines[row + 1];
@@ -1131,8 +1703,9 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 		line_append_cells_from_line(line, next_line);
 		line->temperature = LINE_TEMPERATURE_HOT;
 		buffer_delete_line(buffer, row + 1);
-		/* Re-highlight the joined line */
-		syntax_highlight_line(line, buffer);
+		/* Recompute neighbors and re-highlight */
+		neighbor_compute_line(line);
+		syntax_highlight_line(line, buffer, row);
 	}
 }
 
@@ -1171,9 +1744,11 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 		line->cell_count = column;
 		line->temperature = LINE_TEMPERATURE_HOT;
 
-		/* Re-highlight both lines after split */
-		syntax_highlight_line(line, buffer);
-		syntax_highlight_line(new_line, buffer);
+		/* Recompute neighbors and re-highlight both lines */
+		neighbor_compute_line(line);
+		neighbor_compute_line(new_line);
+		syntax_highlight_line(line, buffer, row);
+		syntax_highlight_line(new_line, buffer, row + 1);
 	}
 }
 
@@ -1265,6 +1840,14 @@ static bool file_open(struct buffer *buffer, const char *filename)
 
 	buffer->filename = strdup(filename);
 	buffer->is_modified = false;
+
+	/* Compute pairs across entire buffer (warms all lines) */
+	buffer_compute_pairs(buffer);
+
+	/* Apply syntax highlighting with pair context */
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		syntax_highlight_line(&buffer->lines[row], buffer, row);
+	}
 
 	return true;
 }
@@ -1528,6 +2111,22 @@ static void editor_move_cursor(int key)
 				editor.cursor_row++;
 			} else if (editor.buffer.line_count == 0) {
 				/* Allow being on line 0 even with empty buffer */
+			}
+			break;
+
+		case KEY_CTRL_ARROW_LEFT:
+			if (current_line) {
+				line_warm(current_line, &editor.buffer);
+				editor.cursor_column = find_prev_word_start(current_line,
+					editor.cursor_column);
+			}
+			break;
+
+		case KEY_CTRL_ARROW_RIGHT:
+			if (current_line) {
+				line_warm(current_line, &editor.buffer);
+				editor.cursor_column = find_next_word_start(current_line,
+					editor.cursor_column);
 			}
 			break;
 
@@ -1987,6 +2586,8 @@ static void editor_process_keypress(void)
 		case KEY_ARROW_DOWN:
 		case KEY_ARROW_LEFT:
 		case KEY_ARROW_RIGHT:
+		case KEY_CTRL_ARROW_LEFT:
+		case KEY_CTRL_ARROW_RIGHT:
 		case KEY_HOME:
 		case KEY_END:
 		case KEY_PAGE_UP:
