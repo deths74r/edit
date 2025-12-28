@@ -2887,11 +2887,19 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 			} else {
 				editor.row_offset = 0;
 			}
+			/* Keep cursor on screen */
+			if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
+				editor.cursor_row = editor.row_offset + editor.screen_rows - 1;
+			}
 			break;
 
 		case MOUSE_SCROLL_DOWN:
 			if (editor.row_offset + editor.screen_rows < editor.buffer.line_count) {
 				editor.row_offset += 3;
+			}
+			/* Keep cursor on screen */
+			if (editor.cursor_row < editor.row_offset) {
+				editor.cursor_row = editor.row_offset;
 			}
 			break;
 
