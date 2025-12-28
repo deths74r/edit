@@ -95,16 +95,22 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Test [Claude]**: Verified build succeeds (1 warning: unused `cell_is_word_end`)
 
-**Status**: Phase 6 complete, ready for commit
+**Action [User]**: Requested merge to main
+
+**Action [Claude]**: Committed Phase 6 (dc09108) - 771 insertions, 27 deletions
+
+**Action [Claude]**: Merged `neighbor-pair-entanglement` to `main` (fast-forward)
+
+**Status**: Phase 6 complete and merged
 
 ---
 
 ## Current State
 
-- **Branch**: `neighbor-pair-entanglement`
+- **Branch**: `main`
 - **Version**: 0.6.0
 - **Build**: Clean (1 expected warning)
-- **Pending**: User to request commit
+- **Last Commit**: dc09108 - Phase 6: Neighbor Layer and Pair Entanglement
 
 ---
 
@@ -126,8 +132,8 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains up to Phase 5
-- `neighbor-pair-entanglement` - current work, Phase 6
+- `main` - stable, contains Phase 1-6
+- `neighbor-pair-entanglement` - merged to main
 
 ### Build Commands
 ```bash
