@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 12C: Wrapped Line Rendering
+ * Phase 12D: Cursor Movement on Wrapped Lines
  *****************************************************************************/
 
 /*****************************************************************************
@@ -3839,6 +3839,116 @@ static uint32_t buffer_get_total_screen_rows(struct buffer *buffer)
 }
 
 /*
+ * Calculate the visual column within a segment for a given cell column.
+ * Returns the rendered width from segment start to the cell.
+ */
+static uint32_t line_get_visual_column_in_segment(struct line *line,
+                                                   struct buffer *buffer,
+                                                   uint16_t segment,
+                                                   uint32_t cell_column)
+{
+	line_ensure_wrap_cache(line, buffer);
+	line_warm(line, buffer);
+
+	uint32_t segment_start = line_get_segment_start(line, buffer, segment);
+	uint32_t segment_end = line_get_segment_end(line, buffer, segment);
+
+	/* Clamp cell_column to segment bounds */
+	if (cell_column < segment_start) {
+		cell_column = segment_start;
+	}
+	if (cell_column > segment_end) {
+		cell_column = segment_end;
+	}
+
+	/* Calculate visual width from segment start to cell_column */
+	uint32_t visual_col = 0;
+	uint32_t absolute_visual = 0;
+
+	/* First calculate visual column at segment start (for tab alignment) */
+	for (uint32_t i = 0; i < segment_start && i < line->cell_count; i++) {
+		uint32_t cp = line->cells[i].codepoint;
+		int width;
+		if (cp == '\t') {
+			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+		} else {
+			width = utflite_codepoint_width(cp);
+			if (width < 0) width = 1;
+		}
+		absolute_visual += width;
+	}
+
+	/* Now calculate visual width within segment */
+	for (uint32_t i = segment_start; i < cell_column && i < line->cell_count; i++) {
+		uint32_t cp = line->cells[i].codepoint;
+		int width;
+		if (cp == '\t') {
+			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+		} else {
+			width = utflite_codepoint_width(cp);
+			if (width < 0) width = 1;
+		}
+		visual_col += width;
+		absolute_visual += width;
+	}
+
+	return visual_col;
+}
+
+/*
+ * Find the cell column at a given visual column within a segment.
+ * Used for maintaining visual position when moving between segments.
+ */
+static uint32_t line_find_column_at_visual(struct line *line,
+                                           struct buffer *buffer,
+                                           uint16_t segment,
+                                           uint32_t target_visual)
+{
+	line_ensure_wrap_cache(line, buffer);
+	line_warm(line, buffer);
+
+	uint32_t segment_start = line_get_segment_start(line, buffer, segment);
+	uint32_t segment_end = line_get_segment_end(line, buffer, segment);
+
+	/* Calculate visual column at segment start (for tab alignment) */
+	uint32_t absolute_visual = 0;
+	for (uint32_t i = 0; i < segment_start && i < line->cell_count; i++) {
+		uint32_t cp = line->cells[i].codepoint;
+		int width;
+		if (cp == '\t') {
+			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+		} else {
+			width = utflite_codepoint_width(cp);
+			if (width < 0) width = 1;
+		}
+		absolute_visual += width;
+	}
+
+	/* Find the column at target_visual within the segment */
+	uint32_t visual_col = 0;
+	uint32_t col = segment_start;
+
+	while (col < segment_end && col < line->cell_count) {
+		if (visual_col >= target_visual) {
+			break;
+		}
+		uint32_t cp = line->cells[col].codepoint;
+		int width;
+		if (cp == '\t') {
+			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+		} else {
+			width = utflite_codepoint_width(cp);
+			if (width < 0) width = 1;
+		}
+		visual_col += width;
+		absolute_visual += width;
+		col++;
+	}
+
+	return col;
+}
+
+/*
  * Return the number of cells in a line. This is the logical length used
  * for cursor positioning, not the rendered width. For cold lines, counts
  * codepoints without allocating cells. Returns 0 for invalid row numbers.
@@ -4002,14 +4112,67 @@ static void editor_move_cursor(int key)
 			break;
 
 		case KEY_ARROW_UP:
-			if (editor.cursor_row > 0) {
-				editor.cursor_row--;
+			if (editor.wrap_mode == WRAP_NONE) {
+				/* No wrap: move by logical line */
+				if (editor.cursor_row > 0) {
+					editor.cursor_row--;
+				}
+			} else if (current_line) {
+				/* Wrap enabled: move by screen row (segment) */
+				uint16_t cur_segment = line_get_segment_for_column(
+					current_line, &editor.buffer, editor.cursor_column);
+				uint32_t visual_col = line_get_visual_column_in_segment(
+					current_line, &editor.buffer, cur_segment,
+					editor.cursor_column);
+
+				if (cur_segment > 0) {
+					/* Move to previous segment of same line */
+					uint32_t new_col = line_find_column_at_visual(
+						current_line, &editor.buffer,
+						cur_segment - 1, visual_col);
+					editor.cursor_column = new_col;
+				} else if (editor.cursor_row > 0) {
+					/* Move to last segment of previous line */
+					editor.cursor_row--;
+					struct line *prev_line = &editor.buffer.lines[editor.cursor_row];
+					line_ensure_wrap_cache(prev_line, &editor.buffer);
+					uint16_t last_segment = prev_line->wrap_segment_count - 1;
+					uint32_t new_col = line_find_column_at_visual(
+						prev_line, &editor.buffer, last_segment, visual_col);
+					editor.cursor_column = new_col;
+				}
 			}
 			break;
 
 		case KEY_ARROW_DOWN:
-			if (editor.cursor_row < editor.buffer.line_count - 1) {
-				editor.cursor_row++;
+			if (editor.wrap_mode == WRAP_NONE) {
+				/* No wrap: move by logical line */
+				if (editor.cursor_row < editor.buffer.line_count - 1) {
+					editor.cursor_row++;
+				}
+			} else if (current_line) {
+				/* Wrap enabled: move by screen row (segment) */
+				line_ensure_wrap_cache(current_line, &editor.buffer);
+				uint16_t cur_segment = line_get_segment_for_column(
+					current_line, &editor.buffer, editor.cursor_column);
+				uint32_t visual_col = line_get_visual_column_in_segment(
+					current_line, &editor.buffer, cur_segment,
+					editor.cursor_column);
+
+				if (cur_segment + 1 < current_line->wrap_segment_count) {
+					/* Move to next segment of same line */
+					uint32_t new_col = line_find_column_at_visual(
+						current_line, &editor.buffer,
+						cur_segment + 1, visual_col);
+					editor.cursor_column = new_col;
+				} else if (editor.cursor_row < editor.buffer.line_count - 1) {
+					/* Move to first segment of next line */
+					editor.cursor_row++;
+					struct line *next_line = &editor.buffer.lines[editor.cursor_row];
+					uint32_t new_col = line_find_column_at_visual(
+						next_line, &editor.buffer, 0, visual_col);
+					editor.cursor_column = new_col;
+				}
 			} else if (editor.buffer.line_count == 0) {
 				/* Allow being on line 0 even with empty buffer */
 			}
@@ -4049,11 +4212,43 @@ static void editor_move_cursor(int key)
 			break;
 
 		case KEY_HOME:
-			editor.cursor_column = 0;
+			if (editor.wrap_mode == WRAP_NONE || !current_line) {
+				/* No wrap: go to start of logical line */
+				editor.cursor_column = 0;
+			} else {
+				/* Wrap enabled: go to start of current segment */
+				uint16_t segment = line_get_segment_for_column(
+					current_line, &editor.buffer, editor.cursor_column);
+				uint32_t segment_start = line_get_segment_start(
+					current_line, &editor.buffer, segment);
+				if (editor.cursor_column == segment_start && segment > 0) {
+					/* Already at segment start, go to previous segment start */
+					segment_start = line_get_segment_start(
+						current_line, &editor.buffer, segment - 1);
+				}
+				editor.cursor_column = segment_start;
+			}
 			break;
 
 		case KEY_END:
-			editor.cursor_column = line_length;
+			if (editor.wrap_mode == WRAP_NONE || !current_line) {
+				/* No wrap: go to end of logical line */
+				editor.cursor_column = line_length;
+			} else {
+				/* Wrap enabled: go to end of current segment */
+				line_ensure_wrap_cache(current_line, &editor.buffer);
+				uint16_t segment = line_get_segment_for_column(
+					current_line, &editor.buffer, editor.cursor_column);
+				uint32_t segment_end = line_get_segment_end(
+					current_line, &editor.buffer, segment);
+				if (editor.cursor_column == segment_end &&
+				    segment + 1 < current_line->wrap_segment_count) {
+					/* Already at segment end, go to next segment end */
+					segment_end = line_get_segment_end(
+						current_line, &editor.buffer, segment + 1);
+				}
+				editor.cursor_column = segment_end;
+			}
 			break;
 
 		case KEY_PAGE_UP:
