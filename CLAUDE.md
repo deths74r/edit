@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`edit` is a minimal terminal text editor written in C (v0.6.0). It features full UTF-8/Unicode 17.0 support, real-time C syntax highlighting, grapheme cluster navigation, and paired delimiter matching.
+`edit` is a minimal terminal text editor written in C (v0.12.0). It features full UTF-8/Unicode 17.0 support, real-time C syntax highlighting, grapheme cluster navigation, paired delimiter matching, and soft line wrapping.
 
 ## Build Commands
 
@@ -29,7 +29,7 @@ timeout 0.3 ./edit <file>   # Quick visual test with auto-exit
 
 ### Source Structure
 
-Single-file architecture: `src/edit.c` (~2800 lines) organized into 15 sections with banner comments (`/*** Title ***/`).
+Single-file architecture: `src/edit.c` (~6500 lines) organized into sections with banner comments (`/*** Title ***/`).
 
 ### Core Data Model
 
@@ -75,3 +75,5 @@ All code must follow CODING_STANDARDS.md. Key rules:
 ## Session Recovery
 
 Read TRANSACTION_LOG.md to understand current state after crashes or to resume work. It tracks all phases, commits, and outstanding tasks.
+
+**IMPORTANT**: Always keep TRANSACTION_LOG.md up to date. After completing any significant work (new features, bug fixes, phase completions), update the log with what was done before ending the session.

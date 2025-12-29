@@ -436,16 +436,166 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Test [Claude]**: Verified build succeeds with no warnings
 
-**Status**: Phase 11 complete, ready for commit
+**Action [Claude]**: Simplified search navigation keys:
+- Replaced F3/Shift+F3 with Alt+N (next) and Alt+P (previous)
+- Added Arrow keys and scroll wheel for navigation in search mode
+
+**Action [Claude]**: Added `search_center_on_match()` - centers viewport on current match
+
+**Status**: Phase 11 complete, merged to main
+
+---
+
+### WCAG 2.1 AA Color Contrast (COMPLETED)
+
+**Action [User]**: Requested WCAG-compliant color contrast
+
+**Action [Claude]**: Added color contrast functions:
+- `color_linearize()` - sRGB to linear conversion
+- `color_luminance()` - relative luminance per WCAG 2.1
+- `color_contrast_ratio()` - contrast between two colors
+- `color_ensure_contrast()` - auto-adjust for 4.5:1 minimum
+
+**Action [Claude]**: Applied contrast adjustment to search highlights and selection
+
+**Status**: Complete, merged to main
+
+---
+
+### Tritanopia-Friendly Theme (COMPLETED)
+
+**Action [User]**: Requested color scheme optimized for Tritanopia color blindness
+
+**Action [Claude]**: Replaced Tokyo Night theme with new design:
+- Luminance as primary differentiator
+- Red-cyan color axis (visible to Tritanopia)
+- Avoids blue-yellow distinctions
+- All combinations maintain WCAG AA compliance (≥4.5:1)
+
+**Syntax colors**: magenta keywords, cyan types/functions, coral strings, gray comments
+
+**Status**: Complete, merged to main
+
+---
+
+### Cursor Line Highlight (COMPLETED)
+
+**Action [User]**: Requested subtle highlight for current line
+
+**Action [Claude]**: Added `THEME_CURSOR_LINE` (#1E1E1E)
+- Highlights entire line containing cursor
+- Extends to line number gutter
+- Lower priority than search/selection highlights
+
+**Status**: Complete, merged to main
+
+---
+
+## Session: 2025-12-29
+
+### Phase 12: Soft Line Wrapping (COMPLETED)
+
+**Action [User]**: Requested soft wrap implementation
+
+#### Phase 12A: Foundation & Wrap Point Calculation
+
+**Action [Claude]**: Added wrap mode enums:
+- `enum wrap_mode`: WRAP_NONE, WRAP_WORD, WRAP_CHAR
+- `enum wrap_indicator`: NONE, CORNER(⎿), HOOK(↪), ARROW(→), DOT(·), FLOOR(⌊), BOTTOM(⌞), RETURN(↳), BOX(└)
+
+**Action [Claude]**: Added wrap state to `struct editor_state`:
+- `wrap_mode` (default: WRAP_WORD)
+- `wrap_indicator` (default: WRAP_INDICATOR_RETURN)
+
+**Action [Claude]**: Added key bindings:
+- Alt+Z - cycle wrap mode (Off → Word → Char)
+- Alt+Shift+Z - cycle wrap indicator
+
+**Action [Claude]**: Added `line_find_wrap_point()` - finds optimal break point using neighbor layer
+
+#### Phase 12B: Wrap Cache Infrastructure
+
+**Action [Claude]**: Added wrap cache fields to `struct line`:
+- `wrap_columns` - array of segment start columns
+- `wrap_segment_count` - number of visual segments
+- `wrap_cache_width` - cached text area width
+- `wrap_cache_mode` - cached wrap mode
+
+**Action [Claude]**: Added cache functions:
+- `line_compute_wrap_points()` - compute wrap points for a line
+- `line_invalidate_wrap_cache()` - invalidate single line cache
+- `buffer_invalidate_all_wrap_caches()` - invalidate all caches
+
+**Action [Claude]**: Hooked invalidation into edit operations and resize
+
+#### Phase 12C: Wrapped Line Rendering
+
+**Action [Claude]**: Added helper functions:
+- `line_ensure_wrap_cache()` - lazy cache computation
+- `line_get_segment_for_column()` - find segment containing column
+- `line_get_segment_start/end()` - segment boundaries
+- `editor_get_text_width()` - text area width calculation
+
+**Action [Claude]**: Rewrote `render_draw_rows()`:
+- Iterates through (file_row, segment) pairs
+- Shows line number for segment 0, wrap indicator for continuations
+- Cursor line highlight only on segment containing cursor
+
+**Action [Claude]**: Updated `render_line_content()`:
+- Segment mode (wrap enabled): render cells from start_cell to end_cell
+- Scroll mode (wrap disabled): horizontal scrolling with column_offset
+
+#### Phase 12D: Cursor Movement on Wrapped Lines
+
+**Action [Claude]**: Added visual column helpers:
+- `line_get_visual_column_in_segment()` - visual X within segment
+- `line_find_column_at_visual()` - cell column at visual position
+
+**Action [Claude]**: Updated Up/Down arrow handling:
+- WRAP_NONE: move by logical line
+- WRAP_WORD/CHAR: move by screen row (segment), preserve visual column
+
+**Action [Claude]**: Updated Home/End handling:
+- WRAP_NONE: go to line start/end
+- WRAP_WORD/CHAR: go to segment start/end, press again at boundary to move to adjacent segment
+
+#### Phase 12E: Mouse Click & Scroll
+
+**Action [Claude]**: Added `screen_row_to_line_segment()` - maps screen coordinates to (line, segment)
+
+**Action [Claude]**: Updated mouse handlers:
+- MOUSE_LEFT_PRESS: segment-aware click positioning
+- MOUSE_LEFT_DRAG: segment-aware drag selection
+- Uses `line_find_column_at_visual()` for accurate column mapping
+
+**Action [Claude]**: Added `calculate_max_row_offset()` - wrap-aware scroll limit
+
+**Action [Claude]**: Updated scroll wheel to use wrap-aware max_offset
+
+#### Bug Fixes
+
+**Bug [User]**: Cursor and highlight bar became desynced when navigating with arrow keys
+
+**Bug Fix [Claude]**: Fixed `render_refresh_screen()`:
+- Was calculating cursor screen position as `(cursor_row - row_offset)` assuming 1 line = 1 row
+- Now sums segment counts from row_offset to cursor_row
+- Calculates visual column within cursor's segment
+
+**Bug Fix [Claude]**: Fixed `editor_scroll()`:
+- Same incorrect assumption for off-screen detection
+- Now calculates actual screen row by summing segments
+- Disabled horizontal scrolling in wrap mode (not needed)
+
+**Status**: Phase 12 complete, merged to main
 
 ---
 
 ## Current State
 
-- **Branch**: `incremental-search`
-- **Version**: 0.11.0
-- **Build**: Clean (no warnings)
-- **Last Commit**: Pending - Phase 11: Incremental Search
+- **Branch**: `main`
+- **Version**: 0.12.0 (soft wrap)
+- **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
+- **Source**: `src/edit.c` (~6500 lines)
 
 ---
 
@@ -454,10 +604,12 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ```
 /home/edward/repos/edit/
 ├── src/
-│   └── edit.c          # Main editor source (~5100 lines)
+│   └── edit.c          # Main editor source (~6500 lines)
 ├── third_party/
 │   └── utflite/        # UTF-8 library
 ├── Makefile
+├── CLAUDE.md           # AI assistant guidance
+├── CODING_STANDARDS.md # Code style rules
 ├── TRANSACTION_LOG.md  # This file
 └── (other files)
 ```
@@ -467,13 +619,16 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains Phase 1-10
-- `incremental-search` - Phase 11 implementation (pending commit/merge)
-- `undo-redo` - merged to main
-- `clipboard-integration` - merged to main
-- `adaptive-scroll` - merged to main
-- `selection` - merged to main
-- `neighbor-pair-entanglement` - merged to main
+- `main` - stable, contains all phases through Phase 12
+- `soft-wrap-foundation` - merged to main
+- All other feature branches merged to main
+
+### Key Bindings (New in Phase 11-12)
+- Ctrl+F - enter search mode
+- Alt+N - find next match
+- Alt+P - find previous match
+- Alt+Z - cycle wrap mode
+- Alt+Shift+Z - cycle wrap indicator
 
 ### Build Commands
 ```bash
