@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 11: Incremental Search
+ * Phase 12C: Wrapped Line Rendering
  *****************************************************************************/
 
 /*****************************************************************************
@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.11.0"
+#define EDIT_VERSION "0.12.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -98,6 +98,8 @@ enum key_code {
 	/* Alt key combinations. */
 	KEY_ALT_N = -88,
 	KEY_ALT_P = -87,
+	KEY_ALT_Z = -86,
+	KEY_ALT_SHIFT_Z = -85,
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
@@ -209,6 +211,22 @@ struct mouse_input {
 
 	/* Screen column (0-based). */
 	uint32_t column;
+};
+
+/* Wrap mode for handling long lines. */
+enum wrap_mode {
+	WRAP_NONE = 0,    /* No wrapping - horizontal scroll only */
+	WRAP_WORD,        /* Wrap at word boundaries */
+	WRAP_CHAR         /* Wrap at any character */
+};
+
+/* Visual indicator style for wrapped line continuations. */
+enum wrap_indicator {
+	WRAP_INDICATOR_NONE = 0,   /* Blank gutter on continuations */
+	WRAP_INDICATOR_CORNER,     /* ⎿ */
+	WRAP_INDICATOR_HOOK,       /* ↪ */
+	WRAP_INDICATOR_ARROW,      /* → */
+	WRAP_INDICATOR_DOT         /* · */
 };
 
 /* Types of edit operations that can be undone/redone. */
@@ -475,6 +493,10 @@ static struct syntax_color color_ensure_contrast(struct syntax_color fg,
 	return adjusted;
 }
 
+/*****************************************************************************
+ * Soft Wrap
+ *****************************************************************************/
+
 /* A single character cell storing one Unicode codepoint and metadata. */
 struct cell {
 	/* The Unicode codepoint stored in this cell. */
@@ -513,7 +535,55 @@ struct line {
 
 	/* Temperature indicates whether cells are allocated/edited. */
 	enum line_temperature temperature;
+
+	/*
+	 * Wrap cache - computed on demand, invalidated on edit/resize.
+	 * wrap_columns[i] is the column index where segment i STARTS.
+	 * wrap_columns[0] is always 0 (first segment starts at column 0).
+	 */
+	uint32_t *wrap_columns;
+
+	/* Number of visual segments (1 = no wrap, 2+ = wrapped). */
+	uint16_t wrap_segment_count;
+
+	/* Text area width when wrap was computed (0 = cache invalid). */
+	uint16_t wrap_cache_width;
+
+	/* Wrap mode when computed. */
+	enum wrap_mode wrap_cache_mode;
 };
+
+/*
+ * Find the best column to break a line for wrapping.
+ *
+ * Searches backward from max_width to find an appropriate break point.
+ * Uses the neighbor layer to prefer breaking at word boundaries.
+ *
+ * Parameters:
+ *   line        - The line to find a wrap point in (must be warm)
+ *   start_col   - Column where this segment starts
+ *   max_width   - Maximum visual width for this segment
+ *   mode        - WRAP_WORD (prefer word boundaries) or WRAP_CHAR (any column)
+ *
+ * Returns:
+ *   Column index where the segment should END (exclusive).
+ *   Next segment starts at this column.
+ *   Returns line->cell_count if no wrap needed.
+ */
+static uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
+                                      uint32_t max_width, enum wrap_mode mode);
+
+/* Cycle through wrap modes: NONE -> WORD -> CHAR -> NONE */
+static void editor_cycle_wrap_mode(void);
+
+/* Cycle through wrap indicators. */
+static void editor_cycle_wrap_indicator(void);
+
+/* Get the UTF-8 string for a wrap indicator. */
+static const char *wrap_indicator_string(enum wrap_indicator ind);
+
+/* Invalidate wrap cache for a single line. */
+static void line_invalidate_wrap_cache(struct line *line);
 
 /* The text buffer holding all lines of the file being edited. Manages
  * file I/O, mmap backing, and tracks modification state. */
@@ -548,6 +618,13 @@ struct buffer {
 	/* Undo/redo history. */
 	struct undo_history undo_history;
 };
+
+/* Compute wrap points for a line. Populates the wrap cache fields. */
+static void line_compute_wrap_points(struct line *line, struct buffer *buffer,
+                                     uint16_t text_width, enum wrap_mode mode);
+
+/* Invalidate wrap cache for all lines in the buffer. */
+static void buffer_invalidate_all_wrap_caches(struct buffer *buffer);
 
 /* Accumulates output bytes before flushing to the terminal. Batching
  * writes reduces flicker and improves rendering performance. */
@@ -607,6 +684,10 @@ struct editor_state {
 
 	/* Whether a selection is currently active. */
 	bool selection_active;
+
+	/* Soft wrap settings. */
+	enum wrap_mode wrap_mode;
+	enum wrap_indicator wrap_indicator;
 };
 
 /*****************************************************************************
@@ -1478,7 +1559,16 @@ static bool terminal_get_size(uint32_t *rows, uint32_t *columns)
 {
 	struct winsize window_size;
 
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) == -1 || window_size.ws_col == 0) {
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) == -1) {
+		return false;
+	}
+
+	/*
+	 * Sanity check: reject unreasonably small dimensions.
+	 * When stdout is a pipe (not a TTY), ioctl may succeed but
+	 * return garbage values. Minimum usable size is 10x10.
+	 */
+	if (window_size.ws_col < 10 || window_size.ws_row < 10) {
 		return false;
 	}
 
@@ -1596,6 +1686,8 @@ static int input_read_key(void)
 			switch (sequence[0]) {
 				case 'n': case 'N': return KEY_ALT_N;
 				case 'p': case 'P': return KEY_ALT_P;
+				case 'z': return KEY_ALT_Z;
+				case 'Z': return KEY_ALT_SHIFT_Z;
 				default: return '\x1b';
 			}
 		}
@@ -1747,6 +1839,10 @@ static void line_init(struct line *line)
 	line->mmap_offset = 0;
 	line->mmap_length = 0;
 	line->temperature = LINE_TEMPERATURE_HOT;
+	line->wrap_columns = NULL;
+	line->wrap_segment_count = 0;
+	line->wrap_cache_width = 0;
+	line->wrap_cache_mode = WRAP_NONE;
 }
 
 /* Frees all memory associated with a line and resets its fields. */
@@ -1759,6 +1855,11 @@ static void line_free(struct line *line)
 	line->mmap_offset = 0;
 	line->mmap_length = 0;
 	line->temperature = LINE_TEMPERATURE_COLD;
+	free(line->wrap_columns);
+	line->wrap_columns = NULL;
+	line->wrap_segment_count = 0;
+	line->wrap_cache_width = 0;
+	line->wrap_cache_mode = WRAP_NONE;
 }
 
 /* Ensures the line can hold at least 'required' cells, reallocating if needed. */
@@ -2075,6 +2176,9 @@ static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, ui
 
 	/* Re-highlight the modified line */
 	syntax_highlight_line(line, buffer, row);
+
+	/* Invalidate wrap cache since line content changed. */
+	line_invalidate_wrap_cache(line);
 }
 
 /* Deletes the grapheme cluster at the specified position. If at end of line,
@@ -2100,6 +2204,8 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 		/* Recompute neighbors and re-highlight */
 		neighbor_compute_line(line);
 		syntax_highlight_line(line, buffer, row);
+		/* Invalidate wrap cache since line content changed. */
+		line_invalidate_wrap_cache(line);
 	} else if (row + 1 < buffer->line_count) {
 		/* Join with next line */
 		struct line *next_line = &buffer->lines[row + 1];
@@ -2110,6 +2216,8 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 		/* Recompute neighbors and re-highlight */
 		neighbor_compute_line(line);
 		syntax_highlight_line(line, buffer, row);
+		/* Invalidate wrap cache since line content changed. */
+		line_invalidate_wrap_cache(line);
 	}
 }
 
@@ -2153,6 +2261,9 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 		neighbor_compute_line(new_line);
 		syntax_highlight_line(line, buffer, row);
 		syntax_highlight_line(new_line, buffer, row + 1);
+
+		/* Invalidate wrap cache for truncated line. */
+		line_invalidate_wrap_cache(line);
 	}
 }
 
@@ -2340,6 +2451,8 @@ static void editor_init(void)
 	editor.selection_anchor_row = 0;
 	editor.selection_anchor_column = 0;
 	editor.selection_active = false;
+	editor.wrap_mode = WRAP_WORD;
+	editor.wrap_indicator = WRAP_INDICATOR_HOOK;
 }
 
 /* Start a new selection at the current cursor position. The anchor is set
@@ -2705,6 +2818,7 @@ static void buffer_insert_cell_no_record(struct buffer *buffer, uint32_t row,
 
 	neighbor_compute_line(line);
 	syntax_highlight_line(line, buffer, row);
+	line_invalidate_wrap_cache(line);
 }
 
 /*
@@ -2731,6 +2845,7 @@ static void buffer_delete_cell_no_record(struct buffer *buffer, uint32_t row,
 
 	neighbor_compute_line(line);
 	syntax_highlight_line(line, buffer, row);
+	line_invalidate_wrap_cache(line);
 }
 
 /*
@@ -2769,6 +2884,7 @@ static void buffer_insert_newline_no_record(struct buffer *buffer, uint32_t row,
 		neighbor_compute_line(new_line);
 		syntax_highlight_line(line, buffer, row);
 		syntax_highlight_line(new_line, buffer, row + 1);
+		line_invalidate_wrap_cache(line);
 	}
 
 	buffer->is_modified = true;
@@ -2801,6 +2917,7 @@ static void buffer_join_lines_no_record(struct buffer *buffer, uint32_t row)
 
 	neighbor_compute_line(line);
 	syntax_highlight_line(line, buffer, row);
+	line_invalidate_wrap_cache(line);
 }
 
 /*
@@ -3330,6 +3447,9 @@ static void editor_update_screen_size(void)
 	}
 	/* Reserve space for status bar and message bar */
 	editor.screen_rows -= 2;
+
+	/* Terminal width changed, invalidate all wrap caches. */
+	buffer_invalidate_all_wrap_caches(&editor.buffer);
 }
 
 /*
@@ -3344,6 +3464,378 @@ static void editor_set_status_message(const char *format, ...)
 	vsnprintf(editor.status_message, sizeof(editor.status_message), format, arguments);
 	va_end(arguments);
 	editor.status_message_time = time(NULL);
+}
+
+/*****************************************************************************
+ * Soft Wrap Implementation
+ *****************************************************************************/
+
+static uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
+                                      uint32_t max_width, enum wrap_mode mode)
+{
+	if (mode == WRAP_NONE) {
+		return line->cell_count;  /* No wrapping */
+	}
+
+	/* Calculate visual width from start_col */
+	uint32_t visual_width = 0;
+	uint32_t col = start_col;
+
+	while (col < line->cell_count) {
+		uint32_t cp = line->cells[col].codepoint;
+		int width;
+
+		if (cp == '\t') {
+			width = TAB_STOP_WIDTH - ((visual_width) % TAB_STOP_WIDTH);
+		} else {
+			width = utflite_codepoint_width(cp);
+			if (width < 0) width = 1;
+		}
+
+		if (visual_width + (uint32_t)width > max_width) {
+			/* This character would exceed max_width */
+			break;
+		}
+
+		visual_width += (uint32_t)width;
+		col++;
+	}
+
+	/* If we fit the whole line (from start_col), no wrap needed */
+	if (col >= line->cell_count) {
+		return line->cell_count;
+	}
+
+	/* col is now the first character that doesn't fit */
+	uint32_t hard_break = col;
+
+	/* For character wrap, just break at the edge */
+	if (mode == WRAP_CHAR) {
+		/* Don't break at column 0 of segment (infinite loop) */
+		return (hard_break > start_col) ? hard_break : start_col + 1;
+	}
+
+	/* For word wrap, search backward for a good break point */
+	uint32_t best_break = hard_break;
+	bool found_break = false;
+
+	for (uint32_t i = hard_break; i > start_col; i--) {
+		uint8_t neighbor = line->cells[i - 1].neighbor;
+		enum character_class cls = neighbor_get_class(neighbor);
+		enum token_position pos = neighbor_get_position(neighbor);
+
+		/* Best: break after whitespace */
+		if (cls == CHAR_CLASS_WHITESPACE) {
+			best_break = i;
+			found_break = true;
+			break;
+		}
+
+		/* Good: break after punctuation at end of token */
+		if (cls == CHAR_CLASS_PUNCTUATION &&
+		    (pos == TOKEN_POSITION_END || pos == TOKEN_POSITION_SOLO)) {
+			best_break = i;
+			found_break = true;
+			/* Keep looking for whitespace */
+		}
+
+		/* Acceptable: break at word boundary (class transition) */
+		if (!found_break && i < hard_break) {
+			uint8_t next_neighbor = line->cells[i].neighbor;
+			enum character_class next_cls = neighbor_get_class(next_neighbor);
+			if (cls != next_cls && cls != CHAR_CLASS_WHITESPACE) {
+				best_break = i;
+				found_break = true;
+				/* Keep looking for better options */
+			}
+		}
+	}
+
+	/* If no good break found, fall back to hard break */
+	if (!found_break || best_break <= start_col) {
+		best_break = hard_break;
+	}
+
+	/* Safety: never return start_col (would cause infinite loop) */
+	if (best_break <= start_col) {
+		best_break = start_col + 1;
+	}
+
+	return best_break;
+}
+
+static void editor_cycle_wrap_mode(void)
+{
+	switch (editor.wrap_mode) {
+		case WRAP_NONE:
+			editor.wrap_mode = WRAP_WORD;
+			editor_set_status_message("Wrap: Word");
+			break;
+		case WRAP_WORD:
+			editor.wrap_mode = WRAP_CHAR;
+			editor_set_status_message("Wrap: Character");
+			break;
+		case WRAP_CHAR:
+			editor.wrap_mode = WRAP_NONE;
+			editor_set_status_message("Wrap: Off");
+			break;
+	}
+	buffer_invalidate_all_wrap_caches(&editor.buffer);
+}
+
+static void editor_cycle_wrap_indicator(void)
+{
+	switch (editor.wrap_indicator) {
+		case WRAP_INDICATOR_NONE:
+			editor.wrap_indicator = WRAP_INDICATOR_CORNER;
+			editor_set_status_message("Wrap indicator: ⎿");
+			break;
+		case WRAP_INDICATOR_CORNER:
+			editor.wrap_indicator = WRAP_INDICATOR_HOOK;
+			editor_set_status_message("Wrap indicator: ↪");
+			break;
+		case WRAP_INDICATOR_HOOK:
+			editor.wrap_indicator = WRAP_INDICATOR_ARROW;
+			editor_set_status_message("Wrap indicator: →");
+			break;
+		case WRAP_INDICATOR_ARROW:
+			editor.wrap_indicator = WRAP_INDICATOR_DOT;
+			editor_set_status_message("Wrap indicator: ·");
+			break;
+		case WRAP_INDICATOR_DOT:
+			editor.wrap_indicator = WRAP_INDICATOR_NONE;
+			editor_set_status_message("Wrap indicator: None");
+			break;
+	}
+}
+
+static const char *wrap_indicator_string(enum wrap_indicator ind)
+{
+	switch (ind) {
+		case WRAP_INDICATOR_CORNER: return "⎿";
+		case WRAP_INDICATOR_HOOK:   return "↪";
+		case WRAP_INDICATOR_ARROW:  return "→";
+		case WRAP_INDICATOR_DOT:    return "·";
+		default:                    return " ";
+	}
+}
+
+/*
+ * Invalidate the wrap cache for a single line.
+ * Called when line content changes or when wrap settings change.
+ */
+static void line_invalidate_wrap_cache(struct line *line)
+{
+	free(line->wrap_columns);
+	line->wrap_columns = NULL;
+	line->wrap_segment_count = 0;
+	line->wrap_cache_width = 0;
+	line->wrap_cache_mode = WRAP_NONE;
+}
+
+/*
+ * Invalidate wrap caches for all lines in the buffer.
+ * Called when terminal is resized or wrap mode changes.
+ */
+static void buffer_invalidate_all_wrap_caches(struct buffer *buffer)
+{
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		line_invalidate_wrap_cache(&buffer->lines[row]);
+	}
+}
+
+/*
+ * Compute wrap points for a line and populate the wrap cache.
+ *
+ * This function calculates where a line should wrap based on the text
+ * area width and wrap mode. Results are cached in the line struct to
+ * avoid recomputation during scrolling and rendering.
+ *
+ * Parameters:
+ *   line       - The line to compute wrap points for
+ *   buffer     - Parent buffer (needed to warm cold lines)
+ *   text_width - Available width for text (screen width minus gutter)
+ *   mode       - Wrap mode (NONE, WORD, or CHAR)
+ */
+static void line_compute_wrap_points(struct line *line, struct buffer *buffer,
+                                     uint16_t text_width, enum wrap_mode mode)
+{
+	/*
+	 * Check if cache is still valid. A cache hit requires matching
+	 * width, mode, and the cache must have been computed at least once.
+	 */
+	if (line->wrap_cache_width == text_width &&
+	    line->wrap_cache_mode == mode &&
+	    line->wrap_segment_count > 0) {
+		return;
+	}
+
+	/* Invalidate any stale cache data before recomputing. */
+	line_invalidate_wrap_cache(line);
+
+	/* For no-wrap mode, line is a single segment. */
+	if (mode == WRAP_NONE || text_width == 0) {
+		line->wrap_columns = malloc(sizeof(uint32_t));
+		line->wrap_columns[0] = 0;
+		line->wrap_segment_count = 1;
+		line->wrap_cache_width = text_width;
+		line->wrap_cache_mode = mode;
+		return;
+	}
+
+	/* Ensure line is warm so we can access cells. */
+	line_warm(line, buffer);
+
+	/*
+	 * First pass: count how many segments we need.
+	 * Start with segment 0 at column 0, then find each wrap point.
+	 */
+	uint32_t segment_count = 1;
+	uint32_t column = 0;
+
+	while (column < line->cell_count) {
+		uint32_t wrap_point = line_find_wrap_point(line, column,
+		                                           text_width, mode);
+		if (wrap_point >= line->cell_count) {
+			break;
+		}
+		segment_count++;
+		column = wrap_point;
+	}
+
+	/* Allocate array for segment start columns. */
+	line->wrap_columns = malloc(segment_count * sizeof(uint32_t));
+
+	/*
+	 * Second pass: record the actual wrap columns.
+	 * wrap_columns[i] is where segment i starts.
+	 */
+	line->wrap_columns[0] = 0;
+	column = 0;
+
+	for (uint16_t segment = 1; segment < segment_count; segment++) {
+		uint32_t wrap_point = line_find_wrap_point(line, column,
+		                                           text_width, mode);
+		line->wrap_columns[segment] = wrap_point;
+		column = wrap_point;
+	}
+
+	line->wrap_segment_count = segment_count;
+	line->wrap_cache_width = text_width;
+	line->wrap_cache_mode = mode;
+}
+
+/*
+ * Get the text area width (screen width minus gutter).
+ * Used for computing wrap points.
+ */
+static uint16_t editor_get_text_width(void)
+{
+	return editor.screen_columns > editor.gutter_width
+		? editor.screen_columns - editor.gutter_width
+		: 1;
+}
+
+/*
+ * Ensure wrap cache is computed for a line.
+ * Uses current editor wrap settings and text width.
+ */
+static void line_ensure_wrap_cache(struct line *line, struct buffer *buffer)
+{
+	uint16_t text_width = editor_get_text_width();
+	line_compute_wrap_points(line, buffer, text_width, editor.wrap_mode);
+}
+
+/*
+ * Find which segment of a line contains the given column.
+ * Ensures wrap cache is computed first.
+ * Returns 0 for first segment, up to segment_count-1 for last.
+ */
+static uint16_t line_get_segment_for_column(struct line *line,
+                                            struct buffer *buffer,
+                                            uint32_t column)
+{
+	line_ensure_wrap_cache(line, buffer);
+
+	if (line->wrap_segment_count <= 1) {
+		return 0;
+	}
+
+	/*
+	 * Binary search for the segment containing this column.
+	 * wrap_columns[i] is where segment i starts, so we want
+	 * the largest i where wrap_columns[i] <= column.
+	 */
+	uint16_t low = 0;
+	uint16_t high = line->wrap_segment_count - 1;
+
+	while (low < high) {
+		uint16_t mid = (low + high + 1) / 2;
+		if (line->wrap_columns[mid] <= column) {
+			low = mid;
+		} else {
+			high = mid - 1;
+		}
+	}
+
+	return low;
+}
+
+/*
+ * Get the start column for a specific segment of a line.
+ * Ensures wrap cache is computed first.
+ */
+static uint32_t line_get_segment_start(struct line *line,
+                                       struct buffer *buffer,
+                                       uint16_t segment)
+{
+	line_ensure_wrap_cache(line, buffer);
+
+	if (segment >= line->wrap_segment_count) {
+		segment = line->wrap_segment_count - 1;
+	}
+
+	return line->wrap_columns[segment];
+}
+
+/*
+ * Get the end column (exclusive) for a specific segment of a line.
+ * Ensures wrap cache is computed first.
+ */
+static uint32_t line_get_segment_end(struct line *line,
+                                     struct buffer *buffer,
+                                     uint16_t segment)
+{
+	line_ensure_wrap_cache(line, buffer);
+
+	if (segment >= line->wrap_segment_count) {
+		return line->cell_count;
+	}
+
+	if (segment + 1 < line->wrap_segment_count) {
+		return line->wrap_columns[segment + 1];
+	}
+
+	return line->cell_count;
+}
+
+/*
+ * Get total number of screen rows needed to display all lines
+ * with current wrap settings. Used for scroll calculations.
+ */
+static uint32_t buffer_get_total_screen_rows(struct buffer *buffer)
+{
+	if (editor.wrap_mode == WRAP_NONE) {
+		return buffer->line_count;
+	}
+
+	uint32_t total = 0;
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		line_ensure_wrap_cache(&buffer->lines[row], buffer);
+		total += buffer->lines[row].wrap_segment_count;
+	}
+
+	return total > 0 ? total : 1;
 }
 
 /*
@@ -4698,38 +5190,72 @@ static void render_set_syntax_color(struct output_buffer *output, enum syntax_to
 }
 
 /*
- * Render a single line's content to the output buffer. Warms the line if
- * cold. Handles horizontal scrolling by skipping to column_offset, expands
- * tabs to spaces, and encodes each cell's codepoint to UTF-8. Wide
- * characters that don't fit are replaced with spaces. Uses syntax colors
- * and highlights selected cells with a distinct background.
+ * Render a segment of a line's content to the output buffer.
+ *
+ * Two rendering modes:
+ * 1. Segment mode (end_cell < UINT32_MAX): Render cells from start_cell to end_cell.
+ *    Used for wrapped line segments.
+ * 2. Scroll mode (end_cell == UINT32_MAX): Horizontal scroll - start_cell is a
+ *    visual column offset, skip to that position then render. Used for WRAP_NONE.
+ *
+ * Parameters:
+ *   output        - Output buffer to append rendered content to
+ *   line          - The line to render (will be warmed if cold)
+ *   buffer        - Parent buffer
+ *   file_row      - Logical line number in file (for search/selection)
+ *   start_cell    - First cell index, OR visual column offset if end_cell==UINT32_MAX
+ *   end_cell      - Last cell index (exclusive), or UINT32_MAX for scroll mode
+ *   max_width     - Maximum visual width to render
+ *   is_cursor_line - True if cursor is on this line (for background highlight)
  */
 static void render_line_content(struct output_buffer *output, struct line *line,
                                 struct buffer *buffer, uint32_t file_row,
-                                uint32_t column_offset, int max_width,
-                                bool is_cursor_line)
+                                uint32_t start_cell, uint32_t end_cell,
+                                int max_width, bool is_cursor_line)
 {
 	line_warm(line, buffer);
 
 	int visual_column = 0;
 	uint32_t cell_index = 0;
 
-	/* Skip to column_offset (for horizontal scrolling) */
-	while (cell_index < line->cell_count && visual_column < (int)column_offset) {
-		uint32_t codepoint = line->cells[cell_index].codepoint;
-
-		int width;
-		if (codepoint == '\t') {
-			width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
-		} else {
-			width = utflite_codepoint_width(codepoint);
-			if (width < 0) {
-				width = 1;  /* Control characters */
+	/*
+	 * Handle the two modes differently:
+	 * - Scroll mode (UINT32_MAX): skip cells until we reach the visual column
+	 * - Segment mode: jump directly to start_cell, computing visual column
+	 */
+	if (end_cell == UINT32_MAX) {
+		/* Scroll mode: start_cell is actually a visual column offset */
+		uint32_t column_offset = start_cell;
+		while (cell_index < line->cell_count && visual_column < (int)column_offset) {
+			uint32_t codepoint = line->cells[cell_index].codepoint;
+			int width;
+			if (codepoint == '\t') {
+				width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
+			} else {
+				width = utflite_codepoint_width(codepoint);
+				if (width < 0) width = 1;
 			}
+			visual_column += width;
+			cell_index++;
 		}
-
-		visual_column += width;
-		cell_index++;
+		end_cell = line->cell_count;
+	} else {
+		/* Segment mode: compute visual column at start of segment */
+		for (uint32_t i = 0; i < start_cell && i < line->cell_count; i++) {
+			uint32_t codepoint = line->cells[i].codepoint;
+			int width;
+			if (codepoint == '\t') {
+				width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
+			} else {
+				width = utflite_codepoint_width(codepoint);
+				if (width < 0) width = 1;
+			}
+			visual_column += width;
+		}
+		cell_index = start_cell;
+		if (end_cell > line->cell_count) {
+			end_cell = line->cell_count;
+		}
 	}
 
 	/* Track current state to minimize escape sequences */
@@ -4739,9 +5265,9 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	/* Set initial foreground color */
 	render_set_syntax_color(output, current_syntax);
 
-	/* Render visible content */
+	/* Render visible content up to end_cell or max_width */
 	int rendered_width = 0;
-	while (cell_index < line->cell_count && rendered_width < max_width) {
+	while (cell_index < end_cell && rendered_width < max_width) {
 		uint32_t codepoint = line->cells[cell_index].codepoint;
 		enum syntax_token syntax = line->cells[cell_index].syntax;
 
@@ -4833,61 +5359,74 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 
 /*
  * Render all visible rows of the editor. For each screen row, draws
- * the line number gutter (if enabled) and line content. Empty rows past
- * the end of the file are blank. Shows a centered welcome message for
- * empty buffers.
+ * the line number gutter (if enabled) and line content. Handles soft
+ * wrap by mapping screen rows to (logical_line, segment) pairs. Empty
+ * rows past the end of the file are blank. Shows a centered welcome
+ * message for empty buffers.
  */
 static void render_draw_rows(struct output_buffer *output)
 {
-	/* Calculate where to show the welcome message (vertically centered) */
 	uint32_t welcome_row = editor.screen_rows / 2;
+	int text_area_width = editor.screen_columns - editor.gutter_width;
+
+	/*
+	 * Track current position in the buffer.
+	 * file_row = logical line index
+	 * segment = which segment of that line (0 = first/only)
+	 */
+	uint32_t file_row = editor.row_offset;
+	uint16_t segment = 0;
+
+	/*
+	 * Cursor segment is needed to determine if we should highlight
+	 * the current screen row as "cursor line".
+	 */
+	uint16_t cursor_segment = 0;
+	if (editor.cursor_row < editor.buffer.line_count) {
+		struct line *cursor_line = &editor.buffer.lines[editor.cursor_row];
+		cursor_segment = line_get_segment_for_column(cursor_line,
+		                                             &editor.buffer,
+		                                             editor.cursor_column);
+	}
 
 	for (uint32_t screen_row = 0; screen_row < editor.screen_rows; screen_row++) {
-		/* Clear entire line first to handle gutter width changes */
 		output_buffer_append_string(output, "\x1b[2K");
 
-		uint32_t file_row = screen_row + editor.row_offset;
-
-		/* Show line number 1 for empty buffer on first screen row */
 		bool is_empty_buffer_first_line = (editor.buffer.line_count == 0 && file_row == 0);
 
 		if (file_row >= editor.buffer.line_count && !is_empty_buffer_first_line) {
 			/* Empty line past end of file */
 			if (editor.buffer.line_count == 0 && screen_row == welcome_row) {
-				/* Show centered welcome message for empty buffer */
 				char welcome[64];
-				int welcome_length = snprintf(welcome, sizeof(welcome), "edit v%s", EDIT_VERSION);
-
-				/* Center horizontally */
-				int text_area_width = editor.screen_columns - editor.gutter_width;
+				int welcome_length = snprintf(welcome, sizeof(welcome),
+				                              "edit v%s", EDIT_VERSION);
 				int padding = (text_area_width - welcome_length) / 2;
-				if (padding < 0) {
-					padding = 0;
-				}
+				if (padding < 0) padding = 0;
 
-				/* Add gutter space */
 				for (uint32_t i = 0; i < editor.gutter_width; i++) {
 					output_buffer_append_string(output, " ");
 				}
-
-				/* Add left padding */
 				for (int i = 0; i < padding; i++) {
 					output_buffer_append_string(output, " ");
 				}
-
-				/* Output welcome text */
 				output_buffer_append(output, welcome, welcome_length);
 			}
-			/* else: empty line, just clear it */
-		} else {
-			/* Draw line number if enabled */
-			if (editor.show_line_numbers && editor.gutter_width > 0) {
-				bool is_cursor_line = (file_row == editor.cursor_row);
+		} else if (file_row < editor.buffer.line_count) {
+			struct line *line = &editor.buffer.lines[file_row];
+			line_ensure_wrap_cache(line, &editor.buffer);
 
-				/* Use brighter color for current line, and cursor line background */
-				struct syntax_color ln_color = is_cursor_line
+			/*
+			 * Determine if this screen row should have cursor line highlight.
+			 * Only highlight the segment containing the cursor.
+			 */
+			bool is_cursor_line_segment =
+				(file_row == editor.cursor_row && segment == cursor_segment);
+
+			/* Draw gutter: line number for segment 0, indicator for continuations */
+			if (editor.show_line_numbers && editor.gutter_width > 0) {
+				struct syntax_color ln_color = is_cursor_line_segment
 					? THEME_LINE_NUMBER_ACTIVE : THEME_LINE_NUMBER;
-				struct syntax_color ln_bg = is_cursor_line
+				struct syntax_color ln_bg = is_cursor_line_segment
 					? THEME_CURSOR_LINE : THEME_BACKGROUND;
 
 				char color_escape[48];
@@ -4897,28 +5436,62 @@ static void render_draw_rows(struct output_buffer *output)
 				         ln_bg.red, ln_bg.green, ln_bg.blue);
 				output_buffer_append_string(output, color_escape);
 
-				char line_number_buffer[16];
-				snprintf(line_number_buffer, sizeof(line_number_buffer), "%*u ",
-				         editor.gutter_width - 1, file_row + 1);
-				output_buffer_append(output, line_number_buffer, editor.gutter_width);
+				if (segment == 0) {
+					/* First segment: show line number */
+					char line_number_buffer[16];
+					snprintf(line_number_buffer, sizeof(line_number_buffer),
+					         "%*u ", editor.gutter_width - 1, file_row + 1);
+					output_buffer_append(output, line_number_buffer,
+					                     editor.gutter_width);
+				} else {
+					/* Continuation: show wrap indicator */
+					const char *indicator = wrap_indicator_string(editor.wrap_indicator);
+					/* Pad to align indicator same as line numbers (with trailing space) */
+					for (uint32_t i = 0; i < editor.gutter_width - 2; i++) {
+						output_buffer_append_string(output, " ");
+					}
+					output_buffer_append_string(output, indicator);
+					output_buffer_append_string(output, " ");
+				}
 			}
 
-			/* Draw line content with tab expansion */
-			if (file_row < editor.buffer.line_count) {
-				struct line *line = &editor.buffer.lines[file_row];
-				int text_area_width = editor.screen_columns - editor.gutter_width;
-				bool is_cursor_line = (file_row == editor.cursor_row);
-				render_line_content(output, line, &editor.buffer, file_row, editor.column_offset, text_area_width, is_cursor_line);
+			/* Calculate segment bounds */
+			uint32_t start_cell = line_get_segment_start(line, &editor.buffer, segment);
+			uint32_t end_cell = line_get_segment_end(line, &editor.buffer, segment);
 
-				/* Fill rest of cursor line with highlight, then reset */
-				if (is_cursor_line) {
-					char fill_escape[64];
-					snprintf(fill_escape, sizeof(fill_escape),
-					         "\x1b[48;2;%d;%d;%dm\x1b[K\x1b[48;2;%d;%d;%dm",
-					         THEME_CURSOR_LINE.red, THEME_CURSOR_LINE.green, THEME_CURSOR_LINE.blue,
-					         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue);
-					output_buffer_append_string(output, fill_escape);
-				}
+			/*
+			 * For WRAP_NONE mode, use horizontal scrolling.
+			 * For wrap modes, render the segment directly.
+			 */
+			if (editor.wrap_mode == WRAP_NONE) {
+				/* No wrap: use column_offset for horizontal scrolling */
+				render_line_content(output, line, &editor.buffer, file_row,
+				                    editor.column_offset, UINT32_MAX,
+				                    text_area_width, is_cursor_line_segment);
+			} else {
+				/* Wrap enabled: render this segment */
+				render_line_content(output, line, &editor.buffer, file_row,
+				                    start_cell, end_cell,
+				                    text_area_width, is_cursor_line_segment);
+			}
+
+			/* Fill rest of cursor line segment with highlight */
+			if (is_cursor_line_segment) {
+				char fill_escape[64];
+				snprintf(fill_escape, sizeof(fill_escape),
+				         "\x1b[48;2;%d;%d;%dm\x1b[K\x1b[48;2;%d;%d;%dm",
+				         THEME_CURSOR_LINE.red, THEME_CURSOR_LINE.green,
+				         THEME_CURSOR_LINE.blue,
+				         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
+				         THEME_BACKGROUND.blue);
+				output_buffer_append_string(output, fill_escape);
+			}
+
+			/* Advance to next segment or line */
+			segment++;
+			if (segment >= line->wrap_segment_count) {
+				segment = 0;
+				file_row++;
 			}
 		}
 
@@ -5198,6 +5771,14 @@ static void editor_process_keypress(void)
 			editor.show_line_numbers = !editor.show_line_numbers;
 			editor_update_gutter_width();
 			editor_set_status_message("Line numbers %s", editor.show_line_numbers ? "on" : "off");
+			break;
+
+		case KEY_ALT_Z:
+			editor_cycle_wrap_mode();
+			break;
+
+		case KEY_ALT_SHIFT_Z:
+			editor_cycle_wrap_indicator();
 			break;
 
 		case CONTROL_KEY('f'):
