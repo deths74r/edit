@@ -245,16 +245,66 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Test [Claude]**: Verified build succeeds with no warnings
 
-**Status**: Phase 8 complete, ready for commit
+**Status**: Phase 8 complete, merged to main
+
+---
+
+### Phase 9: Clipboard Integration (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 9
+- Copy, cut, paste operations
+- System clipboard integration with internal fallback
+
+**Action [Claude]**: Created branch `clipboard-integration`
+
+**Action [Claude]**: Updated header to Phase 9, version to 0.9.0
+
+**Action [Claude]**: Added clipboard state:
+- `internal_clipboard` buffer for fallback
+- `enum clipboard_tool` (XCLIP, XSEL, WL, INTERNAL)
+- `detected_clipboard_tool` cached detection result
+
+**Action [Claude]**: Added `clipboard_detect_tool()`:
+- Checks WAYLAND_DISPLAY for wl-copy
+- Falls back to xclip, xsel, or internal buffer
+
+**Action [Claude]**: Added `clipboard_copy()`:
+- Pipes text to xclip/xsel/wl-copy
+- Uses internal buffer as fallback
+
+**Action [Claude]**: Added `clipboard_paste()`:
+- Reads from xclip/xsel/wl-paste
+- Dynamic buffer growth for large pastes
+- Uses internal buffer as fallback
+
+**Action [Claude]**: Added `selection_get_text()`:
+- Extracts selection as UTF-8 string
+- Handles multi-line selections with newlines
+
+**Action [Claude]**: Added editor clipboard functions:
+- `editor_copy()` - copy selection to clipboard
+- `editor_cut()` - copy and delete selection
+- `editor_paste()` - paste at cursor, replaces selection
+
+**Action [Claude]**: Added key bindings:
+- Ctrl+C - copy
+- Ctrl+X - cut
+- Ctrl+V - paste
+
+**Action [Claude]**: Added internal clipboard cleanup on exit
+
+**Test [Claude]**: Verified build succeeds with no warnings
+
+**Status**: Phase 9 complete, ready for commit
 
 ---
 
 ## Current State
 
-- **Branch**: `adaptive-scroll`
-- **Version**: 0.8.0
+- **Branch**: `clipboard-integration`
+- **Version**: 0.9.0
 - **Build**: Clean (no warnings)
-- **Last Commit**: Pending - Phase 8: Adaptive Scroll Speed
+- **Last Commit**: Pending - Phase 9: Clipboard Integration
 
 ---
 
@@ -276,8 +326,9 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains Phase 1-7
-- `adaptive-scroll` - Phase 8 implementation (pending commit/merge)
+- `main` - stable, contains Phase 1-8
+- `clipboard-integration` - Phase 9 implementation (pending commit/merge)
+- `adaptive-scroll` - merged to main
 - `selection` - merged to main
 - `neighbor-pair-entanglement` - merged to main
 
