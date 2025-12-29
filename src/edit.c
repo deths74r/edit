@@ -2278,26 +2278,36 @@ static void undo_history_free(struct undo_history *history)
 	undo_history_init(history);
 }
 
+/* Forward declaration */
+static void undo_end_group(struct buffer *buffer);
+
 /*
- * Begin a new undo group. If a group is already being recorded,
- * this does nothing. Called before making edits.
+ * Begin a new undo group. If within timeout of the last edit,
+ * continues the existing group. Called before making edits.
  */
 static void undo_begin_group(struct buffer *buffer)
 {
 	struct undo_history *history = &buffer->undo_history;
 
-	if (history->recording) {
-		return;
-	}
-
-	/* Check if we should continue the previous group (auto-grouping) */
 	struct timespec now;
 	clock_gettime(CLOCK_MONOTONIC, &now);
 
 	double dt = (double)(now.tv_sec - history->last_edit_time.tv_sec) +
 	            (double)(now.tv_nsec - history->last_edit_time.tv_nsec) / 1.0e9;
 
-	/* If within timeout and there's a recent group, continue it */
+	if (history->recording) {
+		/* Already recording - check if we should continue or start new group */
+		if (dt < UNDO_GROUP_TIMEOUT) {
+			/* Within timeout - continue current group */
+			history->last_edit_time = now;
+			return;
+		}
+		/* Timeout passed - end current group and start new one */
+		undo_end_group(buffer);
+	}
+
+	/* Check if we should continue the previous group (auto-grouping) */
+	/* This applies when recording was false but we're within timeout of last edit */
 	if (dt < UNDO_GROUP_TIMEOUT && history->current_index > 0 &&
 	    history->current_index == history->group_count) {
 		/* Continue the previous group */
@@ -2336,6 +2346,8 @@ static void undo_begin_group(struct buffer *buffer)
 	group->operation_capacity = 0;
 	group->cursor_row_before = editor.cursor_row;
 	group->cursor_column_before = editor.cursor_column;
+	group->cursor_row_after = editor.cursor_row;
+	group->cursor_column_after = editor.cursor_column;
 
 	history->group_count++;
 	history->current_index = history->group_count;
