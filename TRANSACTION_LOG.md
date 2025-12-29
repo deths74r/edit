@@ -645,7 +645,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
-### Phase 14: Line Operations (IN PROGRESS)
+### Phase 14: Line Operations (COMPLETED)
 
 **Action [User]**: Requested branch and implementation of Phase 14
 - Move Line Up/Down (Alt+Up, Alt+Down)
@@ -681,13 +681,15 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
 
-**Status**: Ready for commit
+**Action [Claude]**: Committed (c28223e) and merged to main
+
+**Status**: Phase 14 complete, merged to main
 
 ---
 
 ## Current State
 
-- **Branch**: `line-operations`
+- **Branch**: `main`
 - **Version**: 0.14.0 (line operations)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
 - **Source**: `src/edit.c` (~6900 lines)
@@ -714,8 +716,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains all phases through Phase 13
-- `line-operations` - Phase 14 in progress
+- `main` - stable, contains all phases through Phase 14
 - All feature branches merged to main
 
 ### Key Bindings (New in Phase 11-14)
