@@ -1480,6 +1480,7 @@ static int input_read_key(void)
 								case 'D': return KEY_SHIFT_ARROW_LEFT;
 								case 'H': return KEY_SHIFT_HOME;
 								case 'F': return KEY_SHIFT_END;
+								case 'R': return KEY_SHIFT_F3;
 							}
 						} else if (modifier == '5') {  /* Ctrl */
 							switch (final) {
@@ -4222,6 +4223,7 @@ static void search_exit(bool restore_position)
 		editor.column_offset = search.saved_column_offset;
 	}
 	search.active = false;
+	search.has_match = false;
 }
 
 /*
@@ -4359,6 +4361,7 @@ static bool search_find_previous(bool wrap)
 		line_warm(line, &editor.buffer);
 
 		int32_t col_start = (row == start_row) ? start_col : (int32_t)line->cell_count - 1;
+		if (col_start < 0) continue;
 
 		for (int32_t col = col_start; col >= 0; col--) {
 			if (search_matches_at(line, &editor.buffer, (uint32_t)col, search.query, search.query_length)) {
@@ -4379,6 +4382,7 @@ static bool search_find_previous(bool wrap)
 			line_warm(line, &editor.buffer);
 
 			int32_t col_start = (row == start_row) ? start_col : (int32_t)line->cell_count - 1;
+			if (col_start < 0) continue;
 
 			for (int32_t col = col_start; col >= 0; col--) {
 				if (search_matches_at(line, &editor.buffer, (uint32_t)col, search.query, search.query_length)) {
@@ -4440,7 +4444,21 @@ static int search_match_type(uint32_t row, uint32_t column)
 		return 0;
 	}
 
-	uint32_t match_len = search_query_cell_count(search.query, search.query_length);
+	/* Cache match_len to avoid O(n²) per render */
+	static char cached_query[256];
+	static uint32_t cached_query_length = 0;
+	static uint32_t cached_match_len = 0;
+
+	uint32_t match_len;
+	if (cached_query_length == search.query_length &&
+	    memcmp(cached_query, search.query, search.query_length) == 0) {
+		match_len = cached_match_len;
+	} else {
+		match_len = search_query_cell_count(search.query, search.query_length);
+		memcpy(cached_query, search.query, search.query_length);
+		cached_query_length = search.query_length;
+		cached_match_len = match_len;
+	}
 
 	/* Check if this cell is part of the current match */
 	if (search.has_match && row == search.match_row &&
