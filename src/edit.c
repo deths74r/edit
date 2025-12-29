@@ -342,6 +342,10 @@ static const struct syntax_color THEME_SEARCH_CURRENT = {0x5D, 0x4D, 0x3D}; /* W
 static const struct syntax_color THEME_LINE_NUMBER = {0x60, 0x60, 0x60};
 static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0xA0, 0xA0, 0xA0};
 
+/* Cursor line: Highlight for the line containing the cursor.
+ * Noticeably lighter than background (#121212) for clear visibility. */
+static const struct syntax_color THEME_CURSOR_LINE = {0x28, 0x28, 0x28};
+
 /*****************************************************************************
  * WCAG Color Contrast Utilities
  *****************************************************************************/
@@ -4702,7 +4706,8 @@ static void render_set_syntax_color(struct output_buffer *output, enum syntax_to
  */
 static void render_line_content(struct output_buffer *output, struct line *line,
                                 struct buffer *buffer, uint32_t file_row,
-                                uint32_t column_offset, int max_width)
+                                uint32_t column_offset, int max_width,
+                                bool is_cursor_line)
 {
 	line_warm(line, buffer);
 
@@ -4767,8 +4772,8 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				case 1:  /* Selection */
 					bg = THEME_SELECTION;
 					break;
-				default: /* Normal */
-					bg = THEME_BACKGROUND;
+				default: /* Normal or cursor line */
+					bg = is_cursor_line ? THEME_CURSOR_LINE : THEME_BACKGROUND;
 					break;
 			}
 
@@ -4817,10 +4822,11 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		cell_index++;
 	}
 
-	/* Reset background to normal to prevent bleeding into next element */
+	/* Reset background - use cursor line color if on cursor line */
+	struct syntax_color reset_bg = is_cursor_line ? THEME_CURSOR_LINE : THEME_BACKGROUND;
 	char reset[32];
 	snprintf(reset, sizeof(reset), "\x1b[48;2;%d;%d;%dm",
-	         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue);
+	         reset_bg.red, reset_bg.green, reset_bg.blue);
 	output_buffer_append_string(output, reset);
 	render_set_syntax_color(output, SYNTAX_NORMAL);
 }
@@ -4876,12 +4882,19 @@ static void render_draw_rows(struct output_buffer *output)
 		} else {
 			/* Draw line number if enabled */
 			if (editor.show_line_numbers && editor.gutter_width > 0) {
-				/* Use brighter color for current line */
-				struct syntax_color ln_color = (file_row == editor.cursor_row)
+				bool is_cursor_line = (file_row == editor.cursor_row);
+
+				/* Use brighter color for current line, and cursor line background */
+				struct syntax_color ln_color = is_cursor_line
 					? THEME_LINE_NUMBER_ACTIVE : THEME_LINE_NUMBER;
-				char color_escape[32];
-				snprintf(color_escape, sizeof(color_escape), "\x1b[38;2;%d;%d;%dm",
-				         ln_color.red, ln_color.green, ln_color.blue);
+				struct syntax_color ln_bg = is_cursor_line
+					? THEME_CURSOR_LINE : THEME_BACKGROUND;
+
+				char color_escape[48];
+				snprintf(color_escape, sizeof(color_escape),
+				         "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
+				         ln_color.red, ln_color.green, ln_color.blue,
+				         ln_bg.red, ln_bg.green, ln_bg.blue);
 				output_buffer_append_string(output, color_escape);
 
 				char line_number_buffer[16];
@@ -4894,7 +4907,18 @@ static void render_draw_rows(struct output_buffer *output)
 			if (file_row < editor.buffer.line_count) {
 				struct line *line = &editor.buffer.lines[file_row];
 				int text_area_width = editor.screen_columns - editor.gutter_width;
-				render_line_content(output, line, &editor.buffer, file_row, editor.column_offset, text_area_width);
+				bool is_cursor_line = (file_row == editor.cursor_row);
+				render_line_content(output, line, &editor.buffer, file_row, editor.column_offset, text_area_width, is_cursor_line);
+
+				/* Fill rest of cursor line with highlight, then reset */
+				if (is_cursor_line) {
+					char fill_escape[64];
+					snprintf(fill_escape, sizeof(fill_escape),
+					         "\x1b[48;2;%d;%d;%dm\x1b[K\x1b[48;2;%d;%d;%dm",
+					         THEME_CURSOR_LINE.red, THEME_CURSOR_LINE.green, THEME_CURSOR_LINE.blue,
+					         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue);
+					output_buffer_append_string(output, fill_escape);
+				}
 			}
 		}
 
