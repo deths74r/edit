@@ -4299,6 +4299,37 @@ static uint32_t search_query_cell_count(const char *query, uint32_t query_len)
 }
 
 /*
+ * Center the viewport vertically on the current match.
+ * Called after finding a match to snap it to the middle of the screen.
+ */
+static void search_center_on_match(void)
+{
+	if (!search.has_match) {
+		return;
+	}
+
+	/* Calculate the row offset that would center the match */
+	uint32_t target_row = search.match_row;
+	uint32_t half_screen = editor.screen_rows / 2;
+
+	if (target_row >= half_screen) {
+		editor.row_offset = target_row - half_screen;
+	} else {
+		editor.row_offset = 0;
+	}
+
+	/* Clamp to valid range */
+	if (editor.buffer.line_count > editor.screen_rows) {
+		uint32_t max_offset = editor.buffer.line_count - editor.screen_rows;
+		if (editor.row_offset > max_offset) {
+			editor.row_offset = max_offset;
+		}
+	} else {
+		editor.row_offset = 0;
+	}
+}
+
+/*
  * Find the next match starting from current position.
  * If wrap is true, wraps around to beginning of file.
  * Returns true if a match was found.
@@ -4326,6 +4357,7 @@ static bool search_find_next(bool wrap)
 				search.match_row = row;
 				search.match_column = col;
 				search.has_match = true;
+				search_center_on_match();
 				return true;
 			}
 		}
@@ -4346,6 +4378,7 @@ static bool search_find_next(bool wrap)
 					search.match_row = row;
 					search.match_column = col;
 					search.has_match = true;
+					search_center_on_match();
 					return true;
 				}
 			}
@@ -4384,6 +4417,7 @@ static bool search_find_previous(bool wrap)
 				search.match_row = (uint32_t)row;
 				search.match_column = (uint32_t)col;
 				search.has_match = true;
+				search_center_on_match();
 				return true;
 			}
 		}
@@ -4405,6 +4439,7 @@ static bool search_find_previous(bool wrap)
 					search.match_row = (uint32_t)row;
 					search.match_column = (uint32_t)col;
 					search.has_match = true;
+					search_center_on_match();
 					return true;
 				}
 			}
@@ -4440,11 +4475,13 @@ static void search_update(void)
 			search.match_row = editor.cursor_row;
 			search.match_column = editor.cursor_column;
 			search.has_match = true;
+			search_center_on_match();
 			return;
 		}
 	}
 
 	/* Otherwise find next match (with wrap) */
+	/* Note: search_find_next already calls search_center_on_match */
 	search_find_next(true);
 }
 
