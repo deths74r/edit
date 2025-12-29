@@ -3949,6 +3949,90 @@ static uint32_t line_find_column_at_visual(struct line *line,
 }
 
 /*
+ * Map a screen row (relative to row_offset) to logical line and segment.
+ * Used for converting mouse click positions to buffer positions.
+ *
+ * Returns true if the screen row maps to valid content, false if it's
+ * past the end of the buffer. On success, sets *out_line and *out_segment.
+ */
+static bool screen_row_to_line_segment(uint32_t screen_row,
+                                       uint32_t *out_line,
+                                       uint16_t *out_segment)
+{
+	if (editor.wrap_mode == WRAP_NONE) {
+		/* No wrap: direct mapping */
+		uint32_t file_row = screen_row + editor.row_offset;
+		if (file_row >= editor.buffer.line_count) {
+			return false;
+		}
+		*out_line = file_row;
+		*out_segment = 0;
+		return true;
+	}
+
+	/* With wrap: iterate through lines and segments */
+	uint32_t file_row = editor.row_offset;
+	uint16_t segment = 0;
+	uint32_t screen_pos = 0;
+
+	while (file_row < editor.buffer.line_count && screen_pos <= screen_row) {
+		struct line *line = &editor.buffer.lines[file_row];
+		line_ensure_wrap_cache(line, &editor.buffer);
+
+		/* Check each segment of this line */
+		for (segment = 0; segment < line->wrap_segment_count; segment++) {
+			if (screen_pos == screen_row) {
+				*out_line = file_row;
+				*out_segment = segment;
+				return true;
+			}
+			screen_pos++;
+		}
+		file_row++;
+	}
+
+	return false;
+}
+
+/*
+ * Calculate the maximum row_offset that ensures all content is reachable.
+ * In wrap mode, finds the first logical line such that the total screen
+ * rows from that line to the end fill at most screen_rows.
+ */
+static uint32_t calculate_max_row_offset(void)
+{
+	if (editor.wrap_mode == WRAP_NONE) {
+		/* Simple case: 1 line = 1 screen row */
+		if (editor.buffer.line_count > editor.screen_rows) {
+			return editor.buffer.line_count - editor.screen_rows;
+		}
+		return 0;
+	}
+
+	/*
+	 * With wrap: work backwards from last line, summing screen rows
+	 * until we exceed screen_rows. The line after that is max_offset.
+	 */
+	uint32_t screen_rows_from_end = 0;
+	uint32_t candidate = editor.buffer.line_count;
+
+	while (candidate > 0) {
+		candidate--;
+		struct line *line = &editor.buffer.lines[candidate];
+		line_ensure_wrap_cache(line, &editor.buffer);
+		screen_rows_from_end += line->wrap_segment_count;
+
+		if (screen_rows_from_end >= editor.screen_rows) {
+			/* This line and all after fill the screen */
+			return candidate;
+		}
+	}
+
+	/* All content fits on one screen */
+	return 0;
+}
+
+/*
  * Return the number of cells in a line. This is the logical length used
  * for cursor positioning, not the rendered width. For cold lines, counts
  * codepoints without allocating cells. Returns 0 for invalid row numbers.
@@ -4886,26 +4970,43 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 	switch (mouse->event) {
 		case MOUSE_LEFT_PRESS: {
 			/* Convert screen position to buffer position */
-			uint32_t file_row = mouse->row + editor.row_offset;
-			uint32_t screen_col = mouse->column;
+			uint32_t file_row;
+			uint16_t segment;
+			uint32_t cell_col;
 
-			/* Account for gutter */
+			/* Account for gutter in screen column */
+			uint32_t screen_col = mouse->column;
 			if (screen_col < editor.gutter_width) {
 				screen_col = 0;
 			} else {
 				screen_col -= editor.gutter_width;
 			}
 
-			/* Clamp to valid row */
-			if (file_row >= editor.buffer.line_count) {
+			/* Map screen row to logical line and segment */
+			if (screen_row_to_line_segment(mouse->row, &file_row, &segment)) {
+				/*
+				 * Convert visual position to cell column.
+				 * In wrap mode, visual position is just screen_col.
+				 * In no-wrap mode, add column_offset.
+				 */
+				struct line *line = &editor.buffer.lines[file_row];
+				if (editor.wrap_mode != WRAP_NONE) {
+					cell_col = line_find_column_at_visual(
+						line, &editor.buffer, segment, screen_col);
+				} else {
+					cell_col = screen_column_to_cell(
+						file_row, screen_col + editor.column_offset);
+				}
+			} else {
+				/* Click below content: go to last line */
 				if (editor.buffer.line_count > 0) {
 					file_row = editor.buffer.line_count - 1;
 				} else {
 					file_row = 0;
 				}
+				segment = 0;
+				cell_col = 0;
 			}
-
-			uint32_t cell_col = screen_column_to_cell(file_row, screen_col + editor.column_offset);
 
 			/* Detect double/triple click */
 			time_t now = time(NULL);
@@ -4939,21 +5040,39 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 
 		case MOUSE_LEFT_DRAG: {
 			/* Update cursor position; anchor stays fixed */
-			uint32_t file_row = mouse->row + editor.row_offset;
-			uint32_t screen_col = mouse->column;
+			uint32_t file_row;
+			uint16_t segment;
+			uint32_t cell_col;
 
+			uint32_t screen_col = mouse->column;
 			if (screen_col < editor.gutter_width) {
 				screen_col = 0;
 			} else {
 				screen_col -= editor.gutter_width;
 			}
 
-			if (file_row >= editor.buffer.line_count && editor.buffer.line_count > 0) {
-				file_row = editor.buffer.line_count - 1;
+			/* Map screen row to logical line and segment */
+			if (screen_row_to_line_segment(mouse->row, &file_row, &segment)) {
+				struct line *line = &editor.buffer.lines[file_row];
+				if (editor.wrap_mode != WRAP_NONE) {
+					cell_col = line_find_column_at_visual(
+						line, &editor.buffer, segment, screen_col);
+				} else {
+					cell_col = screen_column_to_cell(
+						file_row, screen_col + editor.column_offset);
+				}
+			} else {
+				/* Drag below content: clamp to last line */
+				if (editor.buffer.line_count > 0) {
+					file_row = editor.buffer.line_count - 1;
+				} else {
+					file_row = 0;
+				}
+				cell_col = 0;
 			}
 
 			editor.cursor_row = file_row;
-			editor.cursor_column = screen_column_to_cell(file_row, screen_col + editor.column_offset);
+			editor.cursor_column = cell_col;
 
 			/* Ensure selection is active during drag */
 			if (!editor.selection_active) {
@@ -5008,11 +5127,8 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 
 			uint32_t scroll_amount = calculate_adaptive_scroll(1);
 
-			/* Calculate maximum valid offset */
-			uint32_t max_offset = 0;
-			if (editor.buffer.line_count > editor.screen_rows) {
-				max_offset = editor.buffer.line_count - editor.screen_rows;
-			}
+			/* Calculate maximum valid offset (wrap-aware) */
+			uint32_t max_offset = calculate_max_row_offset();
 
 			if (editor.row_offset + scroll_amount <= max_offset) {
 				editor.row_offset += scroll_amount;
@@ -5147,14 +5263,10 @@ static void search_center_on_match(void)
 		editor.row_offset = 0;
 	}
 
-	/* Clamp to valid range */
-	if (editor.buffer.line_count > editor.screen_rows) {
-		uint32_t max_offset = editor.buffer.line_count - editor.screen_rows;
-		if (editor.row_offset > max_offset) {
-			editor.row_offset = max_offset;
-		}
-	} else {
-		editor.row_offset = 0;
+	/* Clamp to valid range (wrap-aware) */
+	uint32_t max_offset = calculate_max_row_offset();
+	if (editor.row_offset > max_offset) {
+		editor.row_offset = max_offset;
 	}
 }
 
