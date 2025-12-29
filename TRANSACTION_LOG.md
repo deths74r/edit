@@ -645,12 +645,52 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 14: Line Operations (IN PROGRESS)
+
+**Action [User]**: Requested branch and implementation of Phase 14
+- Move Line Up/Down (Alt+Up, Alt+Down)
+- Indent/Outdent (Tab with selection, Shift+Tab)
+
+**Action [Claude]**: Created branch `line-operations`
+
+**Action [Claude]**: Updated header to Phase 14, version to 0.14.0
+
+**Action [Claude]**: Added new key codes:
+- `KEY_ALT_ARROW_UP`, `KEY_ALT_ARROW_DOWN` - for line movement
+- `KEY_SHIFT_TAB` - for outdent
+
+**Action [Claude]**: Added key detection in `input_read_key()`:
+- Alt+Arrow via modifier code '3' in CSI sequences
+- Shift+Tab via `ESC [ Z` sequence
+
+**Action [Claude]**: Added line movement functions:
+- `buffer_swap_lines()` - swaps two lines in buffer
+- `editor_move_line_up()` - moves current line up
+- `editor_move_line_down()` - moves current line down
+
+**Action [Claude]**: Added indent/outdent functions:
+- `editor_indent_lines()` - inserts tab at start of lines
+- `editor_outdent_lines()` - removes leading tab/spaces
+
+**Action [Claude]**: Added key bindings:
+- Alt+Up - `editor_move_line_up()`
+- Alt+Down - `editor_move_line_down()`
+- Tab (with selection) - `editor_indent_lines()`
+- Tab (no selection) - inserts tab character
+- Shift+Tab - `editor_outdent_lines()`
+
+**Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
+
+**Status**: Ready for commit
+
+---
+
 ## Current State
 
-- **Branch**: `main`
-- **Version**: 0.13.0 (essential editing commands)
+- **Branch**: `line-operations`
+- **Version**: 0.14.0 (line operations)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
-- **Source**: `src/edit.c` (~6600 lines)
+- **Source**: `src/edit.c` (~6900 lines)
 
 ---
 
@@ -659,7 +699,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ```
 /home/edward/repos/edit/
 ├── src/
-│   └── edit.c          # Main editor source (~6600 lines)
+│   └── edit.c          # Main editor source (~6900 lines)
 ├── third_party/
 │   └── utflite/        # UTF-8 library
 ├── Makefile
@@ -675,9 +715,10 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ### Branches
 - `main` - stable, contains all phases through Phase 13
+- `line-operations` - Phase 14 in progress
 - All feature branches merged to main
 
-### Key Bindings (New in Phase 11-13)
+### Key Bindings (New in Phase 11-14)
 - Ctrl+F - enter search mode
 - Alt+N - find next match
 - Alt+P - find previous match
@@ -687,6 +728,10 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - Ctrl+A - select all
 - Alt+K - delete line
 - Alt+D - duplicate line
+- Alt+Up - move line up
+- Alt+Down - move line down
+- Tab (with selection) - indent lines
+- Shift+Tab - outdent lines
 
 ### Build Commands
 ```bash

@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 13: Essential Editing Commands
+ * Phase 14: Line Operations
  *****************************************************************************/
 
 /*****************************************************************************
@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.13.0"
+#define EDIT_VERSION "0.14.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -102,6 +102,11 @@ enum key_code {
 	KEY_ALT_SHIFT_Z = -85,
 	KEY_ALT_K = -84,
 	KEY_ALT_D = -83,
+	KEY_ALT_ARROW_UP = -82,
+	KEY_ALT_ARROW_DOWN = -81,
+
+	/* Shift+Tab (backtab). */
+	KEY_SHIFT_TAB = -80,
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
@@ -1760,6 +1765,11 @@ static int input_read_key(void)
 								case 'C': return KEY_CTRL_SHIFT_ARROW_RIGHT;
 								case 'D': return KEY_CTRL_SHIFT_ARROW_LEFT;
 							}
+						} else if (modifier == '3') {  /* Alt */
+							switch (final) {
+								case 'A': return KEY_ALT_ARROW_UP;
+								case 'B': return KEY_ALT_ARROW_DOWN;
+							}
 						}
 					} else if ((sequence[1] == '5' || sequence[1] == '6') &&
 					           modifier == '2' && final == '~') {
@@ -1793,6 +1803,7 @@ static int input_read_key(void)
 					case 'D': return KEY_ARROW_LEFT;
 					case 'H': return KEY_HOME;
 					case 'F': return KEY_END;
+					case 'Z': return KEY_SHIFT_TAB;
 				}
 			}
 		} else if (sequence[0] == 'O') {
@@ -6428,6 +6439,247 @@ static void editor_duplicate_line(void)
 	editor_set_status_message("Line duplicated");
 }
 
+/*
+ * Swap two lines in the buffer. Does not record undo.
+ */
+static void buffer_swap_lines(struct buffer *buffer, uint32_t row1, uint32_t row2)
+{
+	if (row1 >= buffer->line_count || row2 >= buffer->line_count) {
+		return;
+	}
+	struct line temp = buffer->lines[row1];
+	buffer->lines[row1] = buffer->lines[row2];
+	buffer->lines[row2] = temp;
+}
+
+/*
+ * Move the current line up one position.
+ */
+static void editor_move_line_up(void)
+{
+	if (editor.buffer.line_count < 2) {
+		return;
+	}
+
+	uint32_t row = editor.cursor_row;
+	if (row == 0) {
+		return;
+	}
+	if (row >= editor.buffer.line_count) {
+		row = editor.buffer.line_count - 1;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	/* Swap with line above */
+	buffer_swap_lines(&editor.buffer, row, row - 1);
+
+	/* Invalidate wrap caches */
+	line_invalidate_wrap_cache(&editor.buffer.lines[row]);
+	line_invalidate_wrap_cache(&editor.buffer.lines[row - 1]);
+
+	/* Move cursor up */
+	editor.cursor_row--;
+
+	editor.buffer.is_modified = true;
+	undo_end_group(&editor.buffer);
+
+	editor_set_status_message("Line moved up");
+}
+
+/*
+ * Move the current line down one position.
+ */
+static void editor_move_line_down(void)
+{
+	if (editor.buffer.line_count < 2) {
+		return;
+	}
+
+	uint32_t row = editor.cursor_row;
+	if (row >= editor.buffer.line_count - 1) {
+		return;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	/* Swap with line below */
+	buffer_swap_lines(&editor.buffer, row, row + 1);
+
+	/* Invalidate wrap caches */
+	line_invalidate_wrap_cache(&editor.buffer.lines[row]);
+	line_invalidate_wrap_cache(&editor.buffer.lines[row + 1]);
+
+	/* Move cursor down */
+	editor.cursor_row++;
+
+	editor.buffer.is_modified = true;
+	undo_end_group(&editor.buffer);
+
+	editor_set_status_message("Line moved down");
+}
+
+/*
+ * Indent the current line or all lines in selection.
+ * Inserts a tab character at the start of each line.
+ */
+static void editor_indent_lines(void)
+{
+	uint32_t start_row, end_row;
+
+	if (editor.selection_active && !selection_is_empty()) {
+		uint32_t start_col, end_col;
+		selection_get_range(&start_row, &start_col, &end_row, &end_col);
+	} else {
+		start_row = editor.cursor_row;
+		end_row = editor.cursor_row;
+	}
+
+	if (start_row >= editor.buffer.line_count) {
+		return;
+	}
+	if (end_row >= editor.buffer.line_count) {
+		end_row = editor.buffer.line_count - 1;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	for (uint32_t row = start_row; row <= end_row; row++) {
+		struct line *line = &editor.buffer.lines[row];
+		line_warm(line, &editor.buffer);
+
+		/* Skip empty lines */
+		if (line->cell_count == 0) {
+			continue;
+		}
+
+		/* Record for undo before inserting */
+		undo_record_insert_char(&editor.buffer, row, 0, '\t');
+
+		/* Insert tab at position 0 */
+		line_insert_cell(line, 0, '\t');
+		line->temperature = LINE_TEMPERATURE_HOT;
+
+		/* Recompute line metadata */
+		neighbor_compute_line(line);
+		syntax_highlight_line(line, &editor.buffer, row);
+		line_invalidate_wrap_cache(line);
+	}
+
+	/* Adjust cursor column to account for inserted tab */
+	if (editor.cursor_row >= start_row && editor.cursor_row <= end_row) {
+		editor.cursor_column++;
+	}
+
+	/* Adjust selection anchor if needed */
+	if (editor.selection_active) {
+		if (editor.selection_anchor_row >= start_row &&
+		    editor.selection_anchor_row <= end_row) {
+			editor.selection_anchor_column++;
+		}
+	}
+
+	editor.buffer.is_modified = true;
+	undo_end_group(&editor.buffer);
+
+	uint32_t count = end_row - start_row + 1;
+	editor_set_status_message("Indented %u line%s", count, count > 1 ? "s" : "");
+}
+
+/*
+ * Outdent the current line or all lines in selection.
+ * Removes leading tab or spaces from each line.
+ */
+static void editor_outdent_lines(void)
+{
+	uint32_t start_row, end_row;
+
+	if (editor.selection_active && !selection_is_empty()) {
+		uint32_t start_col, end_col;
+		selection_get_range(&start_row, &start_col, &end_row, &end_col);
+	} else {
+		start_row = editor.cursor_row;
+		end_row = editor.cursor_row;
+	}
+
+	if (start_row >= editor.buffer.line_count) {
+		return;
+	}
+	if (end_row >= editor.buffer.line_count) {
+		end_row = editor.buffer.line_count - 1;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	uint32_t lines_modified = 0;
+
+	for (uint32_t row = start_row; row <= end_row; row++) {
+		struct line *line = &editor.buffer.lines[row];
+		line_warm(line, &editor.buffer);
+
+		if (line->cell_count == 0) {
+			continue;
+		}
+
+		uint32_t chars_to_remove = 0;
+
+		/* Check what's at the start of the line */
+		if (line->cells[0].codepoint == '\t') {
+			chars_to_remove = 1;
+		} else if (line->cells[0].codepoint == ' ') {
+			/* Remove up to TAB_STOP_WIDTH spaces */
+			while (chars_to_remove < (uint32_t)TAB_STOP_WIDTH &&
+			       chars_to_remove < line->cell_count &&
+			       line->cells[chars_to_remove].codepoint == ' ') {
+				chars_to_remove++;
+			}
+		}
+
+		if (chars_to_remove == 0) {
+			continue;
+		}
+
+		/* Record and delete each character */
+		for (uint32_t i = 0; i < chars_to_remove; i++) {
+			undo_record_delete_char(&editor.buffer, row, 0, line->cells[0].codepoint);
+			line_delete_cell(line, 0);
+		}
+
+		line->temperature = LINE_TEMPERATURE_HOT;
+		neighbor_compute_line(line);
+		syntax_highlight_line(line, &editor.buffer, row);
+		line_invalidate_wrap_cache(line);
+		lines_modified++;
+
+		/* Adjust cursor column */
+		if (row == editor.cursor_row) {
+			if (editor.cursor_column >= chars_to_remove) {
+				editor.cursor_column -= chars_to_remove;
+			} else {
+				editor.cursor_column = 0;
+			}
+		}
+
+		/* Adjust selection anchor if needed */
+		if (editor.selection_active && row == editor.selection_anchor_row) {
+			if (editor.selection_anchor_column >= chars_to_remove) {
+				editor.selection_anchor_column -= chars_to_remove;
+			} else {
+				editor.selection_anchor_column = 0;
+			}
+		}
+	}
+
+	if (lines_modified > 0) {
+		editor.buffer.is_modified = true;
+	}
+
+	undo_end_group(&editor.buffer);
+
+	editor_set_status_message("Outdented %u line%s", lines_modified,
+	                          lines_modified != 1 ? "s" : "");
+}
+
 static void editor_process_keypress(void)
 {
 	int key = input_read_key();
@@ -6524,6 +6776,14 @@ static void editor_process_keypress(void)
 			editor_duplicate_line();
 			break;
 
+		case KEY_ALT_ARROW_UP:
+			editor_move_line_up();
+			break;
+
+		case KEY_ALT_ARROW_DOWN:
+			editor_move_line_down();
+			break;
+
 		case KEY_ARROW_UP:
 		case KEY_ARROW_DOWN:
 		case KEY_ARROW_LEFT:
@@ -6571,6 +6831,19 @@ static void editor_process_keypress(void)
 
 		case KEY_MOUSE_EVENT:
 			/* Mouse events are handled in input_read_key via editor_handle_mouse */
+			break;
+
+		case '\t':
+			/* Tab indents when selection active, otherwise inserts tab */
+			if (editor.selection_active && !selection_is_empty()) {
+				editor_indent_lines();
+			} else {
+				editor_insert_character('\t');
+			}
+			break;
+
+		case KEY_SHIFT_TAB:
+			editor_outdent_lines();
 			break;
 
 		default:

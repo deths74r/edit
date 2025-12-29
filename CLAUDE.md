@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`edit` is a minimal terminal text editor written in C (v0.13.0). It features full UTF-8/Unicode 17.0 support, real-time C syntax highlighting, grapheme cluster navigation, paired delimiter matching, and soft line wrapping.
+`edit` is a minimal terminal text editor written in C (v0.14.0). It features full UTF-8/Unicode 17.0 support, real-time C syntax highlighting, grapheme cluster navigation, paired delimiter matching, and soft line wrapping.
 
 ## Build Commands
 
@@ -29,7 +29,7 @@ timeout 0.3 ./edit <file>   # Quick visual test with auto-exit
 
 ### Source Structure
 
-Single-file architecture: `src/edit.c` (~6600 lines) organized into sections with banner comments (`/*** Title ***/`).
+Single-file architecture: `src/edit.c` (~6900 lines) organized into sections with banner comments (`/*** Title ***/`).
 
 ### Core Data Model
 
