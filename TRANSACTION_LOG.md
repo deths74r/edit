@@ -590,7 +590,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
-### Phase 13: Essential Editing Commands (IN PROGRESS)
+### Phase 13: Essential Editing Commands (COMPLETED)
 
 **Action [User]**: Requested branch and implementation of Phase 13
 - Go to Line (Ctrl+G)
@@ -639,13 +639,15 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
 
-**Status**: Ready for testing and commit
+**Action [Claude]**: Committed (624942e) and merged to main
+
+**Status**: Phase 13 complete, merged to main
 
 ---
 
 ## Current State
 
-- **Branch**: `essential-editing-commands`
+- **Branch**: `main`
 - **Version**: 0.13.0 (essential editing commands)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
 - **Source**: `src/edit.c` (~6600 lines)
@@ -672,9 +674,8 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains all phases through Phase 12
-- `essential-editing-commands` - Phase 13 in progress
-- All other feature branches merged to main
+- `main` - stable, contains all phases through Phase 13
+- All feature branches merged to main
 
 ### Key Bindings (New in Phase 11-13)
 - Ctrl+F - enter search mode
