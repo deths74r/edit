@@ -4080,8 +4080,7 @@ static uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 /*
  * Adjust scroll offsets to keep the cursor visible on screen. Handles
  * both vertical scrolling (row_offset) and horizontal scrolling
- * (column_offset). Horizontal scroll uses rendered column to account
- * for variable-width characters and tabs.
+ * (column_offset). In wrap mode, accounts for multi-segment lines.
  */
 static void editor_scroll(void)
 {
@@ -4090,20 +4089,58 @@ static void editor_scroll(void)
 		if (editor.cursor_row < editor.row_offset) {
 			editor.row_offset = editor.cursor_row;
 		}
-		if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
-			editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+
+		if (editor.wrap_mode == WRAP_NONE) {
+			/* No wrap: simple check */
+			if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
+				editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+			}
+		} else {
+			/*
+			 * Wrap enabled: calculate screen row of cursor and check
+			 * if it's past the visible area.
+			 */
+			uint32_t screen_row = 0;
+			for (uint32_t row = editor.row_offset;
+			     row <= editor.cursor_row && row < editor.buffer.line_count;
+			     row++) {
+				struct line *line = &editor.buffer.lines[row];
+				line_ensure_wrap_cache(line, &editor.buffer);
+				if (row == editor.cursor_row) {
+					/* Add cursor's segment within this line */
+					uint16_t cursor_segment = line_get_segment_for_column(
+						line, &editor.buffer, editor.cursor_column);
+					screen_row += cursor_segment + 1;
+				} else {
+					screen_row += line->wrap_segment_count;
+				}
+			}
+
+			/* If cursor is past visible area, scroll down */
+			while (screen_row > editor.screen_rows &&
+			       editor.row_offset < editor.buffer.line_count) {
+				struct line *line = &editor.buffer.lines[editor.row_offset];
+				line_ensure_wrap_cache(line, &editor.buffer);
+				screen_row -= line->wrap_segment_count;
+				editor.row_offset++;
+			}
 		}
 	}
 
-	/* Horizontal scrolling - use render column to account for tabs */
-	uint32_t render_column = editor_get_render_column(editor.cursor_row, editor.cursor_column);
-
-	uint32_t text_area_width = editor.screen_columns - editor.gutter_width;
-	if (render_column < editor.column_offset) {
-		editor.column_offset = render_column;
-	}
-	if (render_column >= editor.column_offset + text_area_width) {
-		editor.column_offset = render_column - text_area_width + 1;
+	/* Horizontal scrolling - only applies in WRAP_NONE mode */
+	if (editor.wrap_mode == WRAP_NONE) {
+		uint32_t render_column = editor_get_render_column(
+			editor.cursor_row, editor.cursor_column);
+		uint32_t text_area_width = editor.screen_columns - editor.gutter_width;
+		if (render_column < editor.column_offset) {
+			editor.column_offset = render_column;
+		}
+		if (render_column >= editor.column_offset + text_area_width) {
+			editor.column_offset = render_column - text_area_width + 1;
+		}
+	} else {
+		/* In wrap mode, no horizontal scrolling needed */
+		editor.column_offset = 0;
 	}
 }
 
@@ -5915,12 +5952,51 @@ static void render_refresh_screen(void)
 	render_draw_status_bar(&output);
 	render_draw_message_bar(&output);
 
-	/* Position cursor - use render column to account for tabs */
-	uint32_t render_column = editor_get_render_column(editor.cursor_row, editor.cursor_column);
+	/* Position cursor - account for wrapped segments in wrap mode */
 	char cursor_position[32];
+	uint32_t cursor_screen_row;
+	uint32_t cursor_screen_col;
+
+	if (editor.wrap_mode == WRAP_NONE) {
+		/* No wrap: simple calculation */
+		cursor_screen_row = (editor.cursor_row - editor.row_offset) + 1;
+		uint32_t render_column = editor_get_render_column(
+			editor.cursor_row, editor.cursor_column);
+		cursor_screen_col = (render_column - editor.column_offset) +
+		                    editor.gutter_width + 1;
+	} else {
+		/*
+		 * Wrap enabled: sum screen rows from row_offset to cursor_row,
+		 * then add the cursor's segment within its line.
+		 */
+		cursor_screen_row = 1;  /* 1-based terminal rows */
+		for (uint32_t row = editor.row_offset; row < editor.cursor_row &&
+		     row < editor.buffer.line_count; row++) {
+			struct line *line = &editor.buffer.lines[row];
+			line_ensure_wrap_cache(line, &editor.buffer);
+			cursor_screen_row += line->wrap_segment_count;
+		}
+
+		/* Add the segment offset within cursor's line */
+		if (editor.cursor_row < editor.buffer.line_count) {
+			struct line *cursor_line = &editor.buffer.lines[editor.cursor_row];
+			line_ensure_wrap_cache(cursor_line, &editor.buffer);
+			uint16_t cursor_segment = line_get_segment_for_column(
+				cursor_line, &editor.buffer, editor.cursor_column);
+			cursor_screen_row += cursor_segment;
+
+			/* Column is visual position within segment */
+			uint32_t visual_col = line_get_visual_column_in_segment(
+				cursor_line, &editor.buffer, cursor_segment,
+				editor.cursor_column);
+			cursor_screen_col = visual_col + editor.gutter_width + 1;
+		} else {
+			cursor_screen_col = editor.gutter_width + 1;
+		}
+	}
+
 	snprintf(cursor_position, sizeof(cursor_position), "\x1b[%u;%uH",
-	         (editor.cursor_row - editor.row_offset) + 1,
-	         (render_column - editor.column_offset) + editor.gutter_width + 1);
+	         cursor_screen_row, cursor_screen_col);
 	output_buffer_append_string(&output, cursor_position);
 
 	/* Show cursor */
