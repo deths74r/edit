@@ -299,12 +299,84 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 10: Undo/Redo (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 10
+- Unlimited undo/redo with Ctrl+Z and Ctrl+Y
+- Operation-based undo (not snapshot-based)
+- Auto-grouping of rapid edits
+
+**Action [Claude]**: Created branch `undo-redo`
+
+**Action [Claude]**: Updated header to Phase 10, version to 0.10.0
+
+**Action [Claude]**: Added undo constants:
+- `UNDO_GROUP_TIMEOUT` (0.5) - seconds before new group
+- `INITIAL_UNDO_CAPACITY` (64) - initial group array size
+- `INITIAL_OPERATION_CAPACITY` (32) - initial ops per group
+
+**Action [Claude]**: Added data structures:
+- `enum edit_operation_type`: INSERT_CHAR, DELETE_CHAR, INSERT_NEWLINE, DELETE_NEWLINE, DELETE_TEXT
+- `struct edit_operation`: stores operation details (row, col, codepoint, text)
+- `struct undo_group`: collection of operations with cursor positions
+- `struct undo_history`: array of groups with current index
+
+**Action [Claude]**: Added `undo_history` field to `struct buffer`
+
+**Action [Claude]**: Added undo history management functions:
+- `undo_history_init()` - initialize empty history
+- `undo_history_free()` - free all resources
+- `undo_begin_group()` - start new or continue existing group
+- `undo_end_group()` - finalize group with cursor position
+
+**Action [Claude]**: Added operation recording functions:
+- `undo_record_operation()` - add operation to current group
+- `undo_record_insert_char()` - record char insertion
+- `undo_record_delete_char()` - record char deletion
+- `undo_record_insert_newline()` - record line split
+- `undo_record_delete_newline()` - record line join
+- `undo_record_delete_text()` - record selection delete
+
+**Action [Claude]**: Added no-record buffer operation variants:
+- `buffer_insert_cell_no_record()` - insert without undo recording
+- `buffer_delete_cell_no_record()` - delete without undo recording
+- `buffer_insert_newline_no_record()` - newline without undo recording
+- `buffer_delete_newline_no_record()` - join without undo recording
+
+**Action [Claude]**: Added undo application functions:
+- `undo_reverse_operation()` - reverse a single operation
+- `undo_apply_operation()` - apply a single operation (for redo)
+
+**Action [Claude]**: Added editor undo/redo functions:
+- `editor_undo()` - undo last group, restore cursor
+- `editor_redo()` - redo next group, restore cursor
+
+**Action [Claude]**: Integrated undo recording with edit operations:
+- `editor_insert_character()` - records insert_char
+- `editor_insert_newline()` - records insert_newline
+- `editor_delete_character()` - records delete_char or delete_newline
+- `editor_handle_backspace()` - records delete_char or delete_newline
+- `editor_delete_selection()` - records delete_text with saved text
+- `editor_paste()` - records all insertions in single group
+
+**Action [Claude]**: Added key bindings:
+- Ctrl+Z - undo
+- Ctrl+Y - redo
+
+**Action [Claude]**: Added initialization in `buffer_init()` and cleanup in `buffer_free()`
+
+**Test [Claude]**: Verified build succeeds with no warnings
+
+**Status**: Phase 10 complete, ready for commit
+
+---
+
 ## Current State
 
-- **Branch**: `clipboard-integration`
-- **Version**: 0.9.0
+- **Branch**: `undo-redo`
+- **Version**: 0.10.0
 - **Build**: Clean (no warnings)
-- **Last Commit**: Pending - Phase 9: Clipboard Integration
+- **Last Commit**: Pending - Phase 10: Undo/Redo
 
 ---
 
@@ -313,7 +385,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ```
 /home/edward/repos/edit/
 ├── src/
-│   └── edit.c          # Main editor source (~2800 lines)
+│   └── edit.c          # Main editor source (~4600 lines)
 ├── third_party/
 │   └── utflite/        # UTF-8 library
 ├── Makefile
@@ -326,8 +398,9 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains Phase 1-8
-- `clipboard-integration` - Phase 9 implementation (pending commit/merge)
+- `main` - stable, contains Phase 1-9
+- `undo-redo` - Phase 10 implementation (pending commit/merge)
+- `clipboard-integration` - merged to main
 - `adaptive-scroll` - merged to main
 - `selection` - merged to main
 - `neighbor-pair-entanglement` - merged to main
