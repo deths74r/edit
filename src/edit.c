@@ -93,8 +93,10 @@ enum key_code {
 
 	/* Function keys. */
 	KEY_F2 = -91,
-	KEY_F3 = -90,
-	KEY_SHIFT_F3 = -89,
+
+	/* Alt key combinations. */
+	KEY_ALT_N = -88,
+	KEY_ALT_P = -87,
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
@@ -522,6 +524,10 @@ static struct search_state search = {0};
 /* Forward declarations for functions used in input_read_key. */
 static struct mouse_input input_parse_sgr_mouse(void);
 static void editor_handle_mouse(struct mouse_input *mouse);
+
+/* Forward declarations for search functions used in mouse handling. */
+static bool search_find_next(bool wrap);
+static bool search_find_previous(bool wrap);
 
 /*****************************************************************************
  * Neighbor Layer and Pair Entanglement
@@ -1442,6 +1448,16 @@ static int input_read_key(void)
 		if (read(STDIN_FILENO, &sequence[0], 1) != 1) {
 			return '\x1b';
 		}
+
+		/* Check for Alt+key (Meta sends ESC followed by letter) */
+		if (sequence[0] != '[' && sequence[0] != 'O') {
+			switch (sequence[0]) {
+				case 'n': case 'N': return KEY_ALT_N;
+				case 'p': case 'P': return KEY_ALT_P;
+				default: return '\x1b';
+			}
+		}
+
 		if (read(STDIN_FILENO, &sequence[1], 1) != 1) {
 			return '\x1b';
 		}
@@ -1480,7 +1496,6 @@ static int input_read_key(void)
 								case 'D': return KEY_SHIFT_ARROW_LEFT;
 								case 'H': return KEY_SHIFT_HOME;
 								case 'F': return KEY_SHIFT_END;
-								case 'R': return KEY_SHIFT_F3;
 							}
 						} else if (modifier == '5') {  /* Ctrl */
 							switch (final) {
@@ -1500,31 +1515,13 @@ static int input_read_key(void)
 						if (sequence[1] == '6') return KEY_SHIFT_PAGE_DOWN;
 					}
 				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
-					/* Two-digit escape sequence like \x1b[12~ for F2, \x1b[13~ for F3 */
+					/* Two-digit escape sequence like \x1b[12~ for F2 */
 					if (read(STDIN_FILENO, &sequence[3], 1) != 1) {
 						return '\x1b';
 					}
 					if (sequence[3] == '~') {
 						if (sequence[1] == '1' && sequence[2] == '2') {
 							return KEY_F2;
-						}
-						if (sequence[1] == '1' && sequence[2] == '3') {
-							return KEY_F3;
-						}
-					} else if (sequence[3] == ';') {
-						/* Modified function key like \x1b[13;2~ for Shift+F3 */
-						char modifier, tilde;
-						if (read(STDIN_FILENO, &modifier, 1) != 1) {
-							return '\x1b';
-						}
-						if (read(STDIN_FILENO, &tilde, 1) != 1) {
-							return '\x1b';
-						}
-						if (tilde == '~' && modifier == '2') {
-							/* Shift modifier */
-							if (sequence[1] == '1' && sequence[2] == '3') {
-								return KEY_SHIFT_F3;
-							}
 						}
 					}
 				}
@@ -1550,7 +1547,6 @@ static int input_read_key(void)
 				case 'H': return KEY_HOME;
 				case 'F': return KEY_END;
 				case 'Q': return KEY_F2;
-				case 'R': return KEY_F3;
 			}
 		}
 
@@ -4142,6 +4138,15 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 			break;
 
 		case MOUSE_SCROLL_UP: {
+			/* In search mode, find previous match */
+			if (search.active) {
+				search.direction = -1;
+				if (!search_find_previous(true)) {
+					editor_set_status_message("No more matches");
+				}
+				break;
+			}
+
 			uint32_t scroll_amount = calculate_adaptive_scroll(-1);
 
 			if (editor.row_offset >= scroll_amount) {
@@ -4163,6 +4168,15 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 		}
 
 		case MOUSE_SCROLL_DOWN: {
+			/* In search mode, find next match */
+			if (search.active) {
+				search.direction = 1;
+				if (!search_find_next(true)) {
+					editor_set_status_message("No more matches");
+				}
+				break;
+			}
+
 			uint32_t scroll_amount = calculate_adaptive_scroll(1);
 
 			/* Calculate maximum valid offset */
@@ -4881,15 +4895,20 @@ static bool search_handle_key(int key)
 			}
 			return true;
 
-		case KEY_F3:
-		case CONTROL_KEY('g'):  /* Ctrl+G - find next */
+		case KEY_ALT_N:
+		case KEY_ARROW_DOWN:
+		case KEY_ARROW_RIGHT:
+			/* Find next match */
 			search.direction = 1;
 			if (!search_find_next(true)) {
 				editor_set_status_message("No more matches");
 			}
 			return true;
 
-		case KEY_SHIFT_F3:
+		case KEY_ALT_P:
+		case KEY_ARROW_UP:
+		case KEY_ARROW_LEFT:
+			/* Find previous match */
 			search.direction = -1;
 			if (!search_find_previous(true)) {
 				editor_set_status_message("No more matches");
@@ -4981,34 +5000,6 @@ static void editor_process_keypress(void)
 
 		case CONTROL_KEY('f'):
 			search_enter();
-			break;
-
-		case KEY_F3:
-			/* F3 outside search mode - repeat last search forward */
-			if (search.query_length > 0) {
-				search.direction = 1;
-				if (!search_find_next(true)) {
-					editor_set_status_message("No match found");
-				} else {
-					editor_set_status_message("Found: %s", search.query);
-				}
-			} else {
-				editor_set_status_message("No search query");
-			}
-			break;
-
-		case KEY_SHIFT_F3:
-			/* Shift+F3 - repeat last search backward */
-			if (search.query_length > 0) {
-				search.direction = -1;
-				if (!search_find_previous(true)) {
-					editor_set_status_message("No match found");
-				} else {
-					editor_set_status_message("Found: %s", search.query);
-				}
-			} else {
-				editor_set_status_message("No search query");
-			}
 			break;
 
 		case KEY_ARROW_UP:
