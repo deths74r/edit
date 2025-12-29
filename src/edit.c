@@ -2456,7 +2456,7 @@ static void editor_init(void)
 	editor.selection_anchor_column = 0;
 	editor.selection_active = false;
 	editor.wrap_mode = WRAP_WORD;
-	editor.wrap_indicator = WRAP_INDICATOR_HOOK;
+	editor.wrap_indicator = WRAP_INDICATOR_RETURN;
 }
 
 /* Start a new selection at the current cursor position. The anchor is set
