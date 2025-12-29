@@ -25,6 +25,7 @@
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <termios.h>
+#include <math.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -332,6 +333,135 @@ static const struct syntax_color THEME_SEARCH_CURRENT = {0xe0, 0xaf, 0x68}; /* C
 /* Line number gutter colors. */
 static const struct syntax_color THEME_LINE_NUMBER = {0x3b, 0x42, 0x61};
 static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0x73, 0x7a, 0xa2};
+
+/*****************************************************************************
+ * WCAG Color Contrast Utilities
+ *****************************************************************************/
+
+/* Minimum contrast ratio for WCAG AA compliance (normal text). */
+#define WCAG_MIN_CONTRAST 4.5
+
+/*
+ * Linearize an sRGB component (0-255) for luminance calculation.
+ * Applies inverse gamma correction per sRGB specification.
+ */
+static double color_linearize(uint8_t value)
+{
+	double srgb = value / 255.0;
+	if (srgb <= 0.03928) {
+		return srgb / 12.92;
+	}
+	return pow((srgb + 0.055) / 1.055, 2.4);
+}
+
+/*
+ * Calculate relative luminance of an RGB color per WCAG 2.1.
+ * Returns a value between 0.0 (black) and 1.0 (white).
+ */
+static double color_luminance(struct syntax_color color)
+{
+	double r = color_linearize(color.red);
+	double g = color_linearize(color.green);
+	double b = color_linearize(color.blue);
+	return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+}
+
+/*
+ * Calculate contrast ratio between two colors per WCAG 2.1.
+ * Returns a value >= 1.0, where 1.0 means identical colors
+ * and 21.0 is the maximum (black on white).
+ */
+static double color_contrast_ratio(struct syntax_color fg, struct syntax_color bg)
+{
+	double lum_fg = color_luminance(fg);
+	double lum_bg = color_luminance(bg);
+
+	double lighter = lum_fg > lum_bg ? lum_fg : lum_bg;
+	double darker = lum_fg > lum_bg ? lum_bg : lum_fg;
+
+	return (lighter + 0.05) / (darker + 0.05);
+}
+
+/*
+ * Adjust a single color channel toward a target to improve contrast.
+ * Returns the new channel value.
+ */
+static uint8_t color_adjust_channel(uint8_t value, bool make_lighter)
+{
+	if (make_lighter) {
+		/* Move toward 255 */
+		int new_val = value + (255 - value) / 2;
+		if (new_val > 255) new_val = 255;
+		if (new_val == value && value < 255) new_val = value + 1;
+		return (uint8_t)new_val;
+	} else {
+		/* Move toward 0 */
+		int new_val = value / 2;
+		if (new_val == value && value > 0) new_val = value - 1;
+		return (uint8_t)new_val;
+	}
+}
+
+/*
+ * Get a WCAG-compliant foreground color for the given background.
+ * If the original foreground has sufficient contrast, returns it unchanged.
+ * Otherwise, adjusts the foreground (lighter or darker) to meet WCAG AA.
+ */
+static struct syntax_color color_ensure_contrast(struct syntax_color fg,
+                                                  struct syntax_color bg)
+{
+	double ratio = color_contrast_ratio(fg, bg);
+
+	/* Already compliant */
+	if (ratio >= WCAG_MIN_CONTRAST) {
+		return fg;
+	}
+
+	/* Determine whether to lighten or darken the foreground.
+	 * Choose the direction that increases contrast with the background. */
+	double bg_lum = color_luminance(bg);
+	bool make_lighter = bg_lum < 0.5;  /* Dark bg = lighter text */
+
+	struct syntax_color adjusted = fg;
+	int iterations = 0;
+	const int max_iterations = 20;  /* Prevent infinite loops */
+
+	while (ratio < WCAG_MIN_CONTRAST && iterations < max_iterations) {
+		adjusted.red = color_adjust_channel(adjusted.red, make_lighter);
+		adjusted.green = color_adjust_channel(adjusted.green, make_lighter);
+		adjusted.blue = color_adjust_channel(adjusted.blue, make_lighter);
+
+		ratio = color_contrast_ratio(adjusted, bg);
+		iterations++;
+	}
+
+	/* If we couldn't achieve compliance going one direction, try the other */
+	if (ratio < WCAG_MIN_CONTRAST) {
+		adjusted = fg;
+		make_lighter = !make_lighter;
+		iterations = 0;
+
+		while (ratio < WCAG_MIN_CONTRAST && iterations < max_iterations) {
+			adjusted.red = color_adjust_channel(adjusted.red, make_lighter);
+			adjusted.green = color_adjust_channel(adjusted.green, make_lighter);
+			adjusted.blue = color_adjust_channel(adjusted.blue, make_lighter);
+
+			ratio = color_contrast_ratio(adjusted, bg);
+			iterations++;
+		}
+	}
+
+	/* Last resort: use pure black or white */
+	if (ratio < WCAG_MIN_CONTRAST) {
+		if (bg_lum < 0.5) {
+			adjusted = (struct syntax_color){0xff, 0xff, 0xff};  /* White */
+		} else {
+			adjusted = (struct syntax_color){0x00, 0x00, 0x00};  /* Black */
+		}
+	}
+
+	return adjusted;
+}
 
 /* A single character cell storing one Unicode codepoint and metadata. */
 struct cell {
@@ -4634,10 +4764,13 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 					break;
 			}
 
+			/* Ensure foreground has sufficient contrast with background */
+			struct syntax_color adjusted_fg = color_ensure_contrast(fg, bg);
+
 			snprintf(escape, sizeof(escape),
 			         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm",
 			         bg.red, bg.green, bg.blue,
-			         fg.red, fg.green, fg.blue);
+			         adjusted_fg.red, adjusted_fg.green, adjusted_fg.blue);
 			output_buffer_append_string(output, escape);
 			current_syntax = syntax;
 			current_highlight = highlight;

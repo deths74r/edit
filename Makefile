@@ -1,5 +1,6 @@
 CC = cc
 CFLAGS = -Wall -Wextra -pedantic -std=c17 -O2
+LDFLAGS = -lm
 
 PREFIX = $(HOME)/.local
 BINDIR = $(PREFIX)/bin
@@ -12,7 +13,7 @@ TEST_TARGET = test_utf8
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $<
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 
 $(TEST_TARGET): $(TEST_SRC)
 	$(CC) $(CFLAGS) -o $@ $<
