@@ -367,16 +367,85 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 **Test [Claude]**: Verified build succeeds with no warnings
 
-**Status**: Phase 10 complete, ready for commit
+**Status**: Phase 10 complete, merged to main
+
+---
+
+### Phase 11: Incremental Search (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 11
+- Ctrl+F to enter search mode
+- Real-time highlighting of matches
+- F3/Shift+F3 for find next/previous
+- Case-insensitive search
+- Wrap-around search
+
+**Action [Claude]**: Created branch `incremental-search`
+
+**Action [Claude]**: Updated header to Phase 11, version to 0.11.0
+
+**Action [Claude]**: Added search theme colors:
+- `THEME_SEARCH_MATCH` (0x3d, 0x59, 0xa1) - blue for other matches
+- `THEME_SEARCH_CURRENT` (0xe0, 0xaf, 0x68) - gold for current match
+
+**Action [Claude]**: Added key codes: `KEY_F3`, `KEY_SHIFT_F3`
+
+**Action [Claude]**: Added search state structure:
+- `active`, `query`, `query_length`
+- `saved_cursor_row/column`, `saved_row/column_offset`
+- `match_row`, `match_column`, `has_match`
+- `direction` (1 = forward, -1 = backward)
+
+**Action [Claude]**: Added search functions:
+- `search_enter()` - enter search mode, save position
+- `search_exit()` - exit search mode, optionally restore position
+- `search_matches_at()` - case-insensitive match at position
+- `search_query_cell_count()` - count cells in query
+- `search_find_next()` - find next match with wrap
+- `search_find_previous()` - find previous match with wrap
+- `search_update()` - update after query changes
+- `search_match_type()` - determine highlight type for cell
+
+**Action [Claude]**: Updated F3/Shift+F3 detection in `input_read_key()`:
+- `\x1b[13~` for F3
+- `\x1b[13;2~` for Shift+F3
+- `\x1bOR` for F3 (alternate)
+
+**Action [Claude]**: Updated `render_line_content()`:
+- Check `search_match_type()` for each cell
+- Apply gold background for current match
+- Apply blue background for other matches
+- Priority: current match > other match > selection > normal
+
+**Action [Claude]**: Updated `render_draw_message_bar()`:
+- Show "Search: <query>" when search active
+- Show "(no match)" suffix when no matches found
+
+**Action [Claude]**: Added `search_handle_key()`:
+- Escape to cancel (restore position)
+- Enter to confirm (keep position)
+- Backspace to delete from query
+- F3/Ctrl+G for find next
+- Shift+F3 for find previous
+- Printable characters appended to query
+
+**Action [Claude]**: Added key bindings:
+- Ctrl+F - enter search mode
+- F3 - find next (also works outside search mode)
+- Shift+F3 - find previous (also works outside search mode)
+
+**Test [Claude]**: Verified build succeeds with no warnings
+
+**Status**: Phase 11 complete, ready for commit
 
 ---
 
 ## Current State
 
-- **Branch**: `undo-redo`
-- **Version**: 0.10.0
+- **Branch**: `incremental-search`
+- **Version**: 0.11.0
 - **Build**: Clean (no warnings)
-- **Last Commit**: Pending - Phase 10: Undo/Redo
+- **Last Commit**: Pending - Phase 11: Incremental Search
 
 ---
 
@@ -385,7 +454,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ```
 /home/edward/repos/edit/
 ├── src/
-│   └── edit.c          # Main editor source (~4600 lines)
+│   └── edit.c          # Main editor source (~5100 lines)
 ├── third_party/
 │   └── utflite/        # UTF-8 library
 ├── Makefile
@@ -398,8 +467,9 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains Phase 1-9
-- `undo-redo` - Phase 10 implementation (pending commit/merge)
+- `main` - stable, contains Phase 1-10
+- `incremental-search` - Phase 11 implementation (pending commit/merge)
+- `undo-redo` - merged to main
 - `clipboard-integration` - merged to main
 - `adaptive-scroll` - merged to main
 - `selection` - merged to main

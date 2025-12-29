@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 10: Undo/Redo
+ * Phase 11: Incremental Search
  *****************************************************************************/
 
 /*****************************************************************************
@@ -32,7 +32,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.10.0"
+#define EDIT_VERSION "0.11.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -93,6 +93,8 @@ enum key_code {
 
 	/* Function keys. */
 	KEY_F2 = -91,
+	KEY_F3 = -90,
+	KEY_SHIFT_F3 = -89,
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
@@ -321,6 +323,10 @@ static const struct syntax_color THEME_BACKGROUND = {0x1a, 0x1b, 0x26};
 /* Selection highlight background color (darker blue). */
 static const struct syntax_color THEME_SELECTION = {0x28, 0x3b, 0x50};
 
+/* Search match highlight colors. */
+static const struct syntax_color THEME_SEARCH_MATCH = {0x3d, 0x59, 0xa1};   /* Other matches - blue */
+static const struct syntax_color THEME_SEARCH_CURRENT = {0xe0, 0xaf, 0x68}; /* Current match - gold */
+
 /* Line number gutter colors. */
 static const struct syntax_color THEME_LINE_NUMBER = {0x3b, 0x42, 0x61};
 static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0x73, 0x7a, 0xa2};
@@ -496,6 +502,22 @@ enum clipboard_tool {
 	CLIPBOARD_INTERNAL   /* Fallback */
 };
 static enum clipboard_tool detected_clipboard_tool = CLIPBOARD_UNKNOWN;
+
+/* Incremental search state. */
+struct search_state {
+	bool active;                    /* Whether search mode is active */
+	char query[256];                /* The search query (UTF-8) */
+	uint32_t query_length;          /* Length of query in bytes */
+	uint32_t saved_cursor_row;      /* Cursor position when search started */
+	uint32_t saved_cursor_column;
+	uint32_t saved_row_offset;      /* Scroll position when search started */
+	uint32_t saved_column_offset;
+	uint32_t match_row;             /* Current match position */
+	uint32_t match_column;
+	bool has_match;                 /* Whether current query has a match */
+	int direction;                  /* 1 = forward, -1 = backward */
+};
+static struct search_state search = {0};
 
 /* Forward declarations for functions used in input_read_key. */
 static struct mouse_input input_parse_sgr_mouse(void);
@@ -1477,13 +1499,31 @@ static int input_read_key(void)
 						if (sequence[1] == '6') return KEY_SHIFT_PAGE_DOWN;
 					}
 				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
-					/* Two-digit escape sequence like \x1b[12~ for F2 */
+					/* Two-digit escape sequence like \x1b[12~ for F2, \x1b[13~ for F3 */
 					if (read(STDIN_FILENO, &sequence[3], 1) != 1) {
 						return '\x1b';
 					}
 					if (sequence[3] == '~') {
 						if (sequence[1] == '1' && sequence[2] == '2') {
 							return KEY_F2;
+						}
+						if (sequence[1] == '1' && sequence[2] == '3') {
+							return KEY_F3;
+						}
+					} else if (sequence[3] == ';') {
+						/* Modified function key like \x1b[13;2~ for Shift+F3 */
+						char modifier, tilde;
+						if (read(STDIN_FILENO, &modifier, 1) != 1) {
+							return '\x1b';
+						}
+						if (read(STDIN_FILENO, &tilde, 1) != 1) {
+							return '\x1b';
+						}
+						if (tilde == '~' && modifier == '2') {
+							/* Shift modifier */
+							if (sequence[1] == '1' && sequence[2] == '3') {
+								return KEY_SHIFT_F3;
+							}
 						}
 					}
 				}
@@ -1509,6 +1549,7 @@ static int input_read_key(void)
 				case 'H': return KEY_HOME;
 				case 'F': return KEY_END;
 				case 'Q': return KEY_F2;
+				case 'R': return KEY_F3;
 			}
 		}
 
@@ -4150,6 +4191,286 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 }
 
 /*****************************************************************************
+ * Incremental Search
+ *****************************************************************************/
+
+/*
+ * Enter search mode. Saves current cursor position and initializes search state.
+ */
+static void search_enter(void)
+{
+	search.active = true;
+	search.query[0] = '\0';
+	search.query_length = 0;
+	search.saved_cursor_row = editor.cursor_row;
+	search.saved_cursor_column = editor.cursor_column;
+	search.saved_row_offset = editor.row_offset;
+	search.saved_column_offset = editor.column_offset;
+	search.has_match = false;
+	search.direction = 1;
+}
+
+/*
+ * Exit search mode, optionally restoring cursor position.
+ */
+static void search_exit(bool restore_position)
+{
+	if (restore_position) {
+		editor.cursor_row = search.saved_cursor_row;
+		editor.cursor_column = search.saved_cursor_column;
+		editor.row_offset = search.saved_row_offset;
+		editor.column_offset = search.saved_column_offset;
+	}
+	search.active = false;
+}
+
+/*
+ * Check if the query matches at a specific position in a line.
+ * Returns true if query matches starting at the given column.
+ * Matching is case-insensitive for ASCII letters.
+ */
+static bool search_matches_at(struct line *line, struct buffer *buffer,
+                              uint32_t column, const char *query, uint32_t query_len)
+{
+	if (query_len == 0) {
+		return false;
+	}
+
+	line_warm(line, buffer);
+
+	uint32_t query_offset = 0;
+	uint32_t cell_index = column;
+
+	while (query_offset < query_len && cell_index < line->cell_count) {
+		/* Decode next codepoint from query */
+		uint32_t query_cp;
+		int bytes = utflite_decode(query + query_offset, query_len - query_offset, &query_cp);
+		if (bytes <= 0) break;
+
+		uint32_t cell_cp = line->cells[cell_index].codepoint;
+
+		/* Case-insensitive comparison for ASCII */
+		if (query_cp >= 'A' && query_cp <= 'Z') query_cp += 32;
+		if (cell_cp >= 'A' && cell_cp <= 'Z') cell_cp += 32;
+
+		if (query_cp != cell_cp) {
+			return false;
+		}
+
+		query_offset += bytes;
+		cell_index++;
+	}
+
+	/* Match if we consumed the entire query */
+	return query_offset >= query_len;
+}
+
+/*
+ * Count the number of cells the query occupies (for highlighting width).
+ */
+static uint32_t search_query_cell_count(const char *query, uint32_t query_len)
+{
+	uint32_t count = 0;
+	uint32_t offset = 0;
+	while (offset < query_len) {
+		uint32_t cp;
+		int bytes = utflite_decode(query + offset, query_len - offset, &cp);
+		if (bytes <= 0) break;
+		count++;
+		offset += bytes;
+	}
+	return count;
+}
+
+/*
+ * Find the next match starting from current position.
+ * If wrap is true, wraps around to beginning of file.
+ * Returns true if a match was found.
+ */
+static bool search_find_next(bool wrap)
+{
+	if (search.query_length == 0) {
+		return false;
+	}
+
+	uint32_t start_row = editor.cursor_row;
+	uint32_t start_col = editor.cursor_column + 1;
+
+	/* Search from current position to end of file */
+	for (uint32_t row = start_row; row < editor.buffer.line_count; row++) {
+		struct line *line = &editor.buffer.lines[row];
+		line_warm(line, &editor.buffer);
+
+		uint32_t col_start = (row == start_row) ? start_col : 0;
+
+		for (uint32_t col = col_start; col < line->cell_count; col++) {
+			if (search_matches_at(line, &editor.buffer, col, search.query, search.query_length)) {
+				editor.cursor_row = row;
+				editor.cursor_column = col;
+				search.match_row = row;
+				search.match_column = col;
+				search.has_match = true;
+				return true;
+			}
+		}
+	}
+
+	/* Wrap around to beginning */
+	if (wrap) {
+		for (uint32_t row = 0; row <= start_row; row++) {
+			struct line *line = &editor.buffer.lines[row];
+			line_warm(line, &editor.buffer);
+
+			uint32_t col_end = (row == start_row) ? start_col : line->cell_count;
+
+			for (uint32_t col = 0; col < col_end; col++) {
+				if (search_matches_at(line, &editor.buffer, col, search.query, search.query_length)) {
+					editor.cursor_row = row;
+					editor.cursor_column = col;
+					search.match_row = row;
+					search.match_column = col;
+					search.has_match = true;
+					return true;
+				}
+			}
+		}
+	}
+
+	search.has_match = false;
+	return false;
+}
+
+/*
+ * Find the previous match starting from current position.
+ * If wrap is true, wraps around to end of file.
+ */
+static bool search_find_previous(bool wrap)
+{
+	if (search.query_length == 0) {
+		return false;
+	}
+
+	int32_t start_row = (int32_t)editor.cursor_row;
+	int32_t start_col = (int32_t)editor.cursor_column - 1;
+
+	/* Search from current position to beginning of file */
+	for (int32_t row = start_row; row >= 0; row--) {
+		struct line *line = &editor.buffer.lines[row];
+		line_warm(line, &editor.buffer);
+
+		int32_t col_start = (row == start_row) ? start_col : (int32_t)line->cell_count - 1;
+
+		for (int32_t col = col_start; col >= 0; col--) {
+			if (search_matches_at(line, &editor.buffer, (uint32_t)col, search.query, search.query_length)) {
+				editor.cursor_row = (uint32_t)row;
+				editor.cursor_column = (uint32_t)col;
+				search.match_row = (uint32_t)row;
+				search.match_column = (uint32_t)col;
+				search.has_match = true;
+				return true;
+			}
+		}
+	}
+
+	/* Wrap around to end */
+	if (wrap && editor.buffer.line_count > 0) {
+		for (int32_t row = (int32_t)editor.buffer.line_count - 1; row >= start_row; row--) {
+			struct line *line = &editor.buffer.lines[row];
+			line_warm(line, &editor.buffer);
+
+			int32_t col_start = (row == start_row) ? start_col : (int32_t)line->cell_count - 1;
+
+			for (int32_t col = col_start; col >= 0; col--) {
+				if (search_matches_at(line, &editor.buffer, (uint32_t)col, search.query, search.query_length)) {
+					editor.cursor_row = (uint32_t)row;
+					editor.cursor_column = (uint32_t)col;
+					search.match_row = (uint32_t)row;
+					search.match_column = (uint32_t)col;
+					search.has_match = true;
+					return true;
+				}
+			}
+		}
+	}
+
+	search.has_match = false;
+	return false;
+}
+
+/*
+ * Update search results when query changes. Finds first match from saved position.
+ */
+static void search_update(void)
+{
+	if (search.query_length == 0) {
+		/* No query - restore to saved position */
+		editor.cursor_row = search.saved_cursor_row;
+		editor.cursor_column = search.saved_cursor_column;
+		search.has_match = false;
+		return;
+	}
+
+	/* Start search from saved position */
+	editor.cursor_row = search.saved_cursor_row;
+	editor.cursor_column = search.saved_cursor_column;
+
+	/* First check if there's a match at current position */
+	if (editor.cursor_row < editor.buffer.line_count) {
+		struct line *line = &editor.buffer.lines[editor.cursor_row];
+		if (search_matches_at(line, &editor.buffer, editor.cursor_column,
+		                      search.query, search.query_length)) {
+			search.match_row = editor.cursor_row;
+			search.match_column = editor.cursor_column;
+			search.has_match = true;
+			return;
+		}
+	}
+
+	/* Otherwise find next match (with wrap) */
+	search_find_next(true);
+}
+
+/*
+ * Check if a cell is part of a search match.
+ * Returns: 0 = not a match, 1 = other match, 2 = current match
+ */
+static int search_match_type(uint32_t row, uint32_t column)
+{
+	if (!search.active || search.query_length == 0) {
+		return 0;
+	}
+
+	uint32_t match_len = search_query_cell_count(search.query, search.query_length);
+
+	/* Check if this cell is part of the current match */
+	if (search.has_match && row == search.match_row &&
+	    column >= search.match_column && column < search.match_column + match_len) {
+		return 2;  /* Current match */
+	}
+
+	/* Check if this cell is part of any match */
+	if (row >= editor.buffer.line_count) {
+		return 0;
+	}
+
+	struct line *line = &editor.buffer.lines[row];
+	line_warm(line, &editor.buffer);
+
+	/* Look backward to see if a match starts before this column */
+	uint32_t check_start = (column >= match_len) ? column - match_len + 1 : 0;
+
+	for (uint32_t col = check_start; col <= column; col++) {
+		if (search_matches_at(line, &editor.buffer, col, search.query, search.query_length)) {
+			if (column < col + match_len) {
+				return 1;  /* Other match */
+			}
+		}
+	}
+
+	return 0;
+}
+
+/*****************************************************************************
  * Rendering
  *****************************************************************************/
 
@@ -4201,7 +4522,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 
 	/* Track current state to minimize escape sequences */
 	enum syntax_token current_syntax = SYNTAX_NORMAL;
-	bool current_selected = false;
+	int current_highlight = 0;  /* 0=normal, 1=selected, 2=search_other, 3=search_current */
 
 	/* Set initial foreground color */
 	render_set_syntax_color(output, current_syntax);
@@ -4211,28 +4532,46 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	while (cell_index < line->cell_count && rendered_width < max_width) {
 		uint32_t codepoint = line->cells[cell_index].codepoint;
 		enum syntax_token syntax = line->cells[cell_index].syntax;
-		bool selected = selection_contains(file_row, cell_index);
 
-		/* Change colors if syntax or selection changed */
-		if (syntax != current_syntax || selected != current_selected) {
+		/* Determine highlight type: search current > search other > selection > none */
+		int highlight = 0;
+		int match_type = search_match_type(file_row, cell_index);
+		if (match_type == 2) {
+			highlight = 3;  /* Current search match */
+		} else if (match_type == 1) {
+			highlight = 2;  /* Other search match */
+		} else if (selection_contains(file_row, cell_index)) {
+			highlight = 1;  /* Selection */
+		}
+
+		/* Change colors if syntax or highlight changed */
+		if (syntax != current_syntax || highlight != current_highlight) {
 			char escape[64];
 			struct syntax_color fg = THEME_COLORS[syntax];
-			if (selected) {
-				/* Selection: selection background + syntax foreground */
-				snprintf(escape, sizeof(escape),
-				         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm",
-				         THEME_SELECTION.red, THEME_SELECTION.green, THEME_SELECTION.blue,
-				         fg.red, fg.green, fg.blue);
-			} else {
-				/* Normal: normal background + syntax foreground */
-				snprintf(escape, sizeof(escape),
-				         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm",
-				         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue,
-				         fg.red, fg.green, fg.blue);
+			struct syntax_color bg;
+
+			switch (highlight) {
+				case 3:  /* Current search match - gold */
+					bg = THEME_SEARCH_CURRENT;
+					break;
+				case 2:  /* Other search match - blue */
+					bg = THEME_SEARCH_MATCH;
+					break;
+				case 1:  /* Selection */
+					bg = THEME_SELECTION;
+					break;
+				default: /* Normal */
+					bg = THEME_BACKGROUND;
+					break;
 			}
+
+			snprintf(escape, sizeof(escape),
+			         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%d;%d;%dm",
+			         bg.red, bg.green, bg.blue,
+			         fg.red, fg.green, fg.blue);
 			output_buffer_append_string(output, escape);
 			current_syntax = syntax;
-			current_selected = selected;
+			current_highlight = highlight;
 		}
 
 		int width;
@@ -4403,6 +4742,25 @@ static void render_draw_message_bar(struct output_buffer *output)
 {
 	output_buffer_append_string(output, "\x1b[K");
 
+	if (search.active) {
+		/* Draw search prompt */
+		char prompt[300];
+		int len;
+		if (search.has_match) {
+			len = snprintf(prompt, sizeof(prompt), "Search: %s", search.query);
+		} else if (search.query_length > 0) {
+			len = snprintf(prompt, sizeof(prompt), "Search: %s (no match)", search.query);
+		} else {
+			len = snprintf(prompt, sizeof(prompt), "Search: ");
+		}
+
+		if (len > (int)editor.screen_columns) {
+			len = editor.screen_columns;
+		}
+		output_buffer_append(output, prompt, len);
+		return;
+	}
+
 	int message_length = strlen(editor.status_message);
 
 	if (message_length > (int)editor.screen_columns) {
@@ -4468,6 +4826,78 @@ static void render_refresh_screen(void)
  * (save), F2 (toggle line numbers), arrow keys, and character insertion.
  * Terminal resize signals are handled by updating screen dimensions.
  */
+/*
+ * Handle a keypress in search mode. Returns true if the key was handled.
+ */
+static bool search_handle_key(int key)
+{
+	if (!search.active) {
+		return false;
+	}
+
+	switch (key) {
+		case '\x1b':  /* Escape - cancel search */
+			search_exit(true);  /* Restore position */
+			editor_set_status_message("Search cancelled");
+			return true;
+
+		case '\r':  /* Enter - confirm search */
+			search_exit(false);  /* Keep current position */
+			if (search.query_length > 0) {
+				editor_set_status_message("Found: %s", search.query);
+			}
+			return true;
+
+		case KEY_BACKSPACE:
+		case CONTROL_KEY('h'):
+			/* Delete last character from query */
+			if (search.query_length > 0) {
+				/* Find start of last UTF-8 character */
+				uint32_t i = search.query_length - 1;
+				while (i > 0 && (search.query[i] & 0xC0) == 0x80) {
+					i--;
+				}
+				search.query_length = i;
+				search.query[search.query_length] = '\0';
+				search_update();
+			}
+			return true;
+
+		case KEY_F3:
+		case CONTROL_KEY('g'):  /* Ctrl+G - find next */
+			search.direction = 1;
+			if (!search_find_next(true)) {
+				editor_set_status_message("No more matches");
+			}
+			return true;
+
+		case KEY_SHIFT_F3:
+			search.direction = -1;
+			if (!search_find_previous(true)) {
+				editor_set_status_message("No more matches");
+			}
+			return true;
+
+		default:
+			/* Insert printable character into query */
+			if ((key >= 32 && key < 127) || key >= 128) {
+				/* Encode codepoint to UTF-8 and append */
+				char utf8[4];
+				int bytes = utflite_encode((uint32_t)key, utf8);
+				if (bytes > 0 && search.query_length + (uint32_t)bytes < sizeof(search.query) - 1) {
+					memcpy(search.query + search.query_length, utf8, bytes);
+					search.query_length += bytes;
+					search.query[search.query_length] = '\0';
+					search_update();
+				}
+				return true;
+			}
+			break;
+	}
+
+	return false;
+}
+
 static void editor_process_keypress(void)
 {
 	int key = input_read_key();
@@ -4479,6 +4909,11 @@ static void editor_process_keypress(void)
 	if (key == -2) {
 		/* Terminal resize */
 		editor_update_screen_size();
+		return;
+	}
+
+	/* Handle search mode input first */
+	if (search_handle_key(key)) {
 		return;
 	}
 
@@ -4524,6 +4959,38 @@ static void editor_process_keypress(void)
 			editor.show_line_numbers = !editor.show_line_numbers;
 			editor_update_gutter_width();
 			editor_set_status_message("Line numbers %s", editor.show_line_numbers ? "on" : "off");
+			break;
+
+		case CONTROL_KEY('f'):
+			search_enter();
+			break;
+
+		case KEY_F3:
+			/* F3 outside search mode - repeat last search forward */
+			if (search.query_length > 0) {
+				search.direction = 1;
+				if (!search_find_next(true)) {
+					editor_set_status_message("No match found");
+				} else {
+					editor_set_status_message("Found: %s", search.query);
+				}
+			} else {
+				editor_set_status_message("No search query");
+			}
+			break;
+
+		case KEY_SHIFT_F3:
+			/* Shift+F3 - repeat last search backward */
+			if (search.query_length > 0) {
+				search.direction = -1;
+				if (!search_find_previous(true)) {
+					editor_set_status_message("No match found");
+				} else {
+					editor_set_status_message("Found: %s", search.query);
+				}
+			} else {
+				editor_set_status_message("No search query");
+			}
 			break;
 
 		case KEY_ARROW_UP:
