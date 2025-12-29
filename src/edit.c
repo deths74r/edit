@@ -44,7 +44,7 @@
 #define STATUS_MESSAGE_TIMEOUT 5
 
 /* Adaptive scroll configuration */
-#define SCROLL_VELOCITY_DECAY 0.7       /* Exponential smoothing factor (0-1) */
+#define SCROLL_VELOCITY_DECAY 0.85      /* Exponential smoothing factor (0-1) */
 #define SCROLL_MIN_LINES 1              /* Minimum lines to scroll */
 #define SCROLL_MAX_LINES 20             /* Maximum lines to scroll */
 #define SCROLL_VELOCITY_SLOW 4.0        /* Events/sec threshold for min scroll */
@@ -2868,9 +2868,10 @@ static uint32_t calculate_adaptive_scroll(int direction)
 		return SCROLL_MAX_LINES;
 	}
 
-	/* Linear interpolation between min and max */
+	/* Smoothstep interpolation between min and max (eases in and out) */
 	double t = (scroll_velocity - SCROLL_VELOCITY_SLOW) /
 	           (SCROLL_VELOCITY_FAST - SCROLL_VELOCITY_SLOW);
+	t = t * t * (3.0 - 2.0 * t);  /* smoothstep: zero derivative at endpoints */
 
 	return SCROLL_MIN_LINES + (uint32_t)(t * (SCROLL_MAX_LINES - SCROLL_MIN_LINES));
 }
