@@ -590,12 +590,65 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 13: Essential Editing Commands (IN PROGRESS)
+
+**Action [User]**: Requested branch and implementation of Phase 13
+- Go to Line (Ctrl+G)
+- Select All (Ctrl+A)
+- Delete Line (Alt+K)
+- Duplicate Line (Alt+D)
+
+**Action [Claude]**: Created branch `essential-editing-commands`
+
+**Action [Claude]**: Updated header to Phase 13, version to 0.13.0
+
+**Action [Claude]**: Added new key codes:
+- `KEY_ALT_K` - for delete line
+- `KEY_ALT_D` - for duplicate line
+
+**Action [Claude]**: Added go-to-line mode state structure (`struct goto_state`)
+
+**Action [Claude]**: Added Alt+K and Alt+D handling in `input_read_key()`
+
+**Action [Claude]**: Added Go to Line functions:
+- `goto_enter()` - enter go-to-line mode, save position
+- `goto_exit()` - exit mode, optionally restore position
+- `goto_execute()` - jump to line number and center on screen
+- `goto_handle_key()` - handle keypresses in goto mode (digits, Enter, Escape, Backspace)
+- Live preview: cursor jumps as digits are typed
+
+**Action [Claude]**: Added `editor_select_all()` - selects entire buffer
+
+**Action [Claude]**: Added `editor_delete_line()`:
+- Deletes current line with undo support
+- Records deleted text for undo
+- Handles edge case of deleting last line
+
+**Action [Claude]**: Added `editor_duplicate_line()`:
+- Duplicates current line below
+- Uses newline + character insertions for proper undo
+- Cursor moves to duplicated line
+
+**Action [Claude]**: Updated `render_draw_message_bar()` to show "Go to line:" prompt
+
+**Action [Claude]**: Added key bindings:
+- Ctrl+G - `goto_enter()`
+- Ctrl+A - `editor_select_all()`
+- Alt+K - `editor_delete_line()`
+- Alt+D - `editor_duplicate_line()`
+
+**Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
+
+**Status**: Ready for testing and commit
+
+---
+
 ## Current State
 
-- **Branch**: `main`
-- **Version**: 0.12.0 (soft wrap)
+- **Branch**: `essential-editing-commands`
+- **Version**: 0.13.0 (essential editing commands)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
-- **Source**: `src/edit.c` (~6500 lines)
+- **Source**: `src/edit.c` (~6600 lines)
 
 ---
 
@@ -604,7 +657,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ```
 /home/edward/repos/edit/
 ├── src/
-│   └── edit.c          # Main editor source (~6500 lines)
+│   └── edit.c          # Main editor source (~6600 lines)
 ├── third_party/
 │   └── utflite/        # UTF-8 library
 ├── Makefile
@@ -620,15 +673,19 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ### Branches
 - `main` - stable, contains all phases through Phase 12
-- `soft-wrap-foundation` - merged to main
+- `essential-editing-commands` - Phase 13 in progress
 - All other feature branches merged to main
 
-### Key Bindings (New in Phase 11-12)
+### Key Bindings (New in Phase 11-13)
 - Ctrl+F - enter search mode
 - Alt+N - find next match
 - Alt+P - find previous match
 - Alt+Z - cycle wrap mode
 - Alt+Shift+Z - cycle wrap indicator
+- Ctrl+G - go to line
+- Ctrl+A - select all
+- Alt+K - delete line
+- Alt+D - duplicate line
 
 ### Build Commands
 ```bash

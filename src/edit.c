@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 12D: Cursor Movement on Wrapped Lines
+ * Phase 13: Essential Editing Commands
  *****************************************************************************/
 
 /*****************************************************************************
@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.12.0"
+#define EDIT_VERSION "0.13.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -100,6 +100,8 @@ enum key_code {
 	KEY_ALT_P = -87,
 	KEY_ALT_Z = -86,
 	KEY_ALT_SHIFT_Z = -85,
+	KEY_ALT_K = -84,
+	KEY_ALT_D = -83,
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
@@ -747,6 +749,17 @@ struct search_state {
 	int direction;                  /* 1 = forward, -1 = backward */
 };
 static struct search_state search = {0};
+
+/* Go-to-line mode state. */
+struct goto_state {
+	bool active;
+	char input[16];             /* Line number input buffer */
+	uint32_t input_length;
+	uint32_t saved_cursor_row;
+	uint32_t saved_cursor_column;
+	uint32_t saved_row_offset;
+};
+static struct goto_state goto_line = {0};
 
 /* Forward declarations for functions used in input_read_key. */
 static struct mouse_input input_parse_sgr_mouse(void);
@@ -1692,6 +1705,8 @@ static int input_read_key(void)
 				case 'p': case 'P': return KEY_ALT_P;
 				case 'z': return KEY_ALT_Z;
 				case 'Z': return KEY_ALT_SHIFT_Z;
+				case 'k': case 'K': return KEY_ALT_K;
+				case 'd': case 'D': return KEY_ALT_D;
 				default: return '\x1b';
 			}
 		}
@@ -5936,6 +5951,17 @@ static void render_draw_message_bar(struct output_buffer *output)
 		return;
 	}
 
+	if (goto_line.active) {
+		/* Draw go-to-line prompt */
+		char prompt[64];
+		int len = snprintf(prompt, sizeof(prompt), "Go to line: %s", goto_line.input);
+		if (len > (int)editor.screen_columns) {
+			len = editor.screen_columns;
+		}
+		output_buffer_append(output, prompt, len);
+		return;
+	}
+
 	int message_length = strlen(editor.status_message);
 
 	if (message_length > (int)editor.screen_columns) {
@@ -6117,6 +6143,291 @@ static bool search_handle_key(int key)
 	return false;
 }
 
+/*****************************************************************************
+ * Go to Line
+ *****************************************************************************/
+
+/*
+ * Enter go-to-line mode. Saves cursor position for cancel.
+ */
+static void goto_enter(void)
+{
+	goto_line.active = true;
+	goto_line.input[0] = '\0';
+	goto_line.input_length = 0;
+	goto_line.saved_cursor_row = editor.cursor_row;
+	goto_line.saved_cursor_column = editor.cursor_column;
+	goto_line.saved_row_offset = editor.row_offset;
+	editor_set_status_message("");
+}
+
+/*
+ * Exit go-to-line mode, optionally restoring cursor position.
+ */
+static void goto_exit(bool restore)
+{
+	if (restore) {
+		editor.cursor_row = goto_line.saved_cursor_row;
+		editor.cursor_column = goto_line.saved_cursor_column;
+		editor.row_offset = goto_line.saved_row_offset;
+	}
+	goto_line.active = false;
+}
+
+/*
+ * Execute the go-to-line command. Jumps to the line number in input.
+ */
+static void goto_execute(void)
+{
+	if (goto_line.input_length == 0) {
+		goto_exit(true);
+		return;
+	}
+
+	/* Parse line number */
+	long line_num = strtol(goto_line.input, NULL, 10);
+
+	if (line_num < 1) {
+		line_num = 1;
+	}
+	if (line_num > (long)editor.buffer.line_count) {
+		line_num = editor.buffer.line_count;
+	}
+	if (editor.buffer.line_count == 0) {
+		line_num = 1;
+	}
+
+	/* Jump to line (1-indexed input, 0-indexed internal) */
+	editor.cursor_row = (uint32_t)(line_num - 1);
+	editor.cursor_column = 0;
+
+	/* Center the line on screen */
+	uint32_t half_screen = editor.screen_rows / 2;
+	if (editor.cursor_row >= half_screen) {
+		editor.row_offset = editor.cursor_row - half_screen;
+	} else {
+		editor.row_offset = 0;
+	}
+
+	/* Clamp row_offset (wrap-aware) */
+	uint32_t max_offset = calculate_max_row_offset();
+	if (editor.row_offset > max_offset) {
+		editor.row_offset = max_offset;
+	}
+
+	selection_clear();
+	goto_exit(false);
+	editor_set_status_message("Line %ld", line_num);
+}
+
+/*
+ * Handle keypress in go-to-line mode. Returns true if handled.
+ */
+static bool goto_handle_key(int key)
+{
+	if (!goto_line.active) {
+		return false;
+	}
+
+	switch (key) {
+		case '\x1b':  /* Escape - cancel */
+			goto_exit(true);
+			editor_set_status_message("Cancelled");
+			return true;
+
+		case '\r':  /* Enter - execute */
+			goto_execute();
+			return true;
+
+		case KEY_BACKSPACE:
+		case CONTROL_KEY('h'):
+			if (goto_line.input_length > 0) {
+				goto_line.input_length--;
+				goto_line.input[goto_line.input_length] = '\0';
+			}
+			return true;
+
+		default:
+			/* Accept digits only */
+			if (key >= '0' && key <= '9') {
+				if (goto_line.input_length < sizeof(goto_line.input) - 1) {
+					goto_line.input[goto_line.input_length++] = (char)key;
+					goto_line.input[goto_line.input_length] = '\0';
+
+					/* Live preview: jump as user types */
+					long line_num = strtol(goto_line.input, NULL, 10);
+					if (line_num >= 1 && line_num <= (long)editor.buffer.line_count) {
+						editor.cursor_row = (uint32_t)(line_num - 1);
+						editor.cursor_column = 0;
+
+						/* Center on screen */
+						uint32_t half_screen = editor.screen_rows / 2;
+						if (editor.cursor_row >= half_screen) {
+							editor.row_offset = editor.cursor_row - half_screen;
+						} else {
+							editor.row_offset = 0;
+						}
+					}
+				}
+				return true;
+			}
+			break;
+	}
+
+	return true;  /* Consume all keys in goto mode */
+}
+
+/*****************************************************************************
+ * Line Operations - Delete and Duplicate
+ *****************************************************************************/
+
+/*
+ * Select all text in the buffer.
+ */
+static void editor_select_all(void)
+{
+	if (editor.buffer.line_count == 0) {
+		return;
+	}
+
+	/* Anchor at start */
+	editor.selection_anchor_row = 0;
+	editor.selection_anchor_column = 0;
+
+	/* Cursor at end */
+	editor.cursor_row = editor.buffer.line_count - 1;
+	struct line *last_line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(last_line, &editor.buffer);
+	editor.cursor_column = last_line->cell_count;
+
+	editor.selection_active = true;
+	editor_set_status_message("Selected all");
+}
+
+/*
+ * Delete the current line. Records undo operation for the deleted content.
+ */
+static void editor_delete_line(void)
+{
+	if (editor.buffer.line_count == 0) {
+		return;
+	}
+
+	uint32_t row = editor.cursor_row;
+	if (row >= editor.buffer.line_count) {
+		row = editor.buffer.line_count - 1;
+	}
+
+	struct line *line = &editor.buffer.lines[row];
+	line_warm(line, &editor.buffer);
+
+	undo_begin_group(&editor.buffer);
+
+	/* Build text to save for undo: line content + newline (if not last line) */
+	size_t text_capacity = line->cell_count * 4 + 2;
+	char *text = malloc(text_capacity);
+	size_t text_len = 0;
+
+	if (text != NULL) {
+		for (uint32_t i = 0; i < line->cell_count; i++) {
+			char utf8[4];
+			int bytes = utflite_encode(line->cells[i].codepoint, utf8);
+			if (bytes > 0) {
+				memcpy(text + text_len, utf8, bytes);
+				text_len += bytes;
+			}
+		}
+		if (row < editor.buffer.line_count - 1) {
+			text[text_len++] = '\n';
+		}
+		text[text_len] = '\0';
+
+		/* Record the deletion - from start of this line to start of next line */
+		uint32_t end_row = (row < editor.buffer.line_count - 1) ? row + 1 : row;
+		uint32_t end_col = (row < editor.buffer.line_count - 1) ? 0 : line->cell_count;
+		undo_record_delete_text(&editor.buffer, row, 0, end_row, end_col, text, text_len);
+		free(text);
+	}
+
+	/* Delete the line */
+	buffer_delete_line(&editor.buffer, row);
+
+	/* Handle empty buffer */
+	if (editor.buffer.line_count == 0) {
+		buffer_ensure_capacity(&editor.buffer, 1);
+		line_init(&editor.buffer.lines[0]);
+		editor.buffer.line_count = 1;
+	}
+
+	/* Adjust cursor */
+	if (editor.cursor_row >= editor.buffer.line_count) {
+		editor.cursor_row = editor.buffer.line_count - 1;
+	}
+	editor.cursor_column = 0;
+
+	editor.buffer.is_modified = true;
+	undo_end_group(&editor.buffer);
+	selection_clear();
+
+	editor_set_status_message("Line deleted");
+}
+
+/*
+ * Duplicate the current line. Inserts a copy below the current line.
+ */
+static void editor_duplicate_line(void)
+{
+	if (editor.buffer.line_count == 0) {
+		return;
+	}
+
+	uint32_t row = editor.cursor_row;
+	if (row >= editor.buffer.line_count) {
+		row = editor.buffer.line_count - 1;
+	}
+
+	struct line *source = &editor.buffer.lines[row];
+	line_warm(source, &editor.buffer);
+
+	undo_begin_group(&editor.buffer);
+
+	/* Save cursor at end of line, insert newline (creates a new line) */
+	uint32_t saved_col = editor.cursor_column;
+
+	editor.cursor_row = row;
+	editor.cursor_column = source->cell_count;
+
+	/* Record and insert newline */
+	undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	buffer_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
+
+	/* Move to the new line */
+	editor.cursor_row = row + 1;
+	editor.cursor_column = 0;
+
+	/* Re-get source pointer (may have moved due to realloc) */
+	source = &editor.buffer.lines[row];
+
+	/* Copy each character from source into the new line */
+	for (uint32_t i = 0; i < source->cell_count; i++) {
+		uint32_t codepoint = source->cells[i].codepoint;
+		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
+		buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
+		editor.cursor_column++;
+	}
+
+	/* Restore cursor column on the duplicated line */
+	struct line *dest = &editor.buffer.lines[row + 1];
+	editor.cursor_column = saved_col;
+	if (editor.cursor_column > dest->cell_count) {
+		editor.cursor_column = dest->cell_count;
+	}
+
+	undo_end_group(&editor.buffer);
+
+	editor_set_status_message("Line duplicated");
+}
+
 static void editor_process_keypress(void)
 {
 	int key = input_read_key();
@@ -6133,6 +6444,11 @@ static void editor_process_keypress(void)
 
 	/* Handle search mode input first */
 	if (search_handle_key(key)) {
+		return;
+	}
+
+	/* Handle go-to-line mode input */
+	if (goto_handle_key(key)) {
 		return;
 	}
 
@@ -6190,6 +6506,22 @@ static void editor_process_keypress(void)
 
 		case CONTROL_KEY('f'):
 			search_enter();
+			break;
+
+		case CONTROL_KEY('g'):
+			goto_enter();
+			break;
+
+		case CONTROL_KEY('a'):
+			editor_select_all();
+			break;
+
+		case KEY_ALT_K:
+			editor_delete_line();
+			break;
+
+		case KEY_ALT_D:
+			editor_duplicate_line();
 			break;
 
 		case KEY_ARROW_UP:
