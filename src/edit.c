@@ -305,34 +305,42 @@ struct syntax_color {
 	uint8_t blue;
 };
 
-/* Tokyo Night color theme for syntax highlighting. */
+/* Tritanopia-friendly dark theme with WCAG AA compliance.
+ *
+ * Design principles:
+ * - Luminance is the primary differentiator (works for all color vision)
+ * - Red-cyan color axis (visible to Tritanopia)
+ * - Avoids blue-yellow distinctions (not visible to Tritanopia)
+ * - All colors have >= 4.5:1 contrast with background
+ */
 static const struct syntax_color THEME_COLORS[] = {
-	[SYNTAX_NORMAL]       = {0xc0, 0xca, 0xf5},  /* Light gray-blue */
-	[SYNTAX_KEYWORD]      = {0xbb, 0x9a, 0xf7},  /* Purple */
-	[SYNTAX_TYPE]         = {0x2a, 0xc3, 0xde},  /* Cyan */
-	[SYNTAX_STRING]       = {0x9e, 0xce, 0x6a},  /* Green */
-	[SYNTAX_NUMBER]       = {0xff, 0x9e, 0x64},  /* Orange */
-	[SYNTAX_COMMENT]      = {0x56, 0x5f, 0x89},  /* Gray */
-	[SYNTAX_PREPROCESSOR] = {0x7d, 0xcf, 0xff},  /* Light blue */
-	[SYNTAX_FUNCTION]     = {0x7a, 0xa2, 0xf7},  /* Blue */
-	[SYNTAX_OPERATOR]     = {0x89, 0xdd, 0xff},  /* Light cyan */
-	[SYNTAX_BRACKET]      = {0xc0, 0xca, 0xf5},  /* Same as normal */
-	[SYNTAX_ESCAPE]       = {0xff, 0x9e, 0x64},  /* Orange */
+	[SYNTAX_NORMAL]       = {0xE0, 0xE0, 0xE0},  /* Light gray - neutral, high contrast */
+	[SYNTAX_KEYWORD]      = {0xFF, 0x79, 0xC6},  /* Bright magenta - control flow stands out */
+	[SYNTAX_TYPE]         = {0x8B, 0xE9, 0xFD},  /* Bright cyan - distinct from magenta */
+	[SYNTAX_STRING]       = {0xFF, 0x95, 0x80},  /* Coral/salmon - warm, readable */
+	[SYNTAX_NUMBER]       = {0xFF, 0xB0, 0x90},  /* Light coral/peach - related to string */
+	[SYNTAX_COMMENT]      = {0x90, 0x90, 0x90},  /* Medium gray - subdued but WCAG compliant */
+	[SYNTAX_PREPROCESSOR] = {0xFF, 0xB3, 0xD9},  /* Light pink/rose - preprocessor visible */
+	[SYNTAX_FUNCTION]     = {0xA0, 0xF0, 0xF0},  /* Light cyan/aqua - functions stand out */
+	[SYNTAX_OPERATOR]     = {0xFF, 0xFF, 0xFF},  /* White - maximum visibility for operators */
+	[SYNTAX_BRACKET]      = {0xD0, 0xD0, 0xD0},  /* Light gray - same family as normal */
+	[SYNTAX_ESCAPE]       = {0xFF, 0x80, 0x80},  /* Light red - escapes pop in strings */
 };
 
-/* Background color for the editor. */
-static const struct syntax_color THEME_BACKGROUND = {0x1a, 0x1b, 0x26};
+/* Background: Near-black for maximum contrast with all foreground colors. */
+static const struct syntax_color THEME_BACKGROUND = {0x12, 0x12, 0x12};
 
-/* Selection highlight background color (darker blue). */
-static const struct syntax_color THEME_SELECTION = {0x28, 0x3b, 0x50};
+/* Selection: Dark teal - cool tone, distinct from search highlights. */
+static const struct syntax_color THEME_SELECTION = {0x2D, 0x4F, 0x4F};
 
-/* Search match highlight colors. */
-static const struct syntax_color THEME_SEARCH_MATCH = {0x3d, 0x59, 0xa1};   /* Other matches - blue */
-static const struct syntax_color THEME_SEARCH_CURRENT = {0xe0, 0xaf, 0x68}; /* Current match - gold */
+/* Search match highlights use luminance difference for Tritanopia visibility.
+ * Current match is warmer and lighter than other matches. */
+static const struct syntax_color THEME_SEARCH_MATCH = {0x3D, 0x3D, 0x5D};   /* Dark purple-gray */
+static const struct syntax_color THEME_SEARCH_CURRENT = {0x5D, 0x4D, 0x3D}; /* Warm tan - brighter */
 
-/* Line number gutter colors. */
-static const struct syntax_color THEME_LINE_NUMBER = {0x3b, 0x42, 0x61};
-static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0x73, 0x7a, 0xa2};
+/* Line numbers: Gray scale for minimal distraction, still readable. */
+static const struct syntax_color THEME_LINE_NUMBER = {0x60, 0x60, 0x60};
+static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0xA0, 0xA0, 0xA0};
 
 /*****************************************************************************
  * WCAG Color Contrast Utilities
