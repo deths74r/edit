@@ -226,7 +226,11 @@ enum wrap_indicator {
 	WRAP_INDICATOR_CORNER,     /* ⎿ */
 	WRAP_INDICATOR_HOOK,       /* ↪ */
 	WRAP_INDICATOR_ARROW,      /* → */
-	WRAP_INDICATOR_DOT         /* · */
+	WRAP_INDICATOR_DOT,        /* · */
+	WRAP_INDICATOR_FLOOR,      /* ⌊ */
+	WRAP_INDICATOR_BOTTOM,     /* ⌞ */
+	WRAP_INDICATOR_RETURN,     /* ↳ */
+	WRAP_INDICATOR_BOX         /* └ */
 };
 
 /* Types of edit operations that can be undone/redone. */
@@ -3603,6 +3607,22 @@ static void editor_cycle_wrap_indicator(void)
 			editor_set_status_message("Wrap indicator: ·");
 			break;
 		case WRAP_INDICATOR_DOT:
+			editor.wrap_indicator = WRAP_INDICATOR_FLOOR;
+			editor_set_status_message("Wrap indicator: ⌊");
+			break;
+		case WRAP_INDICATOR_FLOOR:
+			editor.wrap_indicator = WRAP_INDICATOR_BOTTOM;
+			editor_set_status_message("Wrap indicator: ⌞");
+			break;
+		case WRAP_INDICATOR_BOTTOM:
+			editor.wrap_indicator = WRAP_INDICATOR_RETURN;
+			editor_set_status_message("Wrap indicator: ↳");
+			break;
+		case WRAP_INDICATOR_RETURN:
+			editor.wrap_indicator = WRAP_INDICATOR_BOX;
+			editor_set_status_message("Wrap indicator: └");
+			break;
+		case WRAP_INDICATOR_BOX:
 			editor.wrap_indicator = WRAP_INDICATOR_NONE;
 			editor_set_status_message("Wrap indicator: None");
 			break;
@@ -3616,6 +3636,10 @@ static const char *wrap_indicator_string(enum wrap_indicator ind)
 		case WRAP_INDICATOR_HOOK:   return "↪";
 		case WRAP_INDICATOR_ARROW:  return "→";
 		case WRAP_INDICATOR_DOT:    return "·";
+		case WRAP_INDICATOR_FLOOR:  return "⌊";
+		case WRAP_INDICATOR_BOTTOM: return "⌞";
+		case WRAP_INDICATOR_RETURN: return "↳";
+		case WRAP_INDICATOR_BOX:    return "└";
 		default:                    return " ";
 	}
 }
