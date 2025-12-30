@@ -91,6 +91,12 @@ cd edit
 make
 ```
 
+## Documentation
+
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Comprehensive technical manual covering internals, data structures, subsystems, and extension guide
+- **[CODING_STANDARDS.md](CODING_STANDARDS.md)** - Style guide and naming conventions
+- **[TRANSACTION_LOG.md](TRANSACTION_LOG.md)** - Development history and phase tracking
+
 ## License
 
 MIT
