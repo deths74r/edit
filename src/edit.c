@@ -104,6 +104,7 @@ enum key_code {
 	KEY_F4 = -75,
 	KEY_SHIFT_F4 = -74,
 	KEY_F12 = -65,
+	KEY_ALT_SHIFT_S = -64,
 
 	/* Alt key combinations. */
 	KEY_ALT_N = -88,
@@ -1826,6 +1827,7 @@ static int input_read_key(void)
 				case 'p': case 'P': return KEY_ALT_P;
 				case 'z': return KEY_ALT_Z;
 				case 'Z': return KEY_ALT_SHIFT_Z;
+				case 'S': return KEY_ALT_SHIFT_S;
 				case 'k': case 'K': return KEY_ALT_K;
 				case 'd': case 'D': return KEY_ALT_D;
 				case '/': return KEY_ALT_SLASH;
@@ -9084,6 +9086,7 @@ static void editor_process_keypress(void)
 			editor_save();
 			break;
 
+		case KEY_ALT_SHIFT_S:
 		case KEY_F12:
 			save_as_enter();
 			break;
