@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 21: Search Enhancements & Regex
+ * Phase 22: Save As
  *****************************************************************************/
 
 /*****************************************************************************
@@ -29,12 +29,14 @@
 #include <time.h>
 #include <unistd.h>
 #include <regex.h>
+#include <dirent.h>
+#include <limits.h>
 
 #define UTFLITE_IMPLEMENTATION
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.21.0"
+#define EDIT_VERSION "0.22.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -101,6 +103,7 @@ enum key_code {
 	KEY_F3 = -76,
 	KEY_F4 = -75,
 	KEY_SHIFT_F4 = -74,
+	KEY_F12 = -65,
 
 	/* Alt key combinations. */
 	KEY_ALT_N = -88,
@@ -839,6 +842,16 @@ struct goto_state {
 	uint32_t saved_row_offset;
 };
 static struct goto_state goto_line = {0};
+
+/* Save As mode state. */
+struct save_as_state {
+	bool active;
+	char path[PATH_MAX];        /* Current path being edited */
+	uint32_t path_length;       /* Length in bytes */
+	uint32_t cursor_position;   /* Cursor position within path */
+	bool confirm_overwrite;     /* Waiting for overwrite confirmation */
+};
+static struct save_as_state save_as = {0};
 
 /* Forward declarations for functions used in input_read_key. */
 static struct mouse_input input_parse_sgr_mouse(void);
@@ -1899,6 +1912,8 @@ static int input_read_key(void)
 							return KEY_F3;
 						} else if (sequence[1] == '1' && sequence[2] == '4') {
 							return KEY_F4;
+						} else if (sequence[1] == '2' && sequence[2] == '4') {
+							return KEY_F12;
 						}
 					}
 				}
@@ -4238,25 +4253,6 @@ static uint32_t line_get_segment_end(struct line *line,
 	}
 
 	return line->cell_count;
-}
-
-/*
- * Get total number of screen rows needed to display all lines
- * with current wrap settings. Used for scroll calculations.
- */
-static uint32_t buffer_get_total_screen_rows(struct buffer *buffer)
-{
-	if (editor.wrap_mode == WRAP_NONE) {
-		return buffer->line_count;
-	}
-
-	uint32_t total = 0;
-	for (uint32_t row = 0; row < buffer->line_count; row++) {
-		line_ensure_wrap_cache(&buffer->lines[row], buffer);
-		total += buffer->lines[row].wrap_segment_count;
-	}
-
-	return total > 0 ? total : 1;
 }
 
 /*
@@ -7497,6 +7493,28 @@ static void render_draw_message_bar(struct output_buffer *output)
 {
 	output_buffer_append_string(output, "\x1b[K");
 
+	if (save_as.active) {
+		char prompt[PATH_MAX + 32];
+
+		if (save_as.confirm_overwrite) {
+			snprintf(prompt, sizeof(prompt), "File exists. Overwrite? (y/n)");
+		} else {
+			snprintf(prompt, sizeof(prompt), "Save as: %s", save_as.path);
+		}
+
+		int length = strlen(prompt);
+		if (length > (int)editor.screen_columns) {
+			/* Truncate from the left to show end of path */
+			int offset = length - editor.screen_columns + 4;
+			memmove(prompt + 4, prompt + offset, length - offset + 1);
+			memcpy(prompt, "...", 3);
+			length = strlen(prompt);
+		}
+
+		output_buffer_append(output, prompt, length);
+		return;
+	}
+
 	if (search.active) {
 		char prompt[512];
 		int len;
@@ -7972,6 +7990,347 @@ static bool goto_handle_key(int key)
 	}
 
 	return true;  /* Consume all keys in goto mode */
+}
+
+/*****************************************************************************
+ * Save As
+ *****************************************************************************/
+
+/*
+ * Check if a file exists at the given path.
+ */
+static bool file_exists(const char *path)
+{
+	struct stat st;
+	return stat(path, &st) == 0;
+}
+
+/*
+ * Enter Save As mode. Pre-fills with current filename if available.
+ */
+static void save_as_enter(void)
+{
+	save_as.active = true;
+	save_as.confirm_overwrite = false;
+
+	if (editor.buffer.filename != NULL) {
+		/* Start with current filename */
+		size_t length = strlen(editor.buffer.filename);
+		if (length >= sizeof(save_as.path)) {
+			length = sizeof(save_as.path) - 1;
+		}
+		memcpy(save_as.path, editor.buffer.filename, length);
+		save_as.path[length] = '\0';
+		save_as.path_length = length;
+		save_as.cursor_position = length;
+	} else {
+		/* No current filename - start with current directory */
+		if (getcwd(save_as.path, sizeof(save_as.path)) != NULL) {
+			size_t length = strlen(save_as.path);
+			if (length + 1 < sizeof(save_as.path)) {
+				save_as.path[length] = '/';
+				save_as.path[length + 1] = '\0';
+				save_as.path_length = length + 1;
+				save_as.cursor_position = length + 1;
+			}
+		} else {
+			save_as.path[0] = '\0';
+			save_as.path_length = 0;
+			save_as.cursor_position = 0;
+		}
+	}
+
+	editor_set_status_message("");
+}
+
+/*
+ * Exit Save As mode.
+ */
+static void save_as_exit(void)
+{
+	save_as.active = false;
+	save_as.confirm_overwrite = false;
+}
+
+/*
+ * Execute the Save As operation.
+ * Returns true on success.
+ */
+static bool save_as_execute(void)
+{
+	if (save_as.path_length == 0) {
+		editor_set_status_message("No filename provided");
+		return false;
+	}
+
+	/* Check if file exists and we haven't confirmed overwrite */
+	if (!save_as.confirm_overwrite && file_exists(save_as.path)) {
+		save_as.confirm_overwrite = true;
+		editor_set_status_message("File exists. Overwrite? (y/n)");
+		return false;
+	}
+
+	/* Update the filename */
+	char *old_filename = editor.buffer.filename;
+	editor.buffer.filename = strdup(save_as.path);
+
+	if (editor.buffer.filename == NULL) {
+		editor.buffer.filename = old_filename;
+		editor_set_status_message("Memory allocation failed");
+		return false;
+	}
+
+	free(old_filename);
+
+	/* Use existing save function */
+	editor_save();
+
+	/* Exit save as mode */
+	save_as_exit();
+
+	return true;
+}
+
+/*
+ * Handle key input in Save As mode.
+ * Returns true if the key was handled.
+ */
+static bool save_as_handle_key(int key)
+{
+	if (!save_as.active) {
+		return false;
+	}
+
+	/* Handle overwrite confirmation */
+	if (save_as.confirm_overwrite) {
+		switch (key) {
+			case 'y':
+			case 'Y':
+				/* Keep confirm_overwrite true so execute() skips the check */
+				save_as_execute();
+				return true;
+
+			case 'n':
+			case 'N':
+			case '\x1b':
+				save_as.confirm_overwrite = false;
+				editor_set_status_message("Save cancelled");
+				return true;
+
+			default:
+				editor_set_status_message("File exists. Overwrite? (y/n)");
+				return true;
+		}
+	}
+
+	switch (key) {
+		case '\x1b':
+			save_as_exit();
+			editor_set_status_message("Save As cancelled");
+			return true;
+
+		case '\r':
+			save_as_execute();
+			return true;
+
+		case KEY_BACKSPACE:
+		case CONTROL_KEY('h'):
+			if (save_as.cursor_position > 0) {
+				/* Delete character before cursor (handle UTF-8) */
+				uint32_t delete_position = save_as.cursor_position - 1;
+				while (delete_position > 0 &&
+				       (save_as.path[delete_position] & 0xC0) == 0x80) {
+					delete_position--;
+				}
+
+				uint32_t delete_length = save_as.cursor_position - delete_position;
+				memmove(save_as.path + delete_position,
+				        save_as.path + save_as.cursor_position,
+				        save_as.path_length - save_as.cursor_position + 1);
+
+				save_as.path_length -= delete_length;
+				save_as.cursor_position = delete_position;
+			}
+			return true;
+
+		case KEY_DELETE:
+			if (save_as.cursor_position < save_as.path_length) {
+				/* Delete character at cursor (handle UTF-8) */
+				uint32_t delete_end = save_as.cursor_position + 1;
+				while (delete_end < save_as.path_length &&
+				       (save_as.path[delete_end] & 0xC0) == 0x80) {
+					delete_end++;
+				}
+
+				uint32_t delete_length = delete_end - save_as.cursor_position;
+				memmove(save_as.path + save_as.cursor_position,
+				        save_as.path + delete_end,
+				        save_as.path_length - delete_end + 1);
+
+				save_as.path_length -= delete_length;
+			}
+			return true;
+
+		case KEY_ARROW_LEFT:
+			if (save_as.cursor_position > 0) {
+				save_as.cursor_position--;
+				while (save_as.cursor_position > 0 &&
+				       (save_as.path[save_as.cursor_position] & 0xC0) == 0x80) {
+					save_as.cursor_position--;
+				}
+			}
+			return true;
+
+		case KEY_ARROW_RIGHT:
+			if (save_as.cursor_position < save_as.path_length) {
+				save_as.cursor_position++;
+				while (save_as.cursor_position < save_as.path_length &&
+				       (save_as.path[save_as.cursor_position] & 0xC0) == 0x80) {
+					save_as.cursor_position++;
+				}
+			}
+			return true;
+
+		case KEY_HOME:
+		case CONTROL_KEY('a'):
+			save_as.cursor_position = 0;
+			return true;
+
+		case KEY_END:
+		case CONTROL_KEY('e'):
+			save_as.cursor_position = save_as.path_length;
+			return true;
+
+		case CONTROL_KEY('u'):
+			/* Clear entire path */
+			save_as.path[0] = '\0';
+			save_as.path_length = 0;
+			save_as.cursor_position = 0;
+			return true;
+
+		case CONTROL_KEY('w'):
+			/* Delete word before cursor */
+			if (save_as.cursor_position > 0) {
+				uint32_t word_start = save_as.cursor_position;
+
+				/* Skip trailing slashes/spaces */
+				while (word_start > 0 &&
+				       (save_as.path[word_start - 1] == '/' ||
+				        save_as.path[word_start - 1] == ' ')) {
+					word_start--;
+				}
+
+				/* Find start of word */
+				while (word_start > 0 &&
+				       save_as.path[word_start - 1] != '/' &&
+				       save_as.path[word_start - 1] != ' ') {
+					word_start--;
+				}
+
+				uint32_t delete_length = save_as.cursor_position - word_start;
+				memmove(save_as.path + word_start,
+				        save_as.path + save_as.cursor_position,
+				        save_as.path_length - save_as.cursor_position + 1);
+
+				save_as.path_length -= delete_length;
+				save_as.cursor_position = word_start;
+			}
+			return true;
+
+		case '\t':
+			/* Tab completion for file paths */
+			{
+				char *last_slash = strrchr(save_as.path, '/');
+				char directory_path[PATH_MAX];
+				char prefix[256] = "";
+
+				if (last_slash) {
+					size_t directory_length = last_slash - save_as.path + 1;
+					memcpy(directory_path, save_as.path, directory_length);
+					directory_path[directory_length] = '\0';
+					snprintf(prefix, sizeof(prefix), "%s", last_slash + 1);
+				} else {
+					strcpy(directory_path, ".");
+					snprintf(prefix, sizeof(prefix), "%s", save_as.path);
+				}
+
+				DIR *directory = opendir(directory_path);
+				if (directory) {
+					struct dirent *entry;
+					char *match = NULL;
+					int match_count = 0;
+					size_t prefix_length = strlen(prefix);
+
+					while ((entry = readdir(directory)) != NULL) {
+						if (entry->d_name[0] == '.' && prefix[0] != '.') {
+							continue;
+						}
+						if (strncmp(entry->d_name, prefix, prefix_length) == 0) {
+							match_count++;
+							if (match == NULL) {
+								match = strdup(entry->d_name);
+							}
+						}
+					}
+					closedir(directory);
+
+					if (match_count == 1 && match) {
+						snprintf(save_as.path, sizeof(save_as.path),
+						         "%s%s", directory_path, match);
+						save_as.path_length = strlen(save_as.path);
+
+						/* Add trailing slash if directory */
+						struct stat st;
+						if (stat(save_as.path, &st) == 0 && S_ISDIR(st.st_mode)) {
+							if (save_as.path_length + 1 < sizeof(save_as.path)) {
+								save_as.path[save_as.path_length++] = '/';
+								save_as.path[save_as.path_length] = '\0';
+							}
+						}
+
+						save_as.cursor_position = save_as.path_length;
+					} else if (match_count > 1) {
+						editor_set_status_message("%d matches", match_count);
+					}
+
+					free(match);
+				}
+			}
+			return true;
+
+		default:
+			/* Insert printable character */
+			if (key >= 32 && key < 127) {
+				if (save_as.path_length + 1 < sizeof(save_as.path)) {
+					memmove(save_as.path + save_as.cursor_position + 1,
+					        save_as.path + save_as.cursor_position,
+					        save_as.path_length - save_as.cursor_position + 1);
+
+					save_as.path[save_as.cursor_position] = (char)key;
+					save_as.path_length++;
+					save_as.cursor_position++;
+				}
+				return true;
+			} else if (key >= 128) {
+				/* UTF-8 multi-byte */
+				char utf8[4];
+				int bytes = utflite_encode((uint32_t)key, utf8);
+
+				if (bytes > 0 && save_as.path_length + (uint32_t)bytes < sizeof(save_as.path)) {
+					memmove(save_as.path + save_as.cursor_position + bytes,
+					        save_as.path + save_as.cursor_position,
+					        save_as.path_length - save_as.cursor_position + 1);
+
+					memcpy(save_as.path + save_as.cursor_position, utf8, bytes);
+					save_as.path_length += bytes;
+					save_as.cursor_position += bytes;
+				}
+				return true;
+			}
+			break;
+	}
+
+	return false;
 }
 
 /*****************************************************************************
@@ -8692,7 +9051,12 @@ static void editor_process_keypress(void)
 		return;
 	}
 
-	/* Handle search mode input first */
+	/* Handle Save As mode input first */
+	if (save_as_handle_key(key)) {
+		return;
+	}
+
+	/* Handle search mode input */
 	if (search_handle_key(key)) {
 		return;
 	}
@@ -8718,6 +9082,10 @@ static void editor_process_keypress(void)
 
 		case CONTROL_KEY('s'):
 			editor_save();
+			break;
+
+		case KEY_F12:
+			save_as_enter();
 			break;
 
 		case CONTROL_KEY('c'):
