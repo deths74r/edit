@@ -825,10 +825,47 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 19: Select Word & Select Next Occurrence (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 19
+- Select word under cursor with Ctrl+D
+- Find next occurrence of selection on subsequent Ctrl+D presses
+
+**Action [Claude]**: Created branch `select-next-occurrence`
+
+**Action [Claude]**: Updated version to 0.19.0
+
+**Action [Claude]**: Modified `editor_select_word()` to return bool
+
+**Action [Claude]**: Added forward declarations for search functions
+
+**Action [Claude]**: Added new functions:
+- `editor_select_word_at_cursor()` - selects word, handles whitespace by scanning right
+- `find_next_occurrence()` - searches for text with wrap-around support
+- `editor_select_next_occurrence()` - main command implementing Ctrl+D behavior
+
+**Action [Claude]**: Added key binding:
+- CONTROL_KEY('d') - `editor_select_next_occurrence()`
+
+**Behavior:**
+- No selection: selects word under cursor
+- Cursor on whitespace: selects next word to the right
+- Selection exists: finds and selects next occurrence
+- At last occurrence: wraps to first
+- Only occurrence: shows "Only occurrence" message
+
+**Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
+
+**Action [Claude]**: Committed (cd679ac) and merged to main (fast-forward)
+
+**Status**: Phase 19 complete, merged to main
+
+---
+
 ## Current State
 
 - **Branch**: `main`
-- **Version**: 0.18.0 (jump to matching bracket)
+- **Version**: 0.19.0 (select next occurrence)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
 - **Source**: `src/edit.c` (~7,900 lines)
 
@@ -857,7 +894,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - `main` - stable, contains all phases through Phase 16
 - All feature branches merged to main
 
-### Key Bindings (New in Phase 11-18)
+### Key Bindings (New in Phase 11-19)
 - Ctrl+F - enter search mode
 - Ctrl+R - enter replace mode
 - Alt+N - find next match
@@ -869,6 +906,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - Alt+Shift+Z - cycle wrap indicator
 - Ctrl+G - go to line
 - Ctrl+A - select all
+- Ctrl+D - select word / next occurrence
 - Alt+K - delete line
 - Alt+D - duplicate line
 - Alt+Up - move line up
