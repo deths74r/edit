@@ -687,12 +687,56 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 15: Auto-indent & Comments (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 15
+- Auto-indent on Enter key
+- Toggle comment (Ctrl+/ or Alt+/)
+
+**Action [Claude]**: Created branch `auto-indent-comment`
+
+**Action [Claude]**: Updated header to Phase 15, version to 0.15.0
+
+**Action [Claude]**: Added new key code:
+- `KEY_ALT_SLASH` - for toggle comment
+
+**Action [Claude]**: Added Alt+/ handling in `input_read_key()`
+
+**Action [Claude]**: Modified `editor_insert_newline()`:
+- Captures leading whitespace (tabs/spaces) before newline
+- Limits indent to cursor position
+- Re-evaluates indent after selection deletion
+- Inserts indent characters on new line after newline
+- All operations recorded for undo
+
+**Action [Claude]**: Added comment helper function:
+- `line_comment_start()` - finds // comment position in line
+
+**Action [Claude]**: Added `editor_toggle_comment()`:
+- Works on current line or selection
+- If all non-empty lines are commented, removes comments
+- Otherwise, adds comments at minimum indent level for alignment
+- Inserts "// " for commenting, removes "// " or "//" for uncommenting
+- Full undo support with proper cursor adjustment
+
+**Action [Claude]**: Added key bindings:
+- 0x1f (Ctrl+/) - `editor_toggle_comment()`
+- Alt+/ - `editor_toggle_comment()`
+
+**Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
+
+**Action [Claude]**: Committed (8a15678) and merged to main
+
+**Status**: Phase 15 complete, merged to main
+
+---
+
 ## Current State
 
 - **Branch**: `main`
-- **Version**: 0.14.0 (line operations)
+- **Version**: 0.15.0 (auto-indent & comments)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
-- **Source**: `src/edit.c` (~6900 lines)
+- **Source**: `src/edit.c` (~7200 lines)
 
 ---
 
@@ -701,7 +745,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ```
 /home/edward/repos/edit/
 ├── src/
-│   └── edit.c          # Main editor source (~6900 lines)
+│   └── edit.c          # Main editor source (~7200 lines)
 ├── third_party/
 │   └── utflite/        # UTF-8 library
 ├── Makefile
@@ -716,10 +760,10 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains all phases through Phase 14
+- `main` - stable, contains all phases through Phase 15
 - All feature branches merged to main
 
-### Key Bindings (New in Phase 11-14)
+### Key Bindings (New in Phase 11-15)
 - Ctrl+F - enter search mode
 - Alt+N - find next match
 - Alt+P - find previous match
@@ -733,6 +777,8 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - Alt+Down - move line down
 - Tab (with selection) - indent lines
 - Shift+Tab - outdent lines
+- Enter - auto-indent (new line inherits leading whitespace)
+- Ctrl+/ or Alt+/ - toggle line comment
 
 ### Build Commands
 ```bash

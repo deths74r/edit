@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 14: Line Operations
+ * Phase 15: Auto-indent & Comments
  *****************************************************************************/
 
 /*****************************************************************************
@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.14.0"
+#define EDIT_VERSION "0.15.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -104,9 +104,10 @@ enum key_code {
 	KEY_ALT_D = -83,
 	KEY_ALT_ARROW_UP = -82,
 	KEY_ALT_ARROW_DOWN = -81,
+	KEY_ALT_SLASH = -80,
 
 	/* Shift+Tab (backtab). */
-	KEY_SHIFT_TAB = -80,
+	KEY_SHIFT_TAB = -79,
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
@@ -1712,6 +1713,7 @@ static int input_read_key(void)
 				case 'Z': return KEY_ALT_SHIFT_Z;
 				case 'k': case 'K': return KEY_ALT_K;
 				case 'd': case 'D': return KEY_ALT_D;
+				case '/': return KEY_ALT_SLASH;
 				default: return '\x1b';
 			}
 		}
@@ -4673,21 +4675,76 @@ static void editor_insert_character(uint32_t codepoint)
 /*
  * Handle Enter key by splitting the current line at the cursor position.
  * Moves cursor to the beginning of the newly created line below. If there's
- * an active selection, deletes it first.
+ * an active selection, deletes it first. The new line inherits the leading
+ * whitespace (tabs and spaces) from the original line for auto-indentation.
  */
 static void editor_insert_newline(void)
 {
 	undo_begin_group(&editor.buffer);
 
+	/*
+	 * Capture leading whitespace before any modifications. We limit the
+	 * indent to the cursor column since content before cursor stays on
+	 * the current line.
+	 */
+	uint32_t indent_count = 0;
+	uint32_t indent_chars[256];
+
+	if (editor.cursor_row < editor.buffer.line_count) {
+		struct line *line = &editor.buffer.lines[editor.cursor_row];
+		line_warm(line, &editor.buffer);
+
+		while (indent_count < line->cell_count && indent_count < 256) {
+			uint32_t codepoint = line->cells[indent_count].codepoint;
+			if (codepoint != ' ' && codepoint != '\t') {
+				break;
+			}
+			indent_chars[indent_count] = codepoint;
+			indent_count++;
+		}
+
+		/* Don't copy more indent than cursor position */
+		if (indent_count > editor.cursor_column) {
+			indent_count = editor.cursor_column;
+		}
+	}
+
 	/* Delete selection first if active */
 	if (editor.selection_active && !selection_is_empty()) {
 		editor_delete_selection();
+		/* After deletion, re-evaluate indent based on new cursor position */
+		indent_count = 0;
+		if (editor.cursor_row < editor.buffer.line_count) {
+			struct line *line = &editor.buffer.lines[editor.cursor_row];
+			line_warm(line, &editor.buffer);
+
+			while (indent_count < line->cell_count && indent_count < 256) {
+				uint32_t codepoint = line->cells[indent_count].codepoint;
+				if (codepoint != ' ' && codepoint != '\t') {
+					break;
+				}
+				indent_chars[indent_count] = codepoint;
+				indent_count++;
+			}
+
+			if (indent_count > editor.cursor_column) {
+				indent_count = editor.cursor_column;
+			}
+		}
 	}
 
 	undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
 	buffer_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
 	editor.cursor_row++;
 	editor.cursor_column = 0;
+
+	/* Insert auto-indent characters on the new line */
+	for (uint32_t i = 0; i < indent_count; i++) {
+		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, indent_chars[i]);
+		buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column, indent_chars[i]);
+		editor.cursor_column++;
+	}
+
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
 	undo_end_group(&editor.buffer);
@@ -6440,6 +6497,245 @@ static void editor_duplicate_line(void)
 }
 
 /*
+ * Check if a line starts with a comment (// with optional leading whitespace).
+ * Returns the column where the comment starts, or UINT32_MAX if not commented.
+ */
+static uint32_t line_comment_start(struct line *line)
+{
+	uint32_t column = 0;
+
+	/* Skip leading whitespace */
+	while (column < line->cell_count) {
+		uint32_t codepoint = line->cells[column].codepoint;
+		if (codepoint != ' ' && codepoint != '\t') {
+			break;
+		}
+		column++;
+	}
+
+	/* Check for // */
+	if (column + 1 < line->cell_count &&
+	    line->cells[column].codepoint == '/' &&
+	    line->cells[column + 1].codepoint == '/') {
+		return column;
+	}
+
+	return UINT32_MAX;
+}
+
+/*
+ * Toggle line comments on the current line or selection. Uses C-style //
+ * comments. If all affected lines are commented, removes comments. Otherwise,
+ * adds comments to all lines at the minimum indent level for alignment.
+ */
+static void editor_toggle_comment(void)
+{
+	uint32_t start_row, end_row;
+
+	if (editor.selection_active && !selection_is_empty()) {
+		uint32_t start_column, end_column;
+		selection_get_range(&start_row, &start_column, &end_row, &end_column);
+	} else {
+		start_row = editor.cursor_row;
+		end_row = editor.cursor_row;
+	}
+
+	if (start_row >= editor.buffer.line_count) {
+		return;
+	}
+	if (end_row >= editor.buffer.line_count) {
+		end_row = editor.buffer.line_count - 1;
+	}
+
+	/*
+	 * Determine action: if ALL non-empty lines are commented, uncomment.
+	 * Otherwise, comment all lines.
+	 */
+	bool all_commented = true;
+	bool has_content = false;
+
+	for (uint32_t row = start_row; row <= end_row; row++) {
+		struct line *line = &editor.buffer.lines[row];
+		line_warm(line, &editor.buffer);
+
+		/* Skip empty lines for this check */
+		uint32_t first_non_whitespace = 0;
+		while (first_non_whitespace < line->cell_count) {
+			uint32_t codepoint = line->cells[first_non_whitespace].codepoint;
+			if (codepoint != ' ' && codepoint != '\t') {
+				break;
+			}
+			first_non_whitespace++;
+		}
+
+		if (first_non_whitespace < line->cell_count) {
+			has_content = true;
+			if (line_comment_start(line) == UINT32_MAX) {
+				all_commented = false;
+				break;
+			}
+		}
+	}
+
+	/* If no content, nothing to do */
+	if (!has_content) {
+		return;
+	}
+
+	bool should_comment = !all_commented;
+
+	undo_begin_group(&editor.buffer);
+
+	/*
+	 * Find the minimum indent across all lines with content. We insert
+	 * comments at this position for visual alignment.
+	 */
+	uint32_t min_indent = UINT32_MAX;
+	if (should_comment) {
+		for (uint32_t row = start_row; row <= end_row; row++) {
+			struct line *line = &editor.buffer.lines[row];
+
+			/* Skip empty lines */
+			if (line->cell_count == 0) {
+				continue;
+			}
+
+			uint32_t indent = 0;
+			while (indent < line->cell_count) {
+				uint32_t codepoint = line->cells[indent].codepoint;
+				if (codepoint != ' ' && codepoint != '\t') {
+					break;
+				}
+				indent++;
+			}
+
+			/* Only count lines with content after whitespace */
+			if (indent < line->cell_count && indent < min_indent) {
+				min_indent = indent;
+			}
+		}
+		if (min_indent == UINT32_MAX) {
+			min_indent = 0;
+		}
+	}
+
+	for (uint32_t row = start_row; row <= end_row; row++) {
+		struct line *line = &editor.buffer.lines[row];
+		line_warm(line, &editor.buffer);
+
+		if (should_comment) {
+			/* Skip empty lines */
+			if (line->cell_count == 0) {
+				continue;
+			}
+
+			/* Check if line has content after whitespace */
+			uint32_t first_content = 0;
+			while (first_content < line->cell_count) {
+				uint32_t codepoint = line->cells[first_content].codepoint;
+				if (codepoint != ' ' && codepoint != '\t') {
+					break;
+				}
+				first_content++;
+			}
+			if (first_content >= line->cell_count) {
+				continue;
+			}
+
+			/* Insert "// " at min_indent position */
+			uint32_t insert_position = min_indent;
+
+			/* Make room and insert the three characters */
+			line_ensure_capacity(line, line->cell_count + 3);
+
+			/* Shift existing cells right by 3 */
+			memmove(&line->cells[insert_position + 3],
+				&line->cells[insert_position],
+				(line->cell_count - insert_position) * sizeof(struct cell));
+
+			/* Insert // and space */
+			line->cells[insert_position].codepoint = '/';
+			line->cells[insert_position].syntax = SYNTAX_COMMENT;
+			line->cells[insert_position].context = 0;
+			line->cells[insert_position].neighbor = 0;
+
+			line->cells[insert_position + 1].codepoint = '/';
+			line->cells[insert_position + 1].syntax = SYNTAX_COMMENT;
+			line->cells[insert_position + 1].context = 0;
+			line->cells[insert_position + 1].neighbor = 0;
+
+			line->cells[insert_position + 2].codepoint = ' ';
+			line->cells[insert_position + 2].syntax = SYNTAX_COMMENT;
+			line->cells[insert_position + 2].context = 0;
+			line->cells[insert_position + 2].neighbor = 0;
+
+			line->cell_count += 3;
+			line->temperature = LINE_TEMPERATURE_HOT;
+
+			/* Record for undo (in reverse order for correct undo sequence) */
+			undo_record_insert_char(&editor.buffer, row, insert_position, '/');
+			undo_record_insert_char(&editor.buffer, row, insert_position + 1, '/');
+			undo_record_insert_char(&editor.buffer, row, insert_position + 2, ' ');
+
+			/* Adjust cursor if on this line */
+			if (row == editor.cursor_row && editor.cursor_column >= insert_position) {
+				editor.cursor_column += 3;
+			}
+		} else {
+			/* Remove // (and optional trailing space) */
+			uint32_t comment_start = line_comment_start(line);
+			if (comment_start == UINT32_MAX) {
+				continue;
+			}
+
+			/* Check if there's a space after // */
+			uint32_t chars_to_remove = 2;
+			if (comment_start + 2 < line->cell_count &&
+			    line->cells[comment_start + 2].codepoint == ' ') {
+				chars_to_remove = 3;
+			}
+
+			/* Record deletions for undo (from end to start) */
+			for (uint32_t i = chars_to_remove; i > 0; i--) {
+				uint32_t delete_position = comment_start + i - 1;
+				uint32_t codepoint = line->cells[delete_position].codepoint;
+				undo_record_delete_char(&editor.buffer, row, delete_position, codepoint);
+			}
+
+			/* Shift cells left to remove the comment */
+			memmove(&line->cells[comment_start],
+				&line->cells[comment_start + chars_to_remove],
+				(line->cell_count - comment_start - chars_to_remove) * sizeof(struct cell));
+
+			line->cell_count -= chars_to_remove;
+			line->temperature = LINE_TEMPERATURE_HOT;
+
+			/* Adjust cursor if on this line */
+			if (row == editor.cursor_row && editor.cursor_column > comment_start) {
+				if (editor.cursor_column >= comment_start + chars_to_remove) {
+					editor.cursor_column -= chars_to_remove;
+				} else {
+					editor.cursor_column = comment_start;
+				}
+			}
+		}
+
+		/* Recompute line metadata */
+		neighbor_compute_line(line);
+		syntax_highlight_line(line, &editor.buffer, row);
+		line_invalidate_wrap_cache(line);
+	}
+
+	editor.buffer.is_modified = true;
+	undo_end_group(&editor.buffer);
+
+	uint32_t count = end_row - start_row + 1;
+	editor_set_status_message("%s %u line%s",
+				  should_comment ? "Commented" : "Uncommented",
+				  count, count > 1 ? "s" : "");
+}
+
+/*
  * Swap two lines in the buffer. Does not record undo.
  */
 static void buffer_swap_lines(struct buffer *buffer, uint32_t row1, uint32_t row2)
@@ -6782,6 +7078,11 @@ static void editor_process_keypress(void)
 
 		case KEY_ALT_ARROW_DOWN:
 			editor_move_line_down();
+			break;
+
+		case 0x1f:  /* Ctrl+/ in many terminals */
+		case KEY_ALT_SLASH:
+			editor_toggle_comment();
 			break;
 
 		case KEY_ARROW_UP:
