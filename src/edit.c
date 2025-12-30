@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.17.0"
+#define EDIT_VERSION "0.17.1"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -96,6 +96,7 @@ enum key_code {
 	KEY_F2 = -91,
 	KEY_F3 = -76,
 	KEY_F4 = -75,
+	KEY_SHIFT_F4 = -74,
 
 	/* Alt key combinations. */
 	KEY_ALT_N = -88,
@@ -244,6 +245,15 @@ enum wrap_indicator {
 	WRAP_INDICATOR_BOX         /* └ */
 };
 
+/* Color column display style for the vertical ruler. */
+enum color_column_style {
+	COLOR_COLUMN_BACKGROUND = 0, /* Subtle background tint only */
+	COLOR_COLUMN_SOLID,          /* │ U+2502 */
+	COLOR_COLUMN_DASHED,         /* ┆ U+2506 */
+	COLOR_COLUMN_DOTTED,         /* ┊ U+250A */
+	COLOR_COLUMN_HEAVY           /* ┃ U+2503 */
+};
+
 /* Types of edit operations that can be undone/redone. */
 enum edit_operation_type {
 	EDIT_OP_INSERT_CHAR,    /* Single character inserted */
@@ -387,6 +397,9 @@ static const struct syntax_color THEME_TRAILING_WHITESPACE = {0x50, 0x30, 0x30};
 
 /* Color column: Subtle vertical line at specified column. */
 static const struct syntax_color THEME_COLOR_COLUMN = {0x2A, 0x2A, 0x2A};
+
+/* Color column line character: More visible than background tint. */
+static const struct syntax_color THEME_COLOR_COLUMN_LINE = {0x45, 0x45, 0x45};
 
 /*****************************************************************************
  * WCAG Color Contrast Utilities
@@ -716,6 +729,7 @@ struct editor_state {
 	/* Visual display settings. */
 	bool show_whitespace;        /* Render whitespace characters visibly */
 	uint32_t color_column;       /* Column to highlight (0 = off) */
+	enum color_column_style color_column_style;  /* Visual style for column */
 };
 
 /*****************************************************************************
@@ -1808,6 +1822,7 @@ static int input_read_key(void)
 								case 'D': return KEY_SHIFT_ARROW_LEFT;
 								case 'H': return KEY_SHIFT_HOME;
 								case 'F': return KEY_SHIFT_END;
+								case 'S': return KEY_SHIFT_F4;
 							}
 						} else if (modifier == '5') {  /* Ctrl */
 							switch (final) {
@@ -2543,6 +2558,9 @@ static void editor_init(void)
 	editor.selection_active = false;
 	editor.wrap_mode = WRAP_WORD;
 	editor.wrap_indicator = WRAP_INDICATOR_RETURN;
+	editor.show_whitespace = false;
+	editor.color_column = 0;
+	editor.color_column_style = COLOR_COLUMN_SOLID;
 }
 
 /* Start a new selection at the current cursor position. The anchor is set
@@ -3728,6 +3746,69 @@ static const char *wrap_indicator_string(enum wrap_indicator ind)
 		case WRAP_INDICATOR_BOX:    return "└";
 		default:                    return " ";
 	}
+}
+
+/*
+ * Get the UTF-8 string for a color column style.
+ * Returns NULL for background-only style.
+ */
+static const char *color_column_char(enum color_column_style style)
+{
+	switch (style) {
+		case COLOR_COLUMN_SOLID:  return "│";  /* U+2502 */
+		case COLOR_COLUMN_DASHED: return "┆";  /* U+2506 */
+		case COLOR_COLUMN_DOTTED: return "┊";  /* U+250A */
+		case COLOR_COLUMN_HEAVY:  return "┃";  /* U+2503 */
+		default: return NULL;  /* Background only */
+	}
+}
+
+/*
+ * Get human-readable name for color column style.
+ */
+static const char *color_column_style_name(enum color_column_style style)
+{
+	switch (style) {
+		case COLOR_COLUMN_BACKGROUND: return "background";
+		case COLOR_COLUMN_SOLID:      return "solid";
+		case COLOR_COLUMN_DASHED:     return "dashed";
+		case COLOR_COLUMN_DOTTED:     return "dotted";
+		case COLOR_COLUMN_HEAVY:      return "heavy";
+		default: return "unknown";
+	}
+}
+
+/*
+ * Cycle to the next color column style.
+ */
+static void editor_cycle_color_column_style(void)
+{
+	if (editor.color_column == 0) {
+		editor_set_status_message("Color column is off (F4 to enable)");
+		return;
+	}
+
+	switch (editor.color_column_style) {
+		case COLOR_COLUMN_BACKGROUND:
+			editor.color_column_style = COLOR_COLUMN_SOLID;
+			break;
+		case COLOR_COLUMN_SOLID:
+			editor.color_column_style = COLOR_COLUMN_DASHED;
+			break;
+		case COLOR_COLUMN_DASHED:
+			editor.color_column_style = COLOR_COLUMN_DOTTED;
+			break;
+		case COLOR_COLUMN_DOTTED:
+			editor.color_column_style = COLOR_COLUMN_HEAVY;
+			break;
+		case COLOR_COLUMN_HEAVY:
+			editor.color_column_style = COLOR_COLUMN_BACKGROUND;
+			break;
+	}
+
+	editor_set_status_message("Column %u style: %s",
+	                          editor.color_column,
+	                          color_column_style_name(editor.color_column_style));
 }
 
 /*
@@ -6179,13 +6260,27 @@ static void render_draw_rows(struct output_buffer *output)
 					for (uint32_t i = 0; i < editor.gutter_width + col_pos; i++) {
 						output_buffer_append_string(output, " ");
 					}
-					char col_escape[64];
-					snprintf(col_escape, sizeof(col_escape),
-					         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm",
-					         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
-					         THEME_COLOR_COLUMN.blue,
-					         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
-					         THEME_BACKGROUND.blue);
+					const char *col_char = color_column_char(editor.color_column_style);
+					char col_escape[96];
+					if (col_char != NULL) {
+						/* Draw line character */
+						snprintf(col_escape, sizeof(col_escape),
+						         "\x1b[38;2;%d;%d;%dm%s\x1b[48;2;%d;%d;%dm",
+						         THEME_COLOR_COLUMN_LINE.red,
+						         THEME_COLOR_COLUMN_LINE.green,
+						         THEME_COLOR_COLUMN_LINE.blue,
+						         col_char,
+						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
+						         THEME_BACKGROUND.blue);
+					} else {
+						/* Background tint only */
+						snprintf(col_escape, sizeof(col_escape),
+						         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm",
+						         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
+						         THEME_COLOR_COLUMN.blue,
+						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
+						         THEME_BACKGROUND.blue);
+					}
 					output_buffer_append_string(output, col_escape);
 				}
 			}
@@ -6287,15 +6382,30 @@ static void render_draw_rows(struct output_buffer *output)
 							output_buffer_append_string(output, " ");
 						}
 						/* Draw color column marker */
-						char col_escape[64];
-						snprintf(col_escape, sizeof(col_escape),
-						         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
-						         THEME_COLOR_COLUMN.red,
-						         THEME_COLOR_COLUMN.green,
-						         THEME_COLOR_COLUMN.blue,
-						         THEME_CURSOR_LINE.red,
-						         THEME_CURSOR_LINE.green,
-						         THEME_CURSOR_LINE.blue);
+						const char *col_char = color_column_char(editor.color_column_style);
+						char col_escape[96];
+						if (col_char != NULL) {
+							/* Draw line character */
+							snprintf(col_escape, sizeof(col_escape),
+							         "\x1b[38;2;%d;%d;%dm%s\x1b[48;2;%d;%d;%dm\x1b[K",
+							         THEME_COLOR_COLUMN_LINE.red,
+							         THEME_COLOR_COLUMN_LINE.green,
+							         THEME_COLOR_COLUMN_LINE.blue,
+							         col_char,
+							         THEME_CURSOR_LINE.red,
+							         THEME_CURSOR_LINE.green,
+							         THEME_CURSOR_LINE.blue);
+						} else {
+							/* Background tint only */
+							snprintf(col_escape, sizeof(col_escape),
+							         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
+							         THEME_COLOR_COLUMN.red,
+							         THEME_COLOR_COLUMN.green,
+							         THEME_COLOR_COLUMN.blue,
+							         THEME_CURSOR_LINE.red,
+							         THEME_CURSOR_LINE.green,
+							         THEME_CURSOR_LINE.blue);
+						}
 						output_buffer_append_string(output, col_escape);
 					} else {
 						/* Column not in visible area, just fill */
@@ -6347,13 +6457,27 @@ static void render_draw_rows(struct output_buffer *output)
 					for (uint32_t i = 0; i < spaces_before; i++) {
 						output_buffer_append_string(output, " ");
 					}
-					char col_escape[64];
-					snprintf(col_escape, sizeof(col_escape),
-					         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
-					         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
-					         THEME_COLOR_COLUMN.blue,
-					         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
-					         THEME_BACKGROUND.blue);
+					const char *col_char = color_column_char(editor.color_column_style);
+					char col_escape[96];
+					if (col_char != NULL) {
+						/* Draw line character */
+						snprintf(col_escape, sizeof(col_escape),
+						         "\x1b[38;2;%d;%d;%dm%s\x1b[48;2;%d;%d;%dm\x1b[K",
+						         THEME_COLOR_COLUMN_LINE.red,
+						         THEME_COLOR_COLUMN_LINE.green,
+						         THEME_COLOR_COLUMN_LINE.blue,
+						         col_char,
+						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
+						         THEME_BACKGROUND.blue);
+					} else {
+						/* Background tint only */
+						snprintf(col_escape, sizeof(col_escape),
+						         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
+						         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
+						         THEME_COLOR_COLUMN.blue,
+						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
+						         THEME_BACKGROUND.blue);
+					}
 					output_buffer_append_string(output, col_escape);
 				}
 			}
@@ -7550,10 +7674,16 @@ static void editor_process_keypress(void)
 				editor.color_column = 0;
 			}
 			if (editor.color_column > 0) {
-				editor_set_status_message("Color column at %u", editor.color_column);
+				editor_set_status_message("Column %u (%s) - Shift+F4 to change style",
+				                          editor.color_column,
+				                          color_column_style_name(editor.color_column_style));
 			} else {
 				editor_set_status_message("Color column off");
 			}
+			break;
+
+		case KEY_SHIFT_F4:
+			editor_cycle_color_column_style();
 			break;
 
 		case KEY_ALT_Z:

@@ -779,12 +779,23 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+## Phase 17 Review: ✅ Complete
+
+**Version:** 0.17.0 | **Lines:** 7,715 (+219 from Phase 16)
+
+### Implemented Features
+- F3: Toggle whitespace visibility (tabs as `→`, spaces as `·`)
+- F4: Cycle color column (off → 80 → 120 → off)
+- Trailing whitespace highlight (always on, red-ish background)
+
+---
+
 ## Current State
 
-- **Branch**: `main`
-- **Version**: 0.16.0 (find & replace)
+- **Branch**: `visual-enhancements` (pending merge after testing)
+- **Version**: 0.17.0 (visual enhancements)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
-- **Source**: `src/edit.c` (~7500 lines)
+- **Source**: `src/edit.c` (~7,715 lines)
 
 ---
 
@@ -811,7 +822,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - `main` - stable, contains all phases through Phase 16
 - All feature branches merged to main
 
-### Key Bindings (New in Phase 11-16)
+### Key Bindings (New in Phase 11-17)
 - Ctrl+F - enter search mode
 - Ctrl+R - enter replace mode
 - Alt+N - find next match
@@ -831,6 +842,8 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - Shift+Tab - outdent lines
 - Enter - auto-indent (new line inherits leading whitespace)
 - Ctrl+/ or Alt+/ - toggle line comment
+- F3 - toggle whitespace visibility
+- F4 - cycle color column (off → 80 → 120)
 
 ### Build Commands
 ```bash
