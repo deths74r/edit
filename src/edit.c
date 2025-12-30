@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 22: Save As
+ * Phase 23A: Theme Infrastructure
  *****************************************************************************/
 
 /*****************************************************************************
@@ -36,7 +36,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.22.0"
+#define EDIT_VERSION "0.23.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -74,6 +74,10 @@
 
 /* Maximum number of simultaneous cursors for multi-cursor editing. */
 #define MAX_CURSORS 100
+
+/* Theme directory and config file locations (relative to HOME) */
+#define THEME_DIR "/.edit/themes/"
+#define CONFIG_FILE "/.editrc"
 
 /*****************************************************************************
  * Data Structures
@@ -360,58 +364,51 @@ struct syntax_color {
 	uint8_t blue;
 };
 
-/* Tritanopia-friendly dark theme with WCAG AA compliance.
- *
- * Design principles:
- * - Luminance is the primary differentiator (works for all color vision)
- * - Red-cyan color axis (visible to Tritanopia)
- * - Avoids blue-yellow distinctions (not visible to Tritanopia)
- * - All colors have >= 4.5:1 contrast with background
+/*
+ * Complete theme definition with all UI and syntax colors.
+ * Colors are stored as syntax_color structs (RGB).
  */
-static const struct syntax_color THEME_COLORS[] = {
-	[SYNTAX_NORMAL]       = {0xE0, 0xE0, 0xE0},  /* Light gray - neutral, high contrast */
-	[SYNTAX_KEYWORD]      = {0xFF, 0x79, 0xC6},  /* Bright magenta - control flow stands out */
-	[SYNTAX_TYPE]         = {0x8B, 0xE9, 0xFD},  /* Bright cyan - distinct from magenta */
-	[SYNTAX_STRING]       = {0xFF, 0x95, 0x80},  /* Coral/salmon - warm, readable */
-	[SYNTAX_NUMBER]       = {0xFF, 0xB0, 0x90},  /* Light coral/peach - related to string */
-	[SYNTAX_COMMENT]      = {0x90, 0x90, 0x90},  /* Medium gray - subdued but WCAG compliant */
-	[SYNTAX_PREPROCESSOR] = {0xFF, 0xB3, 0xD9},  /* Light pink/rose - preprocessor visible */
-	[SYNTAX_FUNCTION]     = {0xA0, 0xF0, 0xF0},  /* Light cyan/aqua - functions stand out */
-	[SYNTAX_OPERATOR]     = {0xFF, 0xFF, 0xFF},  /* White - maximum visibility for operators */
-	[SYNTAX_BRACKET]      = {0xD0, 0xD0, 0xD0},  /* Light gray - same family as normal */
-	[SYNTAX_ESCAPE]       = {0xFF, 0x80, 0x80},  /* Light red - escapes pop in strings */
+struct theme {
+	char *name;                           /* Theme name (from file or built-in) */
+
+	/* Core UI colors */
+	struct syntax_color background;       /* Main editor background */
+	struct syntax_color foreground;       /* Default text foreground */
+
+	/* Line numbers */
+	struct syntax_color line_number;      /* Inactive line numbers */
+	struct syntax_color line_number_active; /* Active line number */
+
+	/* Status and message bars */
+	struct syntax_color status_bg;        /* Status bar background */
+	struct syntax_color status_fg;        /* Status bar foreground */
+	struct syntax_color message;          /* Message bar text */
+
+	/* Selection and search */
+	struct syntax_color selection;        /* Selected text background */
+	struct syntax_color search_match;     /* Search match background */
+	struct syntax_color search_current;   /* Current search match background */
+
+	/* Cursor line */
+	struct syntax_color cursor_line;      /* Cursor line background */
+
+	/* Whitespace and guides */
+	struct syntax_color whitespace;       /* Visible whitespace characters */
+	struct syntax_color trailing_ws;      /* Trailing whitespace warning */
+	struct syntax_color color_column;     /* Color column background */
+	struct syntax_color color_column_line; /* Color column line character */
+
+	/* Syntax highlighting colors (indexed by enum syntax_token) */
+	struct syntax_color syntax[SYNTAX_TOKEN_COUNT];
 };
 
-/* Background: Near-black for maximum contrast with all foreground colors. */
-static const struct syntax_color THEME_BACKGROUND = {0x12, 0x12, 0x12};
+/* Array of loaded themes */
+static struct theme *loaded_themes = NULL;
+static int theme_count = 0;
+static int current_theme_index = 0;
 
-/* Selection: Dark teal - cool tone, distinct from search highlights. */
-static const struct syntax_color THEME_SELECTION = {0x2D, 0x4F, 0x4F};
-
-/* Search match highlights use luminance difference for Tritanopia visibility.
- * Current match is warmer and lighter than other matches. */
-static const struct syntax_color THEME_SEARCH_MATCH = {0x3D, 0x3D, 0x5D};   /* Dark purple-gray */
-static const struct syntax_color THEME_SEARCH_CURRENT = {0x5D, 0x4D, 0x3D}; /* Warm tan - brighter */
-
-/* Line numbers: Gray scale for minimal distraction, still readable. */
-static const struct syntax_color THEME_LINE_NUMBER = {0x60, 0x60, 0x60};
-static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0xA0, 0xA0, 0xA0};
-
-/* Cursor line: Highlight for the line containing the cursor.
- * Noticeably lighter than background (#121212) for clear visibility. */
-static const struct syntax_color THEME_CURSOR_LINE = {0x28, 0x28, 0x28};
-
-/* Whitespace indicators: Subtle but visible when show_whitespace is on. */
-static const struct syntax_color THEME_WHITESPACE = {0x50, 0x50, 0x50};
-
-/* Trailing whitespace: Warning background for unwanted trailing spaces. */
-static const struct syntax_color THEME_TRAILING_WHITESPACE = {0x50, 0x30, 0x30};
-
-/* Color column: Subtle vertical line at specified column. */
-static const struct syntax_color THEME_COLOR_COLUMN = {0x2A, 0x2A, 0x2A};
-
-/* Color column line character: More visible than background tint. */
-static const struct syntax_color THEME_COLOR_COLUMN_LINE = {0x45, 0x45, 0x45};
+/* Active theme - this is what rendering uses */
+static struct theme active_theme;
 
 /*****************************************************************************
  * WCAG Color Contrast Utilities
@@ -540,6 +537,549 @@ static struct syntax_color color_ensure_contrast(struct syntax_color fg,
 	}
 
 	return adjusted;
+}
+
+/*****************************************************************************
+ * Theme System
+ *****************************************************************************/
+
+/*
+ * Initialize a theme struct with the default dark theme.
+ * This is the built-in fallback when no theme files exist.
+ */
+static struct theme theme_create_default(void)
+{
+	struct theme t = {0};
+	t.name = strdup("Default");
+
+	/* Core UI */
+	t.background = (struct syntax_color){0x12, 0x12, 0x12};
+	t.foreground = (struct syntax_color){0xE0, 0xE0, 0xE0};
+
+	/* Line numbers */
+	t.line_number = (struct syntax_color){0x60, 0x60, 0x60};
+	t.line_number_active = (struct syntax_color){0xA0, 0xA0, 0xA0};
+
+	/* Status bar */
+	t.status_bg = (struct syntax_color){0x30, 0x30, 0x30};
+	t.status_fg = (struct syntax_color){0xE0, 0xE0, 0xE0};
+	t.message = (struct syntax_color){0xA0, 0xA0, 0xA0};
+
+	/* Selection and search */
+	t.selection = (struct syntax_color){0x2D, 0x4F, 0x4F};
+	t.search_match = (struct syntax_color){0x3D, 0x3D, 0x5D};
+	t.search_current = (struct syntax_color){0x5D, 0x4D, 0x3D};
+
+	/* Cursor line */
+	t.cursor_line = (struct syntax_color){0x28, 0x28, 0x28};
+
+	/* Whitespace and guides */
+	t.whitespace = (struct syntax_color){0x50, 0x50, 0x50};
+	t.trailing_ws = (struct syntax_color){0x50, 0x30, 0x30};
+	t.color_column = (struct syntax_color){0x2A, 0x2A, 0x2A};
+	t.color_column_line = (struct syntax_color){0x45, 0x45, 0x45};
+
+	/* Syntax colors - Tritanopia-friendly palette */
+	t.syntax[SYNTAX_NORMAL]       = (struct syntax_color){0xE0, 0xE0, 0xE0};
+	t.syntax[SYNTAX_KEYWORD]      = (struct syntax_color){0xFF, 0x79, 0xC6};
+	t.syntax[SYNTAX_TYPE]         = (struct syntax_color){0x8B, 0xE9, 0xFD};
+	t.syntax[SYNTAX_STRING]       = (struct syntax_color){0xFF, 0x95, 0x80};
+	t.syntax[SYNTAX_NUMBER]       = (struct syntax_color){0xFF, 0xB0, 0x90};
+	t.syntax[SYNTAX_COMMENT]      = (struct syntax_color){0x90, 0x90, 0x90};
+	t.syntax[SYNTAX_PREPROCESSOR] = (struct syntax_color){0xFF, 0xB3, 0xD9};
+	t.syntax[SYNTAX_FUNCTION]     = (struct syntax_color){0xA0, 0xF0, 0xF0};
+	t.syntax[SYNTAX_OPERATOR]     = (struct syntax_color){0xFF, 0xFF, 0xFF};
+	t.syntax[SYNTAX_BRACKET]      = (struct syntax_color){0xD0, 0xD0, 0xD0};
+	t.syntax[SYNTAX_ESCAPE]       = (struct syntax_color){0xFF, 0x80, 0x80};
+
+	return t;
+}
+
+/*
+ * Free a theme's allocated memory.
+ */
+static void theme_free(struct theme *t)
+{
+	if (t) {
+		free(t->name);
+		t->name = NULL;
+	}
+}
+
+/*
+ * Parse a hex color string (e.g., "FF79C6" or "#ff79c6") into RGB.
+ * Returns true on success, false on invalid input.
+ */
+static bool color_parse_hex(const char *hex, struct syntax_color *out)
+{
+	if (hex == NULL || out == NULL) {
+		return false;
+	}
+
+	/* Skip optional # prefix */
+	if (hex[0] == '#') {
+		hex++;
+	}
+
+	/* Must be exactly 6 hex digits */
+	if (strlen(hex) != 6) {
+		return false;
+	}
+
+	/* Validate all characters are hex */
+	for (int i = 0; i < 6; i++) {
+		if (!isxdigit((unsigned char)hex[i])) {
+			return false;
+		}
+	}
+
+	/* Parse RGB components */
+	unsigned int r, g, b;
+	if (sscanf(hex, "%2x%2x%2x", &r, &g, &b) != 3) {
+		return false;
+	}
+
+	out->red = (uint8_t)r;
+	out->green = (uint8_t)g;
+	out->blue = (uint8_t)b;
+
+	return true;
+}
+
+/*
+ * Parse a theme file in INI format.
+ * Format: key=value (one per line), # for comments, blank lines ignored.
+ * Returns a newly allocated theme struct, or NULL on error.
+ */
+static struct theme *theme_parse_file(const char *filepath)
+{
+	FILE *file = fopen(filepath, "r");
+	if (file == NULL) {
+		return NULL;
+	}
+
+	struct theme *t = calloc(1, sizeof(struct theme));
+	if (t == NULL) {
+		fclose(file);
+		return NULL;
+	}
+
+	/* Start with defaults so missing properties are sensible */
+	*t = theme_create_default();
+	free(t->name);  /* Will be replaced */
+	t->name = NULL;
+
+	char line[256];
+	while (fgets(line, sizeof(line), file)) {
+		/* Skip comments and empty lines */
+		if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') {
+			continue;
+		}
+
+		/* Find = separator */
+		char *eq = strchr(line, '=');
+		if (eq == NULL) {
+			continue;
+		}
+
+		/* Split into key and value */
+		*eq = '\0';
+		char *key = line;
+		char *value = eq + 1;
+
+		/* Trim trailing whitespace from key */
+		char *key_end = key + strlen(key) - 1;
+		while (key_end > key && isspace((unsigned char)*key_end)) {
+			*key_end-- = '\0';
+		}
+
+		/* Trim leading whitespace from value */
+		while (isspace((unsigned char)*value)) {
+			value++;
+		}
+
+		/* Trim trailing whitespace/newline from value */
+		size_t value_len = strlen(value);
+		while (value_len > 0 && (value[value_len - 1] == '\n' ||
+		       value[value_len - 1] == '\r' ||
+		       isspace((unsigned char)value[value_len - 1]))) {
+			value[--value_len] = '\0';
+		}
+
+		/* Parse the key-value pair */
+		struct syntax_color color;
+
+		if (strcmp(key, "name") == 0) {
+			free(t->name);
+			t->name = strdup(value);
+		}
+		/* Core UI */
+		else if (strcmp(key, "background") == 0 && color_parse_hex(value, &color)) {
+			t->background = color;
+		}
+		else if (strcmp(key, "foreground") == 0 && color_parse_hex(value, &color)) {
+			t->foreground = color;
+		}
+		/* Line numbers */
+		else if (strcmp(key, "line_number") == 0 && color_parse_hex(value, &color)) {
+			t->line_number = color;
+		}
+		else if (strcmp(key, "line_number_active") == 0 && color_parse_hex(value, &color)) {
+			t->line_number_active = color;
+		}
+		/* Status bar */
+		else if (strcmp(key, "status_bg") == 0 && color_parse_hex(value, &color)) {
+			t->status_bg = color;
+		}
+		else if (strcmp(key, "status_fg") == 0 && color_parse_hex(value, &color)) {
+			t->status_fg = color;
+		}
+		else if (strcmp(key, "message") == 0 && color_parse_hex(value, &color)) {
+			t->message = color;
+		}
+		/* Selection and search */
+		else if (strcmp(key, "selection") == 0 && color_parse_hex(value, &color)) {
+			t->selection = color;
+		}
+		else if (strcmp(key, "search_match") == 0 && color_parse_hex(value, &color)) {
+			t->search_match = color;
+		}
+		else if (strcmp(key, "search_current") == 0 && color_parse_hex(value, &color)) {
+			t->search_current = color;
+		}
+		/* Cursor line */
+		else if (strcmp(key, "cursor_line") == 0 && color_parse_hex(value, &color)) {
+			t->cursor_line = color;
+		}
+		/* Whitespace and guides */
+		else if (strcmp(key, "whitespace") == 0 && color_parse_hex(value, &color)) {
+			t->whitespace = color;
+		}
+		else if (strcmp(key, "trailing_ws") == 0 && color_parse_hex(value, &color)) {
+			t->trailing_ws = color;
+		}
+		else if (strcmp(key, "color_column") == 0 && color_parse_hex(value, &color)) {
+			t->color_column = color;
+		}
+		else if (strcmp(key, "color_column_line") == 0 && color_parse_hex(value, &color)) {
+			t->color_column_line = color;
+		}
+		/* Syntax colors */
+		else if (strcmp(key, "syntax_normal") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_NORMAL] = color;
+		}
+		else if (strcmp(key, "syntax_keyword") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_KEYWORD] = color;
+		}
+		else if (strcmp(key, "syntax_type") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_TYPE] = color;
+		}
+		else if (strcmp(key, "syntax_string") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_STRING] = color;
+		}
+		else if (strcmp(key, "syntax_number") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_NUMBER] = color;
+		}
+		else if (strcmp(key, "syntax_comment") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_COMMENT] = color;
+		}
+		else if (strcmp(key, "syntax_preprocessor") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_PREPROCESSOR] = color;
+		}
+		else if (strcmp(key, "syntax_function") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_FUNCTION] = color;
+		}
+		else if (strcmp(key, "syntax_operator") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_OPERATOR] = color;
+		}
+		else if (strcmp(key, "syntax_bracket") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_BRACKET] = color;
+		}
+		else if (strcmp(key, "syntax_escape") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_ESCAPE] = color;
+		}
+	}
+
+	fclose(file);
+
+	/* If no name was specified, extract from filename */
+	if (t->name == NULL) {
+		const char *slash = strrchr(filepath, '/');
+		const char *basename = slash ? slash + 1 : filepath;
+		char *dot = strrchr(basename, '.');
+		if (dot) {
+			t->name = strndup(basename, dot - basename);
+		} else {
+			t->name = strdup(basename);
+		}
+	}
+
+	return t;
+}
+
+/*
+ * Load all themes from ~/.edit/themes/ directory.
+ * Always includes the built-in default theme first.
+ */
+static void themes_load(void)
+{
+	/* Free any previously loaded themes */
+	if (loaded_themes != NULL) {
+		for (int i = 0; i < theme_count; i++) {
+			theme_free(&loaded_themes[i]);
+		}
+		free(loaded_themes);
+		loaded_themes = NULL;
+		theme_count = 0;
+	}
+
+	/* Start with built-in default */
+	theme_count = 1;
+	loaded_themes = malloc(sizeof(struct theme));
+	if (loaded_themes == NULL) {
+		return;
+	}
+	loaded_themes[0] = theme_create_default();
+
+	/* Get home directory */
+	const char *home = getenv("HOME");
+	if (home == NULL) {
+		return;
+	}
+
+	/* Build theme directory path */
+	char theme_dir[PATH_MAX];
+	snprintf(theme_dir, sizeof(theme_dir), "%s%s", home, THEME_DIR);
+
+	/* Open theme directory */
+	DIR *dir = opendir(theme_dir);
+	if (dir == NULL) {
+		return;  /* No theme directory - use default only */
+	}
+
+	/* Scan for .edit files */
+	struct dirent *entry;
+	while ((entry = readdir(dir)) != NULL) {
+		/* Check for .edit extension */
+		size_t name_len = strlen(entry->d_name);
+		if (name_len < 6) {
+			continue;  /* Too short for "x.edit" */
+		}
+
+		const char *ext = entry->d_name + name_len - 5;
+		if (strcmp(ext, ".edit") != 0) {
+			continue;
+		}
+
+		/* Build full path */
+		char filepath[PATH_MAX];
+		snprintf(filepath, sizeof(filepath), "%s%s", theme_dir, entry->d_name);
+
+		/* Parse the theme file */
+		struct theme *parsed = theme_parse_file(filepath);
+		if (parsed == NULL) {
+			continue;
+		}
+
+		/* Add to loaded themes array */
+		struct theme *new_array = realloc(loaded_themes,
+		                                  (theme_count + 1) * sizeof(struct theme));
+		if (new_array == NULL) {
+			theme_free(parsed);
+			free(parsed);
+			continue;
+		}
+
+		loaded_themes = new_array;
+		loaded_themes[theme_count] = *parsed;
+		free(parsed);  /* Struct was copied, free wrapper only */
+		theme_count++;
+	}
+
+	closedir(dir);
+}
+
+/*
+ * Free all loaded themes.
+ */
+static void themes_free(void)
+{
+	if (loaded_themes != NULL) {
+		for (int i = 0; i < theme_count; i++) {
+			theme_free(&loaded_themes[i]);
+		}
+		free(loaded_themes);
+		loaded_themes = NULL;
+		theme_count = 0;
+	}
+}
+
+/*
+ * Find theme index by name.
+ * Returns -1 if not found.
+ */
+static int theme_find_by_name(const char *name)
+{
+	if (name == NULL) {
+		return -1;
+	}
+
+	for (int i = 0; i < theme_count; i++) {
+		if (loaded_themes[i].name != NULL &&
+		    strcmp(loaded_themes[i].name, name) == 0) {
+			return i;
+		}
+	}
+
+	return -1;
+}
+
+/*
+ * Apply a theme, making it the active theme.
+ * Pre-computes WCAG-adjusted foreground colors for readability.
+ */
+static void theme_apply(struct theme *t)
+{
+	if (t == NULL) {
+		return;
+	}
+
+	/* Free previous active theme name */
+	free(active_theme.name);
+
+	/* Copy base theme */
+	active_theme = *t;
+	active_theme.name = t->name ? strdup(t->name) : NULL;
+
+	/* Apply WCAG contrast adjustments for foreground colors against backgrounds */
+
+	/* Main foreground against background */
+	active_theme.foreground = color_ensure_contrast(t->foreground, active_theme.background);
+
+	/* Line numbers against background */
+	active_theme.line_number = color_ensure_contrast(t->line_number, active_theme.background);
+	active_theme.line_number_active = color_ensure_contrast(t->line_number_active, active_theme.background);
+
+	/* Status bar text against status background */
+	active_theme.status_fg = color_ensure_contrast(t->status_fg, active_theme.status_bg);
+	active_theme.message = color_ensure_contrast(t->message, active_theme.background);
+
+	/* Whitespace indicator against background */
+	active_theme.whitespace = color_ensure_contrast(t->whitespace, active_theme.background);
+
+	/* Color column line against background */
+	active_theme.color_column_line = color_ensure_contrast(t->color_column_line, active_theme.background);
+
+	/* Syntax colors against main background */
+	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {
+		active_theme.syntax[i] = color_ensure_contrast(t->syntax[i], active_theme.background);
+	}
+}
+
+/*
+ * Apply theme by index.
+ */
+static void theme_apply_by_index(int index)
+{
+	if (index < 0 || index >= theme_count) {
+		return;
+	}
+
+	current_theme_index = index;
+	theme_apply(&loaded_themes[index]);
+}
+
+/*
+ * Get the path to the config file (~/.editrc).
+ * Returns a newly allocated string, caller must free.
+ * Returns NULL if HOME is not set.
+ */
+static char *config_get_path(void)
+{
+	const char *home = getenv("HOME");
+	if (home == NULL) {
+		return NULL;
+	}
+
+	size_t len = strlen(home) + strlen(CONFIG_FILE) + 1;
+	char *path = malloc(len);
+	if (path) {
+		snprintf(path, len, "%s%s", home, CONFIG_FILE);
+	}
+	return path;
+}
+
+/*
+ * Load configuration from ~/.editrc.
+ * Currently supports:
+ *   theme=<theme_name>
+ */
+static void config_load(void)
+{
+	char *path = config_get_path();
+	if (path == NULL) {
+		return;
+	}
+
+	FILE *file = fopen(path, "r");
+	free(path);
+
+	if (file == NULL) {
+		return;  /* No config file - use defaults */
+	}
+
+	char line[256];
+	while (fgets(line, sizeof(line), file)) {
+		/* Skip comments and empty lines */
+		if (line[0] == '#' || line[0] == '\n' || line[0] == '\r') {
+			continue;
+		}
+
+		/* Parse theme=<name> */
+		if (strncmp(line, "theme=", 6) == 0) {
+			char *name = line + 6;
+
+			/* Trim trailing whitespace/newline */
+			size_t len = strlen(name);
+			while (len > 0 && (name[len - 1] == '\n' ||
+			       name[len - 1] == '\r' ||
+			       isspace((unsigned char)name[len - 1]))) {
+				name[--len] = '\0';
+			}
+
+			int index = theme_find_by_name(name);
+			if (index >= 0) {
+				current_theme_index = index;
+			}
+		}
+	}
+
+	fclose(file);
+}
+
+/*
+ * Save configuration to ~/.editrc.
+ */
+static void config_save(void)
+{
+	char *path = config_get_path();
+	if (path == NULL) {
+		return;
+	}
+
+	FILE *file = fopen(path, "w");
+	free(path);
+
+	if (file == NULL) {
+		return;
+	}
+
+	fprintf(file, "# edit configuration\n");
+	if (active_theme.name != NULL) {
+		fprintf(file, "theme=%s\n", active_theme.name);
+	}
+
+	fclose(file);
 }
 
 /*****************************************************************************
@@ -2621,6 +3161,11 @@ static void editor_init(void)
 	editor.color_column_style = COLOR_COLUMN_SOLID;
 	editor.cursor_count = 0;
 	editor.primary_cursor = 0;
+
+	/* Initialize theme system */
+	themes_load();
+	config_load();
+	theme_apply_by_index(current_theme_index);
 }
 
 /* Start a new selection at the current cursor position. The anchor is set
@@ -6936,7 +7481,7 @@ static int search_match_type(uint32_t row, uint32_t column)
  */
 static void render_set_syntax_color(struct output_buffer *output, enum syntax_token type)
 {
-	struct syntax_color color = THEME_COLORS[type];
+	struct syntax_color color = active_theme.syntax[type];
 	char escape[32];
 	int len = snprintf(escape, sizeof(escape), "\x1b[38;2;%d;%d;%dm",
 	                   color.red, color.green, color.blue);
@@ -7045,24 +7590,24 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		/* Change colors if syntax or highlight changed */
 		if (syntax != current_syntax || highlight != current_highlight) {
 			char escape[64];
-			struct syntax_color fg = THEME_COLORS[syntax];
+			struct syntax_color fg = active_theme.syntax[syntax];
 			struct syntax_color bg;
 
 			switch (highlight) {
 				case 4:  /* Trailing whitespace - warning red */
-					bg = THEME_TRAILING_WHITESPACE;
+					bg = active_theme.trailing_ws;
 					break;
 				case 3:  /* Current search match - gold */
-					bg = THEME_SEARCH_CURRENT;
+					bg = active_theme.search_current;
 					break;
 				case 2:  /* Other search match - blue */
-					bg = THEME_SEARCH_MATCH;
+					bg = active_theme.search_match;
 					break;
 				case 1:  /* Selection */
-					bg = THEME_SELECTION;
+					bg = active_theme.selection;
 					break;
 				default: /* Normal or cursor line */
-					bg = is_cursor_line ? THEME_CURSOR_LINE : THEME_BACKGROUND;
+					bg = is_cursor_line ? active_theme.cursor_line : active_theme.background;
 					break;
 			}
 
@@ -7087,8 +7632,8 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				char ws_escape[48];
 				snprintf(ws_escape, sizeof(ws_escape),
 				         "\x1b[38;2;%d;%d;%dm",
-				         THEME_WHITESPACE.red, THEME_WHITESPACE.green,
-				         THEME_WHITESPACE.blue);
+				         active_theme.whitespace.red, active_theme.whitespace.green,
+				         active_theme.whitespace.blue);
 				output_buffer_append_string(output, ws_escape);
 				output_buffer_append_string(output, "→");
 				rendered_width++;
@@ -7110,8 +7655,8 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			char ws_escape[48];
 			snprintf(ws_escape, sizeof(ws_escape),
 			         "\x1b[38;2;%d;%d;%dm",
-			         THEME_WHITESPACE.red, THEME_WHITESPACE.green,
-			         THEME_WHITESPACE.blue);
+			         active_theme.whitespace.red, active_theme.whitespace.green,
+			         active_theme.whitespace.blue);
 			output_buffer_append_string(output, ws_escape);
 			output_buffer_append_string(output, "·");
 			render_set_syntax_color(output, current_syntax);
@@ -7143,7 +7688,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	}
 
 	/* Reset background - use cursor line color if on cursor line */
-	struct syntax_color reset_bg = is_cursor_line ? THEME_CURSOR_LINE : THEME_BACKGROUND;
+	struct syntax_color reset_bg = is_cursor_line ? active_theme.cursor_line : active_theme.background;
 	char reset[32];
 	snprintf(reset, sizeof(reset), "\x1b[48;2;%d;%d;%dm",
 	         reset_bg.red, reset_bg.green, reset_bg.blue);
@@ -7217,20 +7762,20 @@ static void render_draw_rows(struct output_buffer *output)
 						/* Draw line character */
 						snprintf(col_escape, sizeof(col_escape),
 						         "\x1b[38;2;%d;%d;%dm%s\x1b[48;2;%d;%d;%dm",
-						         THEME_COLOR_COLUMN_LINE.red,
-						         THEME_COLOR_COLUMN_LINE.green,
-						         THEME_COLOR_COLUMN_LINE.blue,
+						         active_theme.color_column_line.red,
+						         active_theme.color_column_line.green,
+						         active_theme.color_column_line.blue,
 						         col_char,
-						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
-						         THEME_BACKGROUND.blue);
+						         active_theme.background.red, active_theme.background.green,
+						         active_theme.background.blue);
 					} else {
 						/* Background tint only */
 						snprintf(col_escape, sizeof(col_escape),
 						         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm",
-						         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
-						         THEME_COLOR_COLUMN.blue,
-						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
-						         THEME_BACKGROUND.blue);
+						         active_theme.color_column.red, active_theme.color_column.green,
+						         active_theme.color_column.blue,
+						         active_theme.background.red, active_theme.background.green,
+						         active_theme.background.blue);
 					}
 					output_buffer_append_string(output, col_escape);
 				}
@@ -7249,9 +7794,9 @@ static void render_draw_rows(struct output_buffer *output)
 			/* Draw gutter: line number for segment 0, indicator for continuations */
 			if (editor.show_line_numbers && editor.gutter_width > 0) {
 				struct syntax_color ln_color = is_cursor_line_segment
-					? THEME_LINE_NUMBER_ACTIVE : THEME_LINE_NUMBER;
+					? active_theme.line_number_active : active_theme.line_number;
 				struct syntax_color ln_bg = is_cursor_line_segment
-					? THEME_CURSOR_LINE : THEME_BACKGROUND;
+					? active_theme.cursor_line : active_theme.background;
 
 				char color_escape[48];
 				snprintf(color_escape, sizeof(color_escape),
@@ -7324,9 +7869,9 @@ static void render_draw_rows(struct output_buffer *output)
 						char cursor_bg[48];
 						snprintf(cursor_bg, sizeof(cursor_bg),
 						         "\x1b[48;2;%d;%d;%dm",
-						         THEME_CURSOR_LINE.red,
-						         THEME_CURSOR_LINE.green,
-						         THEME_CURSOR_LINE.blue);
+						         active_theme.cursor_line.red,
+						         active_theme.cursor_line.green,
+						         active_theme.cursor_line.blue);
 						output_buffer_append_string(output, cursor_bg);
 						uint32_t spaces_before = col_pos - line_visual_width;
 						for (uint32_t i = 0; i < spaces_before; i++) {
@@ -7339,23 +7884,23 @@ static void render_draw_rows(struct output_buffer *output)
 							/* Draw line character */
 							snprintf(col_escape, sizeof(col_escape),
 							         "\x1b[38;2;%d;%d;%dm%s\x1b[48;2;%d;%d;%dm\x1b[K",
-							         THEME_COLOR_COLUMN_LINE.red,
-							         THEME_COLOR_COLUMN_LINE.green,
-							         THEME_COLOR_COLUMN_LINE.blue,
+							         active_theme.color_column_line.red,
+							         active_theme.color_column_line.green,
+							         active_theme.color_column_line.blue,
 							         col_char,
-							         THEME_CURSOR_LINE.red,
-							         THEME_CURSOR_LINE.green,
-							         THEME_CURSOR_LINE.blue);
+							         active_theme.cursor_line.red,
+							         active_theme.cursor_line.green,
+							         active_theme.cursor_line.blue);
 						} else {
 							/* Background tint only */
 							snprintf(col_escape, sizeof(col_escape),
 							         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
-							         THEME_COLOR_COLUMN.red,
-							         THEME_COLOR_COLUMN.green,
-							         THEME_COLOR_COLUMN.blue,
-							         THEME_CURSOR_LINE.red,
-							         THEME_CURSOR_LINE.green,
-							         THEME_CURSOR_LINE.blue);
+							         active_theme.color_column.red,
+							         active_theme.color_column.green,
+							         active_theme.color_column.blue,
+							         active_theme.cursor_line.red,
+							         active_theme.cursor_line.green,
+							         active_theme.cursor_line.blue);
 						}
 						output_buffer_append_string(output, col_escape);
 					} else {
@@ -7363,26 +7908,26 @@ static void render_draw_rows(struct output_buffer *output)
 						char fill_escape[64];
 						snprintf(fill_escape, sizeof(fill_escape),
 						         "\x1b[48;2;%d;%d;%dm\x1b[K",
-						         THEME_CURSOR_LINE.red,
-						         THEME_CURSOR_LINE.green,
-						         THEME_CURSOR_LINE.blue);
+						         active_theme.cursor_line.red,
+						         active_theme.cursor_line.green,
+						         active_theme.cursor_line.blue);
 						output_buffer_append_string(output, fill_escape);
 					}
 				} else {
 					char fill_escape[64];
 					snprintf(fill_escape, sizeof(fill_escape),
 					         "\x1b[48;2;%d;%d;%dm\x1b[K",
-					         THEME_CURSOR_LINE.red,
-					         THEME_CURSOR_LINE.green,
-					         THEME_CURSOR_LINE.blue);
+					         active_theme.cursor_line.red,
+					         active_theme.cursor_line.green,
+					         active_theme.cursor_line.blue);
 					output_buffer_append_string(output, fill_escape);
 				}
 				/* Reset to normal background */
 				char reset_bg[48];
 				snprintf(reset_bg, sizeof(reset_bg),
 				         "\x1b[48;2;%d;%d;%dm",
-				         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
-				         THEME_BACKGROUND.blue);
+				         active_theme.background.red, active_theme.background.green,
+				         active_theme.background.blue);
 				output_buffer_append_string(output, reset_bg);
 			} else if (editor.color_column > 0) {
 				/*
@@ -7414,20 +7959,20 @@ static void render_draw_rows(struct output_buffer *output)
 						/* Draw line character */
 						snprintf(col_escape, sizeof(col_escape),
 						         "\x1b[38;2;%d;%d;%dm%s\x1b[48;2;%d;%d;%dm\x1b[K",
-						         THEME_COLOR_COLUMN_LINE.red,
-						         THEME_COLOR_COLUMN_LINE.green,
-						         THEME_COLOR_COLUMN_LINE.blue,
+						         active_theme.color_column_line.red,
+						         active_theme.color_column_line.green,
+						         active_theme.color_column_line.blue,
 						         col_char,
-						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
-						         THEME_BACKGROUND.blue);
+						         active_theme.background.red, active_theme.background.green,
+						         active_theme.background.blue);
 					} else {
 						/* Background tint only */
 						snprintf(col_escape, sizeof(col_escape),
 						         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
-						         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
-						         THEME_COLOR_COLUMN.blue,
-						         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
-						         THEME_BACKGROUND.blue);
+						         active_theme.color_column.red, active_theme.color_column.green,
+						         active_theme.color_column.blue,
+						         active_theme.background.red, active_theme.background.green,
+						         active_theme.background.blue);
 					}
 					output_buffer_append_string(output, col_escape);
 				}
@@ -7625,7 +8170,7 @@ static void render_refresh_screen(void)
 	/* Set background color for the entire screen */
 	char bg_escape[32];
 	snprintf(bg_escape, sizeof(bg_escape), "\x1b[48;2;%d;%d;%dm",
-	         THEME_BACKGROUND.red, THEME_BACKGROUND.green, THEME_BACKGROUND.blue);
+	         active_theme.background.red, active_theme.background.green, active_theme.background.blue);
 	output_buffer_append_string(&output, bg_escape);
 
 	render_draw_rows(&output);
@@ -9079,6 +9624,8 @@ static void editor_process_keypress(void)
 			terminal_clear_screen();
 			free(internal_clipboard);
 			buffer_free(&editor.buffer);
+			themes_free();
+			free(active_theme.name);
 			exit(0);
 			break;
 
