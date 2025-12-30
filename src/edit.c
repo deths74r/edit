@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 17: Visual Enhancements
+ * Phase 21: Search Enhancements & Regex
  *****************************************************************************/
 
 /*****************************************************************************
@@ -28,12 +28,13 @@
 #include <math.h>
 #include <time.h>
 #include <unistd.h>
+#include <regex.h>
 
 #define UTFLITE_IMPLEMENTATION
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.20.0"
+#define EDIT_VERSION "0.21.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -113,6 +114,9 @@ enum key_code {
 	KEY_ALT_SLASH = -80,
 	KEY_ALT_A = -79,
 	KEY_ALT_BRACKET = -73,
+	KEY_ALT_C = -68,
+	KEY_ALT_W = -67,
+	KEY_ALT_R = -66,
 
 	/* Shift+Tab (backtab). */
 	KEY_SHIFT_TAB = -78,
@@ -812,6 +816,16 @@ struct search_state {
 	char replace_text[256];         /* Replacement text (UTF-8) */
 	uint32_t replace_length;        /* Length of replacement text in bytes */
 	bool editing_replace;           /* true = editing replace field */
+
+	/* Search options */
+	bool case_sensitive;            /* Match exact case */
+	bool whole_word;                /* Match complete words only */
+	bool use_regex;                 /* Use regular expressions */
+
+	/* Compiled regex state */
+	regex_t compiled_regex;         /* Compiled pattern */
+	bool regex_compiled;            /* True if compiled_regex is valid */
+	char regex_error[128];          /* Error message if compilation failed */
 };
 static struct search_state search = {0};
 
@@ -1804,6 +1818,9 @@ static int input_read_key(void)
 				case '/': return KEY_ALT_SLASH;
 				case 'a': case 'A': return KEY_ALT_A;
 				case ']': return KEY_ALT_BRACKET;
+				case 'c': case 'C': return KEY_ALT_C;
+				case 'w': case 'W': return KEY_ALT_W;
+				case 'r': return KEY_ALT_R;
 				default: return '\x1b';
 			}
 		}
@@ -6064,50 +6081,282 @@ static void search_exit(bool restore_position)
 		editor.row_offset = search.saved_row_offset;
 		editor.column_offset = search.saved_column_offset;
 	}
+
+	/* Free compiled regex */
+	if (search.regex_compiled) {
+		regfree(&search.compiled_regex);
+		search.regex_compiled = false;
+	}
+
 	search.active = false;
 	search.replace_mode = false;
 	search.has_match = false;
 }
 
 /*
+ * Compile the current search query as a regex.
+ * Updates search.regex_compiled and search.regex_error.
+ */
+static void search_compile_regex(void)
+{
+	/* Free previous compiled regex */
+	if (search.regex_compiled) {
+		regfree(&search.compiled_regex);
+		search.regex_compiled = false;
+	}
+	search.regex_error[0] = '\0';
+
+	if (search.query_length == 0) {
+		return;
+	}
+
+	/* Build flags */
+	int flags = REG_EXTENDED;
+	if (!search.case_sensitive) {
+		flags |= REG_ICASE;
+	}
+
+	/* Compile the pattern */
+	int result = regcomp(&search.compiled_regex, search.query, flags);
+
+	if (result == 0) {
+		search.regex_compiled = true;
+	} else {
+		/* Get error message */
+		regerror(result, &search.compiled_regex, search.regex_error,
+		         sizeof(search.regex_error));
+	}
+}
+
+/*
+ * Check if a position is at a word boundary.
+ * A word boundary exists between a word character and a non-word character.
+ */
+static bool is_word_boundary(struct line *line, uint32_t column)
+{
+	if (line->cell_count == 0) {
+		return true;
+	}
+
+	/* Start of line is a boundary */
+	if (column == 0) {
+		return true;
+	}
+
+	/* End of line is a boundary */
+	if (column >= line->cell_count) {
+		return true;
+	}
+
+	/* Check if character class changes */
+	uint32_t previous_codepoint = line->cells[column - 1].codepoint;
+	uint32_t current_codepoint = line->cells[column].codepoint;
+
+	bool previous_is_word = isalnum(previous_codepoint) || previous_codepoint == '_';
+	bool current_is_word = isalnum(current_codepoint) || current_codepoint == '_';
+
+	return previous_is_word != current_is_word;
+}
+
+/*
+ * Check if a match at the given position satisfies whole-word constraint.
+ */
+static bool is_whole_word_match(struct line *line, uint32_t start_column,
+                                uint32_t end_column)
+{
+	/* Check boundary at start */
+	if (!is_word_boundary(line, start_column)) {
+		return false;
+	}
+
+	/* Check boundary at end */
+	if (!is_word_boundary(line, end_column)) {
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * Convert a line (or portion) to a UTF-8 string for regex matching.
+ * Returns a newly allocated string. Caller must free.
+ * Also builds a mapping from byte offset to cell index in *byte_to_cell.
+ */
+static char *line_to_string(struct line *line, uint32_t start_column,
+                            uint32_t **byte_to_cell, size_t *out_length)
+{
+	if (line->cell_count == 0 || start_column >= line->cell_count) {
+		*out_length = 0;
+		*byte_to_cell = NULL;
+		return strdup("");
+	}
+
+	/* Calculate required size */
+	size_t capacity = (line->cell_count - start_column) * 4 + 1;
+	char *result = malloc(capacity);
+	uint32_t *mapping = malloc(capacity * sizeof(uint32_t));
+
+	if (!result || !mapping) {
+		free(result);
+		free(mapping);
+		*out_length = 0;
+		*byte_to_cell = NULL;
+		return NULL;
+	}
+
+	size_t byte_position = 0;
+	for (uint32_t column = start_column; column < line->cell_count; column++) {
+		uint32_t codepoint = line->cells[column].codepoint;
+
+		char utf8[4];
+		int bytes = utflite_encode(codepoint, utf8);
+
+		if (bytes > 0) {
+			for (int i = 0; i < bytes; i++) {
+				result[byte_position] = utf8[i];
+				mapping[byte_position] = column;
+				byte_position++;
+			}
+		}
+	}
+
+	result[byte_position] = '\0';
+	*out_length = byte_position;
+	*byte_to_cell = mapping;
+
+	return result;
+}
+
+/*
+ * Check if the search query matches at the given position.
+ * Returns the length of the match in cells (0 if no match).
+ * For literal search, returns query_cell_count on match.
+ * For regex, returns the actual match length.
+ */
+static uint32_t search_match_length_at(struct line *line, uint32_t column)
+{
+	if (search.query_length == 0) {
+		return 0;
+	}
+
+	if (column >= line->cell_count) {
+		return 0;
+	}
+
+	if (search.use_regex) {
+		/* Regex matching */
+		if (!search.regex_compiled) {
+			return 0;
+		}
+
+		/* Convert line to string starting at column */
+		size_t string_length;
+		uint32_t *byte_to_cell;
+		char *line_string = line_to_string(line, column, &byte_to_cell, &string_length);
+
+		if (!line_string) {
+			return 0;
+		}
+
+		regmatch_t match;
+		int result = regexec(&search.compiled_regex, line_string, 1, &match, 0);
+
+		uint32_t match_cells = 0;
+
+		if (result == 0 && match.rm_so == 0) {
+			/* Match at start of string (which is our column) */
+			/* Convert byte end position to cell count */
+			if (match.rm_eo > 0 && (size_t)match.rm_eo <= string_length) {
+				uint32_t start_cell = column;
+				uint32_t end_cell = byte_to_cell[match.rm_eo - 1] + 1;
+				match_cells = end_cell - start_cell;
+
+				/* Check whole word constraint */
+				if (search.whole_word) {
+					if (!is_whole_word_match(line, column, column + match_cells)) {
+						match_cells = 0;
+					}
+				}
+			}
+		}
+
+		free(line_string);
+		free(byte_to_cell);
+
+		return match_cells;
+
+	} else {
+		/* Literal matching */
+		const char *query = search.query;
+		uint32_t query_position = 0;
+		uint32_t cell_index = column;
+		uint32_t match_start = column;
+
+		while (query[query_position] != '\0' && cell_index < line->cell_count) {
+			uint32_t query_codepoint;
+			int bytes = utflite_decode(query + query_position,
+			                           search.query_length - query_position,
+			                           &query_codepoint);
+			if (bytes <= 0) break;
+
+			uint32_t cell_codepoint = line->cells[cell_index].codepoint;
+
+			/* Compare (with optional case folding) */
+			bool matches;
+			if (search.case_sensitive) {
+				matches = (cell_codepoint == query_codepoint);
+			} else {
+				uint32_t lower_cell = cell_codepoint;
+				uint32_t lower_query = query_codepoint;
+				if (lower_cell >= 'A' && lower_cell <= 'Z') lower_cell += 32;
+				if (lower_query >= 'A' && lower_query <= 'Z') lower_query += 32;
+				matches = (lower_cell == lower_query);
+			}
+
+			if (!matches) {
+				return 0;
+			}
+
+			query_position += bytes;
+			cell_index++;
+		}
+
+		/* Check if we matched the entire query */
+		if (query[query_position] != '\0') {
+			return 0;  /* Query not fully matched */
+		}
+
+		uint32_t match_cells = cell_index - match_start;
+
+		/* Check whole word constraint */
+		if (search.whole_word) {
+			if (!is_whole_word_match(line, match_start, cell_index)) {
+				return 0;
+			}
+		}
+
+		return match_cells;
+	}
+}
+
+/*
  * Check if the query matches at a specific position in a line.
  * Returns true if query matches starting at the given column.
- * Matching is case-insensitive for ASCII letters.
+ * Uses search_match_length_at() for matching with all search options.
  */
 static bool search_matches_at(struct line *line, struct buffer *buffer,
                               uint32_t column, const char *query, uint32_t query_len)
 {
-	if (query_len == 0) {
+	(void)query;      /* We use search.query directly now */
+	(void)query_len;
+
+	if (search.query_length == 0) {
 		return false;
 	}
 
 	line_warm(line, buffer);
 
-	uint32_t query_offset = 0;
-	uint32_t cell_index = column;
-
-	while (query_offset < query_len && cell_index < line->cell_count) {
-		/* Decode next codepoint from query */
-		uint32_t query_cp;
-		int bytes = utflite_decode(query + query_offset, query_len - query_offset, &query_cp);
-		if (bytes <= 0) break;
-
-		uint32_t cell_cp = line->cells[cell_index].codepoint;
-
-		/* Case-insensitive comparison for ASCII */
-		if (query_cp >= 'A' && query_cp <= 'Z') query_cp += 32;
-		if (cell_cp >= 'A' && cell_cp <= 'Z') cell_cp += 32;
-
-		if (query_cp != cell_cp) {
-			return false;
-		}
-
-		query_offset += bytes;
-		cell_index++;
-	}
-
-	/* Match if we consumed the entire query */
-	return query_offset >= query_len;
+	return search_match_length_at(line, column) > 0;
 }
 
 /*
@@ -6280,6 +6529,11 @@ static bool search_find_previous(bool wrap)
  */
 static void search_update(void)
 {
+	/* Compile regex if in regex mode */
+	if (search.use_regex) {
+		search_compile_regex();
+	}
+
 	if (search.query_length == 0) {
 		/* No query - restore to saved position */
 		editor.cursor_row = search.saved_cursor_row;
@@ -6333,8 +6587,96 @@ static uint32_t replace_count_cells(const char *text, uint32_t length)
 }
 
 /*
+ * Expand backreferences in replacement string.
+ * Supports \0 (or \&) for entire match, \1-\9 for capture groups.
+ * Returns newly allocated string. Caller must free.
+ */
+static char *expand_replacement(const char *replace_text,
+                                const char *source_text,
+                                regmatch_t *matches,
+                                size_t match_count)
+{
+	/* Calculate required size (conservative estimate) */
+	size_t source_length = strlen(source_text);
+	size_t replace_length = strlen(replace_text);
+	size_t capacity = replace_length + source_length * match_count + 1;
+
+	char *result = malloc(capacity);
+	if (!result) {
+		return NULL;
+	}
+
+	size_t result_position = 0;
+	const char *p = replace_text;
+
+	while (*p) {
+		if (*p == '\\' && p[1] != '\0') {
+			char next = p[1];
+			int group = -1;
+
+			if (next == '&' || next == '0') {
+				group = 0;  /* Entire match */
+			} else if (next >= '1' && next <= '9') {
+				group = next - '0';
+			} else if (next == '\\') {
+				/* Escaped backslash */
+				result[result_position++] = '\\';
+				p += 2;
+				continue;
+			} else {
+				/* Unknown escape - copy literally */
+				result[result_position++] = *p++;
+				continue;
+			}
+
+			/* Insert captured group */
+			if (group >= 0 && (size_t)group < match_count) {
+				regmatch_t *m = &matches[group];
+				if (m->rm_so >= 0 && m->rm_eo >= m->rm_so) {
+					size_t length = m->rm_eo - m->rm_so;
+
+					/* Ensure capacity */
+					if (result_position + length >= capacity) {
+						capacity = capacity * 2 + length;
+						char *new_result = realloc(result, capacity);
+						if (!new_result) {
+							free(result);
+							return NULL;
+						}
+						result = new_result;
+					}
+
+					memcpy(result + result_position, source_text + m->rm_so, length);
+					result_position += length;
+				}
+			}
+
+			p += 2;  /* Skip \N */
+
+		} else {
+			result[result_position++] = *p++;
+		}
+
+		/* Ensure capacity */
+		if (result_position >= capacity - 4) {
+			capacity *= 2;
+			char *new_result = realloc(result, capacity);
+			if (!new_result) {
+				free(result);
+				return NULL;
+			}
+			result = new_result;
+		}
+	}
+
+	result[result_position] = '\0';
+	return result;
+}
+
+/*
  * Replace the current match with the replacement text.
  * Returns true if a replacement was made.
+ * Supports regex backreferences (\0-\9) when in regex mode.
  */
 static bool search_replace_current(void)
 {
@@ -6349,16 +6691,45 @@ static bool search_replace_current(void)
 	struct line *line = &editor.buffer.lines[editor.cursor_row];
 	line_warm(line, &editor.buffer);
 
-	/* Verify match still exists at cursor position */
-	if (!search_matches_at(line, &editor.buffer, editor.cursor_column,
-	                       search.query, search.query_length)) {
+	/* Get match length - use search_match_length_at for regex support */
+	uint32_t match_cells = search_match_length_at(line, editor.cursor_column);
+	if (match_cells == 0) {
+		return false;
+	}
+
+	/* Determine final replacement text (with backreference expansion) */
+	char *final_replacement = NULL;
+
+	if (search.use_regex && search.regex_compiled) {
+		/* Build line string for backreference extraction */
+		size_t string_length;
+		uint32_t *byte_to_cell;
+		char *line_string = line_to_string(line, editor.cursor_column,
+		                                   &byte_to_cell, &string_length);
+
+		if (line_string) {
+			/* Get all capture groups */
+			regmatch_t matches[10];
+			if (regexec(&search.compiled_regex, line_string, 10, matches, 0) == 0) {
+				final_replacement = expand_replacement(search.replace_text,
+				                                       line_string, matches, 10);
+			}
+			free(line_string);
+			free(byte_to_cell);
+		}
+
+		if (!final_replacement) {
+			final_replacement = strdup(search.replace_text);
+		}
+	} else {
+		final_replacement = strdup(search.replace_text);
+	}
+
+	if (!final_replacement) {
 		return false;
 	}
 
 	undo_begin_group(&editor.buffer);
-
-	/* Calculate the number of cells in the match */
-	uint32_t match_cells = search_query_cell_count(search.query, search.query_length);
 
 	/* Delete the match characters (from end to start for correct undo) */
 	for (uint32_t i = 0; i < match_cells; i++) {
@@ -6379,13 +6750,12 @@ static bool search_replace_current(void)
 	}
 
 	/* Insert replacement text */
-	const char *r = search.replace_text;
-	const char *r_end = search.replace_text + search.replace_length;
+	const char *r = final_replacement;
 	uint32_t insert_position = editor.cursor_column;
 
-	while (r < r_end) {
+	while (*r) {
 		uint32_t codepoint;
-		int bytes = utflite_decode(r, r_end - r, &codepoint);
+		int bytes = utflite_decode(r, strlen(r), &codepoint);
 		if (bytes <= 0) {
 			break;
 		}
@@ -6410,6 +6780,8 @@ static bool search_replace_current(void)
 		line->cell_count++;
 		insert_position++;
 	}
+
+	free(final_replacement);
 
 	/* Recompute line metadata */
 	line->temperature = LINE_TEMPERATURE_HOT;
@@ -6509,29 +6881,6 @@ static int search_match_type(uint32_t row, uint32_t column)
 		return 0;
 	}
 
-	/* Cache match_len to avoid O(n²) per render */
-	static char cached_query[256];
-	static uint32_t cached_query_length = 0;
-	static uint32_t cached_match_len = 0;
-
-	uint32_t match_len;
-	if (cached_query_length == search.query_length &&
-	    memcmp(cached_query, search.query, search.query_length) == 0) {
-		match_len = cached_match_len;
-	} else {
-		match_len = search_query_cell_count(search.query, search.query_length);
-		memcpy(cached_query, search.query, search.query_length);
-		cached_query_length = search.query_length;
-		cached_match_len = match_len;
-	}
-
-	/* Check if this cell is part of the current match */
-	if (search.has_match && row == search.match_row &&
-	    column >= search.match_column && column < search.match_column + match_len) {
-		return 2;  /* Current match */
-	}
-
-	/* Check if this cell is part of any match */
 	if (row >= editor.buffer.line_count) {
 		return 0;
 	}
@@ -6539,14 +6888,41 @@ static int search_match_type(uint32_t row, uint32_t column)
 	struct line *line = &editor.buffer.lines[row];
 	line_warm(line, &editor.buffer);
 
+	/*
+	 * For regex, matches can have variable length, so we need to check
+	 * each potential starting position. For literal search, we can use
+	 * the cached query length as an optimization.
+	 */
+	uint32_t max_match_len;
+	if (search.use_regex) {
+		/* Regex matches can be any length - use conservative estimate */
+		max_match_len = line->cell_count;
+	} else {
+		/* Literal search - match length is fixed */
+		max_match_len = search_query_cell_count(search.query, search.query_length);
+	}
+
+	/* Check if this cell is part of the current match */
+	if (search.has_match && row == search.match_row) {
+		uint32_t current_match_len = search_match_length_at(line, search.match_column);
+		if (current_match_len > 0 &&
+		    column >= search.match_column &&
+		    column < search.match_column + current_match_len) {
+			return 2;  /* Current match */
+		}
+	}
+
 	/* Look backward to see if a match starts before this column */
-	uint32_t check_start = (column >= match_len) ? column - match_len + 1 : 0;
+	uint32_t check_start = (column >= max_match_len) ? column - max_match_len + 1 : 0;
 
 	for (uint32_t col = check_start; col <= column; col++) {
-		if (search_matches_at(line, &editor.buffer, col, search.query, search.query_length)) {
-			if (column < col + match_len) {
-				return 1;  /* Other match */
+		uint32_t this_match_len = search_match_length_at(line, col);
+		if (this_match_len > 0 && column < col + this_match_len) {
+			/* Skip if this is the current match (already handled above) */
+			if (search.has_match && row == search.match_row && col == search.match_column) {
+				continue;
 			}
+			return 1;  /* Other match */
 		}
 	}
 
@@ -7125,6 +7501,29 @@ static void render_draw_message_bar(struct output_buffer *output)
 		char prompt[512];
 		int len;
 
+		/* Build options indicator string */
+		char options[16] = "";
+		char *opt_ptr = options;
+		if (search.case_sensitive) {
+			*opt_ptr++ = 'C';
+		}
+		if (search.whole_word) {
+			*opt_ptr++ = 'W';
+		}
+		if (search.use_regex) {
+			*opt_ptr++ = 'R';
+			if (!search.regex_compiled && search.query_length > 0) {
+				*opt_ptr++ = '!';
+			}
+		}
+		*opt_ptr = '\0';
+
+		/* Format the options part */
+		char options_display[24] = "";
+		if (options[0]) {
+			snprintf(options_display, sizeof(options_display), " [%s]", options);
+		}
+
 		if (search.replace_mode) {
 			/*
 			 * Replace mode: show both search and replace fields.
@@ -7137,21 +7536,21 @@ static void render_draw_message_bar(struct output_buffer *output)
 
 			if (search.editing_replace) {
 				len = snprintf(prompt, sizeof(prompt),
-				               "Find: %s%s | Replace: [%s]",
-				               search.query, match_status, search.replace_text);
+				               "Find%s: %s%s | Replace: [%s]",
+				               options_display, search.query, match_status, search.replace_text);
 			} else {
 				len = snprintf(prompt, sizeof(prompt),
-				               "Find: [%s]%s | Replace: %s",
-				               search.query, match_status, search.replace_text);
+				               "Find%s: [%s]%s | Replace: %s",
+				               options_display, search.query, match_status, search.replace_text);
 			}
 		} else {
 			/* Search-only mode */
 			if (search.has_match) {
-				len = snprintf(prompt, sizeof(prompt), "Search: %s", search.query);
+				len = snprintf(prompt, sizeof(prompt), "Search%s: %s", options_display, search.query);
 			} else if (search.query_length > 0) {
-				len = snprintf(prompt, sizeof(prompt), "Search: %s (no match)", search.query);
+				len = snprintf(prompt, sizeof(prompt), "Search%s: %s (no match)", options_display, search.query);
 			} else {
-				len = snprintf(prompt, sizeof(prompt), "Search: ");
+				len = snprintf(prompt, sizeof(prompt), "Search%s: ", options_display);
 			}
 		}
 
@@ -7371,6 +7770,44 @@ static bool search_handle_key(int key)
 			if (!search_find_previous(true)) {
 				editor_set_status_message("No more matches");
 			}
+			return true;
+
+		case KEY_ALT_C:
+			/* Toggle case sensitivity */
+			search.case_sensitive = !search.case_sensitive;
+			if (search.use_regex) {
+				search_compile_regex();
+			}
+			search_update();
+			editor_set_status_message("Case %s",
+			                          search.case_sensitive ? "sensitive" : "insensitive");
+			return true;
+
+		case KEY_ALT_W:
+			/* Toggle whole word matching */
+			search.whole_word = !search.whole_word;
+			search_update();
+			editor_set_status_message("Whole word %s",
+			                          search.whole_word ? "ON" : "OFF");
+			return true;
+
+		case KEY_ALT_R:
+			/* Toggle regex mode */
+			search.use_regex = !search.use_regex;
+			if (search.use_regex) {
+				search_compile_regex();
+				if (!search.regex_compiled && search.query_length > 0) {
+					editor_set_status_message("Regex error: %s", search.regex_error);
+					return true;
+				}
+			} else {
+				if (search.regex_compiled) {
+					regfree(&search.compiled_regex);
+					search.regex_compiled = false;
+				}
+			}
+			search_update();
+			editor_set_status_message("Regex %s", search.use_regex ? "ON" : "OFF");
 			return true;
 
 		default:

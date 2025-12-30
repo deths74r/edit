@@ -1,0 +1,158 @@
+Phase 21: Search Enhancements Test File
+========================================
+
+This file contains test cases for the new search features.
+
+Key Bindings (in search/replace mode):
+  Alt+C  Toggle case sensitivity
+  Alt+W  Toggle whole word matching
+  Alt+R  Toggle regex mode
+
+The message bar shows active options: [C] [W] [R] [R!] for regex error
+
+
+TEST 1: Case Sensitivity (Alt+C)
+--------------------------------
+
+Test string: Hello hello HELLO hElLo
+
+Instructions:
+1. Press Ctrl+F to enter search mode
+2. Type: hello
+3. Default (case OFF): should find all 4 occurrences
+4. Press Alt+C to enable case sensitivity [C]
+5. Now should only find: hello (the second one)
+6. Press Escape to exit
+
+
+TEST 2: Whole Word (Alt+W)
+--------------------------
+
+Test string: test testing tested contest retest
+
+Instructions:
+1. Press Ctrl+F to enter search mode
+2. Type: test
+3. Default (whole word OFF): should find "test" in all 5 words
+4. Press Alt+W to enable whole word [W]
+5. Now should only find: test (the standalone word)
+6. Press Escape to exit
+
+
+TEST 3: Combined Case + Whole Word
+----------------------------------
+
+Test string: Test test TEST testing Testing
+
+Instructions:
+1. Ctrl+F, type: test
+2. Press Alt+W (whole word ON)
+3. Should find: Test, test, TEST (3 matches)
+4. Press Alt+C (case sensitive ON)
+5. Should find only: test (1 match)
+6. Press Escape
+
+
+TEST 4: Regex Mode (Alt+R)
+--------------------------
+
+Test data:
+foo123
+bar456
+baz789
+foobar
+foo42bar
+
+Instructions:
+1. Ctrl+F, press Alt+R to enable regex [R]
+2. Type: foo[0-9]+
+3. Should match: foo123, foo42 (in foo42bar)
+4. Type: \w+\d+
+5. Should match: foo123, bar456, baz789, foo42
+6. Press Escape
+
+
+TEST 5: Regex with Capture Groups and Replace
+---------------------------------------------
+
+Test data:
+user.name
+data.value
+config.setting
+
+Instructions:
+1. Ctrl+R to enter replace mode
+2. Press Alt+R to enable regex [R]
+3. Type find: (\w+)\.(\w+)
+4. Press Tab to go to replace field
+5. Type: \2_\1
+6. Press Enter to replace first match
+7. Result should be: name_user
+8. Press Alt+A to replace all remaining
+9. All lines should become: value_data, setting_config
+
+
+TEST 6: Regex Error Handling
+----------------------------
+
+Instructions:
+1. Ctrl+F, press Alt+R
+2. Type: [invalid(regex
+3. Status bar should show "Regex error: ..." message
+4. Options should show [R!] indicating error
+5. No matches should highlight
+6. Fix pattern by typing: [a-z]+
+7. Error should clear, matches should appear
+
+
+TEST 7: Preserving Options
+--------------------------
+
+Instructions:
+1. Ctrl+F, enable case sensitive (Alt+C), search for "Test"
+2. Press Escape to exit
+3. Ctrl+F again
+4. Options should still show [C] - settings persist!
+5. The option is remembered for convenience
+
+
+TEST 8: Replace All with Regex Backreferences
+---------------------------------------------
+
+Before:
+firstName: John
+firstName: Jane
+firstName: Bob
+
+Instructions:
+1. Ctrl+R (replace mode)
+2. Alt+R (regex mode)
+3. Find: firstName: (\w+)
+4. Replace: name="\1"
+5. Alt+A (replace all)
+
+After:
+name="John"
+name="Jane"
+name="Bob"
+
+
+TEST 9: Word Boundary with Unicode
+----------------------------------
+
+Test: cafe cafe cafe
+
+Note: Word boundary uses ASCII alphanumeric only.
+The word "cafe" with accent should be treated as separate words.
+
+
+TEST 10: Empty Regex Pattern
+----------------------------
+
+Instructions:
+1. Ctrl+F, Alt+R to enable regex
+2. Don't type anything (empty pattern)
+3. Should show no matches (not an error)
+
+
+Happy testing!
