@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 15: Auto-indent & Comments
+ * Phase 16: Find & Replace
  *****************************************************************************/
 
 /*****************************************************************************
@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.15.0"
+#define EDIT_VERSION "0.16.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -105,9 +105,10 @@ enum key_code {
 	KEY_ALT_ARROW_UP = -82,
 	KEY_ALT_ARROW_DOWN = -81,
 	KEY_ALT_SLASH = -80,
+	KEY_ALT_A = -79,
 
 	/* Shift+Tab (backtab). */
-	KEY_SHIFT_TAB = -79,
+	KEY_SHIFT_TAB = -78,
 
 	/* Ctrl+Arrow keys for word movement. */
 	KEY_CTRL_ARROW_LEFT = -70,
@@ -753,6 +754,12 @@ struct search_state {
 	uint32_t match_column;
 	bool has_match;                 /* Whether current query has a match */
 	int direction;                  /* 1 = forward, -1 = backward */
+
+	/* Replace mode fields */
+	bool replace_mode;              /* true = replace mode, false = search only */
+	char replace_text[256];         /* Replacement text (UTF-8) */
+	uint32_t replace_length;        /* Length of replacement text in bytes */
+	bool editing_replace;           /* true = editing replace field */
 };
 static struct search_state search = {0};
 
@@ -1714,6 +1721,7 @@ static int input_read_key(void)
 				case 'k': case 'K': return KEY_ALT_K;
 				case 'd': case 'D': return KEY_ALT_D;
 				case '/': return KEY_ALT_SLASH;
+				case 'a': case 'A': return KEY_ALT_A;
 				default: return '\x1b';
 			}
 		}
@@ -5304,8 +5312,32 @@ static void editor_handle_mouse(struct mouse_input *mouse)
 static void search_enter(void)
 {
 	search.active = true;
+	search.replace_mode = false;
 	search.query[0] = '\0';
 	search.query_length = 0;
+	search.replace_text[0] = '\0';
+	search.replace_length = 0;
+	search.editing_replace = false;
+	search.saved_cursor_row = editor.cursor_row;
+	search.saved_cursor_column = editor.cursor_column;
+	search.saved_row_offset = editor.row_offset;
+	search.saved_column_offset = editor.column_offset;
+	search.has_match = false;
+	search.direction = 1;
+}
+
+/*
+ * Enter find & replace mode. Similar to search_enter but enables replace UI.
+ */
+static void replace_enter(void)
+{
+	search.active = true;
+	search.replace_mode = true;
+	search.query[0] = '\0';
+	search.query_length = 0;
+	search.replace_text[0] = '\0';
+	search.replace_length = 0;
+	search.editing_replace = false;
 	search.saved_cursor_row = editor.cursor_row;
 	search.saved_cursor_column = editor.cursor_column;
 	search.saved_row_offset = editor.row_offset;
@@ -5326,6 +5358,7 @@ static void search_exit(bool restore_position)
 		editor.column_offset = search.saved_column_offset;
 	}
 	search.active = false;
+	search.replace_mode = false;
 	search.has_match = false;
 }
 
@@ -5568,6 +5601,195 @@ static void search_update(void)
 	/* Otherwise find next match (with wrap) */
 	/* Note: search_find_next already calls search_center_on_match */
 	search_find_next(true);
+}
+
+/*
+ * Count the number of cells (grapheme clusters) in a UTF-8 string.
+ */
+static uint32_t replace_count_cells(const char *text, uint32_t length)
+{
+	uint32_t count = 0;
+	const char *p = text;
+	const char *end = text + length;
+
+	while (p < end) {
+		uint32_t codepoint;
+		int bytes = utflite_decode(p, end - p, &codepoint);
+		if (bytes <= 0) {
+			break;
+		}
+		p += bytes;
+		count++;
+	}
+
+	return count;
+}
+
+/*
+ * Replace the current match with the replacement text.
+ * Returns true if a replacement was made.
+ */
+static bool search_replace_current(void)
+{
+	if (!search.has_match || search.query_length == 0) {
+		return false;
+	}
+
+	if (editor.cursor_row >= editor.buffer.line_count) {
+		return false;
+	}
+
+	struct line *line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(line, &editor.buffer);
+
+	/* Verify match still exists at cursor position */
+	if (!search_matches_at(line, &editor.buffer, editor.cursor_column,
+	                       search.query, search.query_length)) {
+		return false;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	/* Calculate the number of cells in the match */
+	uint32_t match_cells = search_query_cell_count(search.query, search.query_length);
+
+	/* Delete the match characters (from end to start for correct undo) */
+	for (uint32_t i = 0; i < match_cells; i++) {
+		uint32_t delete_position = editor.cursor_column + match_cells - 1 - i;
+		if (delete_position < line->cell_count) {
+			uint32_t codepoint = line->cells[delete_position].codepoint;
+			undo_record_delete_char(&editor.buffer, editor.cursor_row,
+			                        delete_position, codepoint);
+
+			/* Shift cells left */
+			if (delete_position < line->cell_count - 1) {
+				memmove(&line->cells[delete_position],
+					&line->cells[delete_position + 1],
+					(line->cell_count - delete_position - 1) * sizeof(struct cell));
+			}
+			line->cell_count--;
+		}
+	}
+
+	/* Insert replacement text */
+	const char *r = search.replace_text;
+	const char *r_end = search.replace_text + search.replace_length;
+	uint32_t insert_position = editor.cursor_column;
+
+	while (r < r_end) {
+		uint32_t codepoint;
+		int bytes = utflite_decode(r, r_end - r, &codepoint);
+		if (bytes <= 0) {
+			break;
+		}
+		r += bytes;
+
+		undo_record_insert_char(&editor.buffer, editor.cursor_row,
+		                        insert_position, codepoint);
+
+		/* Make room and insert */
+		line_ensure_capacity(line, line->cell_count + 1);
+
+		if (insert_position < line->cell_count) {
+			memmove(&line->cells[insert_position + 1],
+				&line->cells[insert_position],
+				(line->cell_count - insert_position) * sizeof(struct cell));
+		}
+
+		line->cells[insert_position].codepoint = codepoint;
+		line->cells[insert_position].syntax = SYNTAX_NORMAL;
+		line->cells[insert_position].context = 0;
+		line->cells[insert_position].neighbor = 0;
+		line->cell_count++;
+		insert_position++;
+	}
+
+	/* Recompute line metadata */
+	line->temperature = LINE_TEMPERATURE_HOT;
+	neighbor_compute_line(line);
+	syntax_highlight_line(line, &editor.buffer, editor.cursor_row);
+	line_invalidate_wrap_cache(line);
+
+	editor.buffer.is_modified = true;
+	undo_end_group(&editor.buffer);
+
+	return true;
+}
+
+/*
+ * Replace current match and find next.
+ */
+static void search_replace_and_next(void)
+{
+	if (search_replace_current()) {
+		/* Move cursor past the replacement */
+		uint32_t replace_cells = replace_count_cells(search.replace_text,
+		                                              search.replace_length);
+		editor.cursor_column += replace_cells;
+
+		/* Find next match */
+		if (!search_find_next(true)) {
+			editor_set_status_message("Replaced. No more matches.");
+		} else {
+			editor_set_status_message("Replaced.");
+		}
+	}
+}
+
+/*
+ * Replace all matches in the buffer.
+ */
+static void search_replace_all(void)
+{
+	if (search.query_length == 0) {
+		return;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	uint32_t count = 0;
+
+	/* Save current position */
+	uint32_t saved_row = editor.cursor_row;
+	uint32_t saved_column = editor.cursor_column;
+
+	/* Start from beginning of file */
+	editor.cursor_row = 0;
+	editor.cursor_column = 0;
+
+	/* Find and replace all matches without wrapping */
+	while (search_find_next(false)) {
+		if (search_replace_current()) {
+			count++;
+
+			/* Move past replacement to avoid infinite loop */
+			uint32_t replace_cells = replace_count_cells(search.replace_text,
+			                                              search.replace_length);
+			editor.cursor_column += replace_cells;
+		} else {
+			/* No replacement made, move forward to avoid infinite loop */
+			editor.cursor_column++;
+			if (editor.cursor_row < editor.buffer.line_count) {
+				struct line *line = &editor.buffer.lines[editor.cursor_row];
+				line_warm(line, &editor.buffer);
+				if (editor.cursor_column >= line->cell_count) {
+					editor.cursor_row++;
+					editor.cursor_column = 0;
+				}
+			}
+		}
+	}
+
+	undo_end_group(&editor.buffer);
+
+	/* Restore cursor to beginning if no replacements, or keep at last position */
+	if (count == 0) {
+		editor.cursor_row = saved_row;
+		editor.cursor_column = saved_column;
+	}
+
+	search.has_match = false;
+	editor_set_status_message("Replaced %u occurrence%s", count, count != 1 ? "s" : "");
 }
 
 /*
@@ -6001,15 +6223,37 @@ static void render_draw_message_bar(struct output_buffer *output)
 	output_buffer_append_string(output, "\x1b[K");
 
 	if (search.active) {
-		/* Draw search prompt */
-		char prompt[300];
+		char prompt[512];
 		int len;
-		if (search.has_match) {
-			len = snprintf(prompt, sizeof(prompt), "Search: %s", search.query);
-		} else if (search.query_length > 0) {
-			len = snprintf(prompt, sizeof(prompt), "Search: %s (no match)", search.query);
+
+		if (search.replace_mode) {
+			/*
+			 * Replace mode: show both search and replace fields.
+			 * Active field is indicated by brackets.
+			 */
+			const char *match_status = "";
+			if (search.query_length > 0 && !search.has_match) {
+				match_status = " (no match)";
+			}
+
+			if (search.editing_replace) {
+				len = snprintf(prompt, sizeof(prompt),
+				               "Find: %s%s | Replace: [%s]",
+				               search.query, match_status, search.replace_text);
+			} else {
+				len = snprintf(prompt, sizeof(prompt),
+				               "Find: [%s]%s | Replace: %s",
+				               search.query, match_status, search.replace_text);
+			}
 		} else {
-			len = snprintf(prompt, sizeof(prompt), "Search: ");
+			/* Search-only mode */
+			if (search.has_match) {
+				len = snprintf(prompt, sizeof(prompt), "Search: %s", search.query);
+			} else if (search.query_length > 0) {
+				len = snprintf(prompt, sizeof(prompt), "Search: %s (no match)", search.query);
+			} else {
+				len = snprintf(prompt, sizeof(prompt), "Search: ");
+			}
 		}
 
 		if (len > (int)editor.screen_columns) {
@@ -6136,6 +6380,8 @@ static void render_refresh_screen(void)
  */
 /*
  * Handle a keypress in search mode. Returns true if the key was handled.
+ * In replace mode, handles Tab to toggle fields, Enter to replace, and
+ * Alt+A to replace all.
  */
 static bool search_handle_key(int key)
 {
@@ -6146,28 +6392,65 @@ static bool search_handle_key(int key)
 	switch (key) {
 		case '\x1b':  /* Escape - cancel search */
 			search_exit(true);  /* Restore position */
-			editor_set_status_message("Search cancelled");
+			editor_set_status_message(search.replace_mode ? "Replace cancelled" : "Search cancelled");
 			return true;
 
-		case '\r':  /* Enter - confirm search */
-			search_exit(false);  /* Keep current position */
-			if (search.query_length > 0) {
-				editor_set_status_message("Found: %s", search.query);
+		case '\r':  /* Enter */
+			if (search.replace_mode && search.has_match) {
+				/* Replace current match and find next */
+				search_replace_and_next();
+			} else {
+				/* Exit search, keep current position */
+				search_exit(false);
+				if (search.query_length > 0) {
+					editor_set_status_message("Found: %s", search.query);
+				}
+			}
+			return true;
+
+		case '\t':  /* Tab */
+			if (search.replace_mode) {
+				/* Toggle between search and replace fields */
+				search.editing_replace = !search.editing_replace;
+			} else if (search.has_match) {
+				/* In search-only mode, skip to next match */
+				search.direction = 1;
+				if (!search_find_next(true)) {
+					editor_set_status_message("No more matches");
+				}
+			}
+			return true;
+
+		case KEY_ALT_A:
+			/* Replace all (only in replace mode) */
+			if (search.replace_mode) {
+				search_replace_all();
 			}
 			return true;
 
 		case KEY_BACKSPACE:
 		case CONTROL_KEY('h'):
-			/* Delete last character from query */
-			if (search.query_length > 0) {
-				/* Find start of last UTF-8 character */
-				uint32_t i = search.query_length - 1;
-				while (i > 0 && (search.query[i] & 0xC0) == 0x80) {
-					i--;
+			if (search.replace_mode && search.editing_replace) {
+				/* Delete from replace field */
+				if (search.replace_length > 0) {
+					uint32_t i = search.replace_length - 1;
+					while (i > 0 && (search.replace_text[i] & 0xC0) == 0x80) {
+						i--;
+					}
+					search.replace_length = i;
+					search.replace_text[search.replace_length] = '\0';
 				}
-				search.query_length = i;
-				search.query[search.query_length] = '\0';
-				search_update();
+			} else {
+				/* Delete from search field */
+				if (search.query_length > 0) {
+					uint32_t i = search.query_length - 1;
+					while (i > 0 && (search.query[i] & 0xC0) == 0x80) {
+						i--;
+					}
+					search.query_length = i;
+					search.query[search.query_length] = '\0';
+					search_update();
+				}
 			}
 			return true;
 
@@ -6192,16 +6475,26 @@ static bool search_handle_key(int key)
 			return true;
 
 		default:
-			/* Insert printable character into query */
+			/* Insert printable character */
 			if ((key >= 32 && key < 127) || key >= 128) {
-				/* Encode codepoint to UTF-8 and append */
 				char utf8[4];
 				int bytes = utflite_encode((uint32_t)key, utf8);
-				if (bytes > 0 && search.query_length + (uint32_t)bytes < sizeof(search.query) - 1) {
-					memcpy(search.query + search.query_length, utf8, bytes);
-					search.query_length += bytes;
-					search.query[search.query_length] = '\0';
-					search_update();
+
+				if (search.replace_mode && search.editing_replace) {
+					/* Insert into replace field */
+					if (bytes > 0 && search.replace_length + (uint32_t)bytes < sizeof(search.replace_text) - 1) {
+						memcpy(search.replace_text + search.replace_length, utf8, bytes);
+						search.replace_length += bytes;
+						search.replace_text[search.replace_length] = '\0';
+					}
+				} else {
+					/* Insert into search field */
+					if (bytes > 0 && search.query_length + (uint32_t)bytes < sizeof(search.query) - 1) {
+						memcpy(search.query + search.query_length, utf8, bytes);
+						search.query_length += bytes;
+						search.query[search.query_length] = '\0';
+						search_update();
+					}
 				}
 				return true;
 			}
@@ -7054,6 +7347,10 @@ static void editor_process_keypress(void)
 
 		case CONTROL_KEY('f'):
 			search_enter();
+			break;
+
+		case CONTROL_KEY('r'):
+			replace_enter();
 			break;
 
 		case CONTROL_KEY('g'):

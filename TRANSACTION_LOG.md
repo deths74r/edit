@@ -731,12 +731,60 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 16: Find & Replace (COMPLETED)
+
+**Action [User]**: Requested branch and implementation of Phase 16
+- Find & Replace mode (Ctrl+R)
+- Replace current match and find next (Enter)
+- Toggle between search/replace fields (Tab)
+- Replace all (Alt+A)
+
+**Action [Claude]**: Created branch `find-replace`
+
+**Action [Claude]**: Updated header to Phase 16, version to 0.16.0
+
+**Action [Claude]**: Added new key code:
+- `KEY_ALT_A` - for replace all
+
+**Action [Claude]**: Extended search state structure with replace mode fields:
+- `replace_mode`, `replace_text`, `replace_length`, `editing_replace`
+
+**Action [Claude]**: Added `replace_enter()` - enters find & replace mode
+
+**Action [Claude]**: Added replace operation functions:
+- `replace_count_cells()` - count UTF-8 codepoints in replacement text
+- `search_replace_current()` - replace current match with undo support
+- `search_replace_and_next()` - replace and move to next match
+- `search_replace_all()` - replace all occurrences in single undo group
+
+**Action [Claude]**: Updated `render_draw_message_bar()`:
+- Shows "Find: [query] | Replace: text" in replace mode
+- Brackets indicate active field
+- Tab toggles between fields
+
+**Action [Claude]**: Updated `search_handle_key()`:
+- Tab toggles search/replace field in replace mode
+- Enter replaces current match and finds next
+- Alt+A replaces all matches
+- Backspace works on active field
+
+**Action [Claude]**: Added key binding:
+- Ctrl+R - `replace_enter()` (enter replace mode)
+
+**Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
+
+**Action [Claude]**: Committed (05e7368) and merged to main
+
+**Status**: Phase 16 complete, merged to main
+
+---
+
 ## Current State
 
 - **Branch**: `main`
-- **Version**: 0.15.0 (auto-indent & comments)
+- **Version**: 0.16.0 (find & replace)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
-- **Source**: `src/edit.c` (~7200 lines)
+- **Source**: `src/edit.c` (~7500 lines)
 
 ---
 
@@ -745,7 +793,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ```
 /home/edward/repos/edit/
 ├── src/
-│   └── edit.c          # Main editor source (~7200 lines)
+│   └── edit.c          # Main editor source (~7500 lines)
 ├── third_party/
 │   └── utflite/        # UTF-8 library
 ├── Makefile
@@ -760,13 +808,17 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 ## Quick Reference
 
 ### Branches
-- `main` - stable, contains all phases through Phase 15
+- `main` - stable, contains all phases through Phase 16
 - All feature branches merged to main
 
-### Key Bindings (New in Phase 11-15)
+### Key Bindings (New in Phase 11-16)
 - Ctrl+F - enter search mode
+- Ctrl+R - enter replace mode
 - Alt+N - find next match
 - Alt+P - find previous match
+- Alt+A - replace all (in replace mode)
+- Tab - toggle search/replace field (in replace mode)
+- Enter - replace current match (in replace mode)
 - Alt+Z - cycle wrap mode
 - Alt+Shift+Z - cycle wrap indicator
 - Ctrl+G - go to line
