@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 23B: Dialog Panel System
+ * Phase 23C: Open File & Theme Picker Dialogs
  *****************************************************************************/
 
 /*****************************************************************************
@@ -36,7 +36,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.23.1"
+#define EDIT_VERSION "0.23.2"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -112,6 +112,9 @@ enum key_code {
 	KEY_SHIFT_F4 = -74,
 	KEY_F12 = -65,
 	KEY_ALT_SHIFT_S = -64,
+	KEY_CTRL_O = -63,
+	KEY_CTRL_T = -62,
+	KEY_F5 = -61,
 
 	/* Alt key combinations. */
 	KEY_ALT_N = -88,
@@ -464,6 +467,28 @@ enum dialog_result {
 /* Dialog mouse mode flag - when true, mouse events go to dialog handler */
 static bool dialog_mouse_mode = false;
 static struct mouse_input dialog_last_mouse = {0};
+
+/*
+ * State for the Open File dialog.
+ */
+struct open_file_state {
+	struct dialog_state dialog;
+	char current_path[PATH_MAX];
+	struct file_list_item *items;
+	int item_count;
+};
+
+static struct open_file_state open_file = {0};
+
+/*
+ * State for the Theme Picker dialog.
+ */
+struct theme_picker_state {
+	struct dialog_state dialog;
+	int restore_index;      /* Theme index to restore if cancelled */
+};
+
+static struct theme_picker_state theme_picker = {0};
 
 /*****************************************************************************
  * WCAG Color Contrast Utilities
@@ -2538,6 +2563,8 @@ static int input_read_key(void)
 							return KEY_F3;
 						} else if (sequence[1] == '1' && sequence[2] == '4') {
 							return KEY_F4;
+						} else if (sequence[1] == '1' && sequence[2] == '5') {
+							return KEY_F5;
 						} else if (sequence[1] == '2' && sequence[2] == '4') {
 							return KEY_F12;
 						}
@@ -2611,6 +2638,14 @@ static int input_read_key(void)
 		uint32_t codepoint;
 		utflite_decode(utf8_buffer, bytes_to_read + 1, &codepoint);
 		return (int)codepoint;
+	}
+
+	/* Handle Ctrl+O and Ctrl+T for open file and theme picker */
+	if (character == CONTROL_KEY('o')) {
+		return KEY_CTRL_O;
+	}
+	if (character == CONTROL_KEY('t')) {
+		return KEY_CTRL_T;
 	}
 
 	return character;
@@ -8929,6 +8964,548 @@ static void dialog_close(struct dialog_state *dialog)
 }
 
 /*****************************************************************************
+ * Open File Dialog
+ *****************************************************************************/
+
+/*
+ * Load directory contents into the open file dialog.
+ * Returns true on success.
+ */
+static bool open_file_load_directory(const char *path)
+{
+	/* Free existing items */
+	if (open_file.items) {
+		file_list_free(open_file.items, open_file.item_count);
+		open_file.items = NULL;
+		open_file.item_count = 0;
+	}
+
+	/* Resolve to absolute path */
+	char resolved[PATH_MAX];
+	if (realpath(path, resolved) == NULL) {
+		return false;
+	}
+
+	/* Load directory contents */
+	int count;
+	struct file_list_item *items = file_list_read_directory(resolved, &count);
+	if (items == NULL) {
+		return false;
+	}
+
+	/* Update state */
+	strncpy(open_file.current_path, resolved, PATH_MAX - 1);
+	open_file.current_path[PATH_MAX - 1] = '\0';
+	open_file.items = items;
+	open_file.item_count = count;
+
+	/* Update dialog state */
+	open_file.dialog.item_count = count;
+	open_file.dialog.selected_index = 0;
+	open_file.dialog.scroll_offset = 0;
+
+	return true;
+}
+
+/*
+ * Navigate to parent directory.
+ */
+static void open_file_go_parent(void)
+{
+	char *parent = path_get_parent(open_file.current_path);
+	if (parent) {
+		if (!open_file_load_directory(parent)) {
+			editor_set_status_message("Cannot open parent directory");
+		}
+		free(parent);
+	}
+}
+
+/*
+ * Navigate into selected directory or return selected file path.
+ * Returns:
+ *   - Allocated string with file path if file was selected (caller must free)
+ *   - NULL if navigated into directory (dialog continues)
+ *   - NULL with dialog.active = false on error
+ */
+static char *open_file_select_item(void)
+{
+	if (open_file.dialog.selected_index < 0 ||
+	    open_file.dialog.selected_index >= open_file.item_count) {
+		return NULL;
+	}
+
+	struct file_list_item *item = &open_file.items[open_file.dialog.selected_index];
+
+	if (item->is_directory) {
+		/* Navigate into directory */
+		char *new_path = path_join(open_file.current_path, item->actual_name);
+		if (new_path) {
+			if (!open_file_load_directory(new_path)) {
+				editor_set_status_message("Cannot open directory: %s", new_path);
+			}
+			free(new_path);
+		}
+		return NULL;
+	} else {
+		/* Return file path */
+		char *file_path = path_join(open_file.current_path, item->actual_name);
+		return file_path;
+	}
+}
+
+/*
+ * Draw the file browser panel.
+ */
+static void open_file_draw(void)
+{
+	struct output_buffer output = {0};
+
+	/* Hide cursor during drawing */
+	output_buffer_append_string(&output, "\x1b[?25l");
+
+	/* Calculate dimensions */
+	dialog_calculate_dimensions(&open_file.dialog);
+
+	/* Build header title with current path */
+	char header[PATH_MAX + 16];
+	snprintf(header, sizeof(header), "Open: %s", open_file.current_path);
+
+	/* Truncate path from left if too long */
+	int max_header = open_file.dialog.panel_width - 2;
+	int header_len = strlen(header);
+	if (header_len > max_header) {
+		int skip = header_len - max_header + 4;
+		memmove(header + 7, header + 6 + skip, strlen(header + 6 + skip) + 1);
+		memcpy(header + 4, "...", 3);
+	}
+
+	dialog_draw_header(&output, &open_file.dialog, header);
+
+	/* Draw file list */
+	for (int row = 0; row < open_file.dialog.visible_rows; row++) {
+		int item_index = open_file.dialog.scroll_offset + row;
+
+		if (item_index < open_file.item_count) {
+			struct file_list_item *item = &open_file.items[item_index];
+			bool is_selected = (item_index == open_file.dialog.selected_index);
+
+			dialog_draw_list_item(&output, &open_file.dialog, row,
+			                      item->display_name, is_selected);
+		} else {
+			dialog_draw_empty_row(&output, &open_file.dialog, row);
+		}
+	}
+
+	/* Draw footer */
+	dialog_draw_footer(&output, &open_file.dialog,
+	                   "Enter:Open  Left:Parent  Esc:Cancel");
+
+	/* Reset attributes and show cursor */
+	output_buffer_append_string(&output, "\x1b[0m\x1b[?25h");
+
+	output_buffer_flush(&output);
+	output_buffer_free(&output);
+}
+
+/*
+ * Show the Open File dialog.
+ * Returns allocated file path if user selected a file, NULL if cancelled.
+ * Caller must free the returned path.
+ */
+static char *open_file_dialog(void)
+{
+	/* Initialize state */
+	memset(&open_file, 0, sizeof(open_file));
+	open_file.dialog.active = true;
+
+	/* Start in directory of current file, or current working directory */
+	char start_path[PATH_MAX];
+	if (editor.buffer.filename) {
+		char *parent = path_get_parent(editor.buffer.filename);
+		if (parent) {
+			strncpy(start_path, parent, PATH_MAX - 1);
+			start_path[PATH_MAX - 1] = '\0';
+			free(parent);
+		} else {
+			getcwd(start_path, PATH_MAX);
+		}
+	} else {
+		getcwd(start_path, PATH_MAX);
+	}
+
+	if (!open_file_load_directory(start_path)) {
+		/* Fall back to home directory */
+		const char *home = getenv("HOME");
+		if (!home || !open_file_load_directory(home)) {
+			/* Fall back to root */
+			if (!open_file_load_directory("/")) {
+				editor_set_status_message("Cannot open any directory");
+				return NULL;
+			}
+		}
+	}
+
+	/* Enable dialog mouse mode */
+	dialog_mouse_mode = true;
+
+	char *result = NULL;
+
+	while (open_file.dialog.active) {
+		open_file_draw();
+
+		/* Read input */
+		int key = input_read_key();
+
+		if (key == -1) {
+			continue;
+		}
+
+		/* Handle resize */
+		if (key == -2) {
+			terminal_get_size(&editor.screen_rows, &editor.screen_columns);
+			render_refresh_screen();
+			continue;
+		}
+
+		/* Check for mouse event */
+		if (key == KEY_MOUSE_EVENT) {
+			enum dialog_result dr = dialog_handle_mouse(&open_file.dialog, &dialog_last_mouse);
+
+			if (dr == DIALOG_CONFIRM) {
+				result = open_file_select_item();
+				if (result) {
+					open_file.dialog.active = false;
+				}
+			} else if (dr == DIALOG_CANCEL) {
+				open_file.dialog.active = false;
+			}
+			continue;
+		}
+
+		/* Handle special keys for file browser */
+		if (key == KEY_ARROW_LEFT) {
+			open_file_go_parent();
+			continue;
+		}
+
+		if (key == KEY_ARROW_RIGHT) {
+			/* Enter directory if selected item is a directory */
+			if (open_file.dialog.selected_index >= 0 &&
+			    open_file.dialog.selected_index < open_file.item_count &&
+			    open_file.items[open_file.dialog.selected_index].is_directory) {
+				open_file_select_item();
+			}
+			continue;
+		}
+
+		/* Handle generic dialog keys */
+		enum dialog_result dr = dialog_handle_key(&open_file.dialog, key);
+
+		if (dr == DIALOG_CONFIRM) {
+			result = open_file_select_item();
+			if (result) {
+				open_file.dialog.active = false;
+			}
+		} else if (dr == DIALOG_CANCEL) {
+			open_file.dialog.active = false;
+		}
+	}
+
+	/* Clean up */
+	if (open_file.items) {
+		file_list_free(open_file.items, open_file.item_count);
+		open_file.items = NULL;
+	}
+
+	dialog_close(&open_file.dialog);
+
+	return result;
+}
+
+/*
+ * Open a file, replacing current buffer.
+ * Returns true if file was opened successfully.
+ */
+static bool editor_open_file(const char *path)
+{
+	/* Clear existing buffer */
+	buffer_free(&editor.buffer);
+
+	/* Reset editor state */
+	editor.cursor_row = 0;
+	editor.cursor_column = 0;
+	editor.row_offset = 0;
+	editor.column_offset = 0;
+	editor.selection_active = false;
+
+	/* Exit multi-cursor mode if active */
+	if (editor.cursor_count > 0) {
+		multicursor_exit();
+	}
+
+	/* Initialize new buffer */
+	buffer_init(&editor.buffer);
+
+	/* Load the file */
+	if (!file_open(&editor.buffer, path)) {
+		/* Failed to load - create empty buffer */
+		editor_set_status_message("Cannot open file: %s", path);
+		return false;
+	}
+
+	editor_set_status_message("Opened: %s (%u lines)", path, editor.buffer.line_count);
+	return true;
+}
+
+/*
+ * Handle the Ctrl+O command to open a file.
+ */
+static void editor_command_open_file(void)
+{
+	/* Warn about unsaved changes */
+	static bool warned = false;
+	if (editor.buffer.is_modified && !warned) {
+		editor_set_status_message("Unsaved changes! Press Ctrl+O again to open anyway");
+		warned = true;
+		return;
+	}
+	warned = false;
+
+	/* Show open file dialog */
+	char *path = open_file_dialog();
+
+	/* Redraw screen after dialog closes */
+	render_refresh_screen();
+
+	if (path) {
+		editor_open_file(path);
+		free(path);
+	} else {
+		editor_set_status_message("Open cancelled");
+	}
+}
+
+/*****************************************************************************
+ * Theme Picker Dialog
+ *****************************************************************************/
+
+/*
+ * Draw the theme picker panel.
+ */
+static void theme_picker_draw(void)
+{
+	struct output_buffer output = {0};
+
+	/* Hide cursor during drawing */
+	output_buffer_append_string(&output, "\x1b[?25l");
+
+	/* Calculate dimensions (narrower than file browser) */
+	dialog_calculate_dimensions(&theme_picker.dialog);
+
+	/* Override width for narrower panel */
+	int desired_width = 50;
+	if (desired_width > (int)editor.screen_columns - 4) {
+		desired_width = (int)editor.screen_columns - 4;
+	}
+	theme_picker.dialog.panel_width = desired_width;
+	theme_picker.dialog.panel_left = (editor.screen_columns - desired_width) / 2;
+
+	dialog_draw_header(&output, &theme_picker.dialog, "Select Theme");
+
+	/* Draw theme list */
+	for (int row = 0; row < theme_picker.dialog.visible_rows; row++) {
+		int item_index = theme_picker.dialog.scroll_offset + row;
+
+		if (item_index < theme_count) {
+			struct theme *t = &loaded_themes[item_index];
+			bool is_selected = (item_index == theme_picker.dialog.selected_index);
+
+			/* Mark current theme with asterisk */
+			char marker = (item_index == current_theme_index) ? '*' : ' ';
+
+			/* Position cursor */
+			int screen_row = theme_picker.dialog.panel_top + 2 + row;
+			dialog_goto(&output, screen_row, theme_picker.dialog.panel_left + 1);
+
+			/* Set colors based on selection */
+			if (is_selected) {
+				dialog_set_bg(&output, active_theme.dialog_highlight_bg);
+				dialog_set_fg(&output, active_theme.dialog_highlight_fg);
+			} else {
+				dialog_set_bg(&output, active_theme.dialog_bg);
+				dialog_set_fg(&output, active_theme.dialog_fg);
+			}
+
+			/* Write marker and name */
+			char name_buf[64];
+			int name_len = snprintf(name_buf, sizeof(name_buf), " %c %s",
+			                        marker, t->name ? t->name : "Unknown");
+
+			int max_name = theme_picker.dialog.panel_width - 12;
+			if (name_len > max_name) {
+				name_len = max_name;
+				name_buf[max_name] = '\0';
+			}
+			output_buffer_append_string(&output, name_buf);
+
+			/* Draw color preview strip (4 colored blocks) */
+			if (t) {
+				output_buffer_append_string(&output, " ");
+				name_len++;
+
+				/* Background color block */
+				dialog_set_bg(&output, t->background);
+				output_buffer_append_string(&output, "  ");
+				name_len += 2;
+
+				/* Keyword color block */
+				dialog_set_bg(&output, t->syntax[SYNTAX_KEYWORD]);
+				output_buffer_append_string(&output, "  ");
+				name_len += 2;
+
+				/* String color block */
+				dialog_set_bg(&output, t->syntax[SYNTAX_STRING]);
+				output_buffer_append_string(&output, "  ");
+				name_len += 2;
+
+				/* Comment color block */
+				dialog_set_bg(&output, t->syntax[SYNTAX_COMMENT]);
+				output_buffer_append_string(&output, "  ");
+				name_len += 2;
+
+				/* Reset background for padding */
+				if (is_selected) {
+					dialog_set_bg(&output, active_theme.dialog_highlight_bg);
+				} else {
+					dialog_set_bg(&output, active_theme.dialog_bg);
+				}
+			}
+
+			/* Pad with spaces */
+			while (name_len < theme_picker.dialog.panel_width) {
+				output_buffer_append_char(&output, ' ');
+				name_len++;
+			}
+		} else {
+			dialog_draw_empty_row(&output, &theme_picker.dialog, row);
+		}
+	}
+
+	dialog_draw_footer(&output, &theme_picker.dialog,
+	                   "Enter:Select  Esc:Cancel");
+
+	/* Reset attributes and show cursor */
+	output_buffer_append_string(&output, "\x1b[0m\x1b[?25h");
+
+	output_buffer_flush(&output);
+	output_buffer_free(&output);
+}
+
+/*
+ * Show the Theme Picker dialog with live preview.
+ * Returns selected theme index, or -1 if cancelled.
+ */
+static int theme_picker_dialog(void)
+{
+	/* Initialize state */
+	memset(&theme_picker, 0, sizeof(theme_picker));
+	theme_picker.dialog.active = true;
+	theme_picker.dialog.item_count = theme_count;
+	theme_picker.dialog.selected_index = current_theme_index;
+	theme_picker.restore_index = current_theme_index;
+
+	/* Calculate initial dimensions and scroll to show current theme */
+	dialog_calculate_dimensions(&theme_picker.dialog);
+	dialog_ensure_visible(&theme_picker.dialog);
+
+	/* Enable dialog mouse mode */
+	dialog_mouse_mode = true;
+
+	int result = -1;
+	int last_preview_index = -1;
+
+	while (theme_picker.dialog.active) {
+		/* Apply live preview when selection changes */
+		if (theme_picker.dialog.selected_index != last_preview_index) {
+			theme_apply_by_index(theme_picker.dialog.selected_index);
+			last_preview_index = theme_picker.dialog.selected_index;
+
+			/* Redraw entire screen with new theme, then overlay dialog */
+			render_refresh_screen();
+		}
+
+		theme_picker_draw();
+
+		/* Read input */
+		int key = input_read_key();
+
+		if (key == -1) {
+			continue;
+		}
+
+		/* Handle resize */
+		if (key == -2) {
+			terminal_get_size(&editor.screen_rows, &editor.screen_columns);
+			render_refresh_screen();
+			continue;
+		}
+
+		/* Check for mouse event */
+		if (key == KEY_MOUSE_EVENT) {
+			enum dialog_result dr = dialog_handle_mouse(&theme_picker.dialog, &dialog_last_mouse);
+
+			if (dr == DIALOG_CONFIRM) {
+				result = theme_picker.dialog.selected_index;
+				theme_picker.dialog.active = false;
+			} else if (dr == DIALOG_CANCEL) {
+				theme_picker.dialog.active = false;
+			}
+			continue;
+		}
+
+		/* Handle generic dialog keys */
+		enum dialog_result dr = dialog_handle_key(&theme_picker.dialog, key);
+
+		if (dr == DIALOG_CONFIRM) {
+			result = theme_picker.dialog.selected_index;
+			theme_picker.dialog.active = false;
+		} else if (dr == DIALOG_CANCEL) {
+			theme_picker.dialog.active = false;
+		}
+	}
+
+	/* If cancelled, restore original theme */
+	if (result == -1) {
+		theme_apply_by_index(theme_picker.restore_index);
+	} else {
+		/* Save selected theme to config */
+		config_save();
+	}
+
+	dialog_close(&theme_picker.dialog);
+
+	return result;
+}
+
+/*
+ * Handle the F5/Ctrl+T command to open theme picker.
+ */
+static void editor_command_theme_picker(void)
+{
+	int selected = theme_picker_dialog();
+
+	/* Redraw screen after dialog closes */
+	render_refresh_screen();
+
+	if (selected >= 0) {
+		editor_set_status_message("Switched to %s theme", active_theme.name);
+	} else {
+		editor_set_status_message("Theme selection cancelled");
+	}
+}
+
+/*****************************************************************************
  * Main Loop
  *****************************************************************************/
 
@@ -10333,6 +10910,15 @@ static void editor_process_keypress(void)
 		case KEY_ALT_SHIFT_S:
 		case KEY_F12:
 			save_as_enter();
+			break;
+
+		case KEY_CTRL_O:
+			editor_command_open_file();
+			break;
+
+		case KEY_F5:
+		case KEY_CTRL_T:
+			editor_command_theme_picker();
 			break;
 
 		case CONTROL_KEY('c'):
