@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.17.1"
+#define EDIT_VERSION "0.18.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -109,6 +109,7 @@ enum key_code {
 	KEY_ALT_ARROW_DOWN = -81,
 	KEY_ALT_SLASH = -80,
 	KEY_ALT_A = -79,
+	KEY_ALT_BRACKET = -73,
 
 	/* Shift+Tab (backtab). */
 	KEY_SHIFT_TAB = -78,
@@ -1780,6 +1781,7 @@ static int input_read_key(void)
 				case 'd': case 'D': return KEY_ALT_D;
 				case '/': return KEY_ALT_SLASH;
 				case 'a': case 'A': return KEY_ALT_A;
+				case ']': return KEY_ALT_BRACKET;
 				default: return '\x1b';
 			}
 		}
@@ -7139,6 +7141,79 @@ static uint32_t line_comment_start(struct line *line)
 }
 
 /*
+ * Check if a codepoint is a bracket character that can be matched.
+ * Returns true for parentheses, square brackets, and curly braces.
+ */
+static bool is_matchable_bracket(uint32_t codepoint)
+{
+	return codepoint == '(' || codepoint == ')' ||
+	       codepoint == '[' || codepoint == ']' ||
+	       codepoint == '{' || codepoint == '}';
+}
+
+/*
+ * Jump the cursor to the matching bracket at the current position.
+ * If not on a bracket, scans forward on the current line to find one.
+ * Uses the existing pair infrastructure for cross-line matching.
+ */
+static void editor_jump_to_match(void)
+{
+	if (editor.cursor_row >= editor.buffer.line_count) {
+		editor_set_status_message("No bracket found");
+		return;
+	}
+
+	struct line *line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(line, &editor.buffer);
+
+	uint32_t search_column = editor.cursor_column;
+	uint32_t match_row, match_column;
+	bool found = false;
+
+	/*
+	 * First try at the cursor position. If not a bracket, scan forward
+	 * on the current line to find one.
+	 */
+	if (search_column < line->cell_count &&
+	    is_matchable_bracket(line->cells[search_column].codepoint)) {
+		found = buffer_find_pair_partner(&editor.buffer,
+		                                 editor.cursor_row, search_column,
+		                                 &match_row, &match_column);
+	}
+
+	/* If not found at cursor, scan forward on the line */
+	if (!found) {
+		for (uint32_t column = search_column + 1; column < line->cell_count; column++) {
+			if (is_matchable_bracket(line->cells[column].codepoint)) {
+				found = buffer_find_pair_partner(&editor.buffer,
+				                                 editor.cursor_row, column,
+				                                 &match_row, &match_column);
+				if (found) {
+					break;
+				}
+			}
+		}
+	}
+
+	if (found) {
+		selection_clear();
+		editor.cursor_row = match_row;
+		editor.cursor_column = match_column;
+
+		/* Ensure cursor is visible by scrolling if needed */
+		if (editor.cursor_row < editor.row_offset) {
+			editor.row_offset = editor.cursor_row;
+		} else if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
+			editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+		}
+
+		editor_set_status_message("Jumped to match");
+	} else {
+		editor_set_status_message("No matching bracket");
+	}
+}
+
+/*
  * Toggle line comments on the current line or selection. Uses C-style //
  * comments. If all affected lines are commented, removes comments. Otherwise,
  * adds comments to all lines at the minimum indent level for alignment.
@@ -7729,6 +7804,11 @@ static void editor_process_keypress(void)
 		case 0x1f:  /* Ctrl+/ in many terminals */
 		case KEY_ALT_SLASH:
 			editor_toggle_comment();
+			break;
+
+		case 0x1d:  /* Ctrl+] */
+		case KEY_ALT_BRACKET:
+			editor_jump_to_match();
 			break;
 
 		case KEY_ARROW_UP:

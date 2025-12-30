@@ -790,12 +790,47 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 
 ---
 
+### Phase 18: Jump to Matching Bracket (COMPLETED)
+
+**Action [User]**: Requested implementation of Phase 18
+- Jump to matching bracket with Ctrl+] or Alt+]
+- Use existing pair infrastructure for cross-line matching
+
+**Action [Claude]**: Implemented Phase 18 directly on main branch
+
+**Action [Claude]**: Updated version to 0.18.0
+
+**Action [Claude]**: Added new key code:
+- `KEY_ALT_BRACKET` (-73) - for Alt+] key binding
+
+**Action [Claude]**: Added Alt+] handling in `input_read_key()`:
+- `case ']': return KEY_ALT_BRACKET;`
+
+**Action [Claude]**: Added helper function:
+- `is_matchable_bracket()` - checks if codepoint is (), [], or {}
+
+**Action [Claude]**: Added `editor_jump_to_match()`:
+- Uses existing `buffer_find_pair_partner()` for cross-line matching
+- If not on a bracket, scans forward on line to find one
+- Clears selection and scrolls to ensure match is visible
+- Shows status message for success or failure
+
+**Action [Claude]**: Added key bindings:
+- 0x1d (Ctrl+]) - `editor_jump_to_match()`
+- KEY_ALT_BRACKET (Alt+]) - `editor_jump_to_match()`
+
+**Test [Claude]**: Build succeeds (1 expected warning: unused `buffer_get_total_screen_rows`)
+
+**Status**: Phase 18 complete on main branch
+
+---
+
 ## Current State
 
-- **Branch**: `visual-enhancements` (pending merge after testing)
-- **Version**: 0.17.0 (visual enhancements)
+- **Branch**: `main`
+- **Version**: 0.18.0 (jump to matching bracket)
 - **Build**: Clean (1 expected warning: unused `buffer_get_total_screen_rows`)
-- **Source**: `src/edit.c` (~7,715 lines)
+- **Source**: `src/edit.c` (~7,900 lines)
 
 ---
 
@@ -822,7 +857,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - `main` - stable, contains all phases through Phase 16
 - All feature branches merged to main
 
-### Key Bindings (New in Phase 11-17)
+### Key Bindings (New in Phase 11-18)
 - Ctrl+F - enter search mode
 - Ctrl+R - enter replace mode
 - Alt+N - find next match
@@ -844,6 +879,7 @@ This file tracks all interactions and actions for the `edit` project. If a sessi
 - Ctrl+/ or Alt+/ - toggle line comment
 - F3 - toggle whitespace visibility
 - F4 - cycle color column (off → 80 → 120)
+- Ctrl+] or Alt+] - jump to matching bracket
 
 ### Build Commands
 ```bash
