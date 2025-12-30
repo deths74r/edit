@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 16: Find & Replace
+ * Phase 17: Visual Enhancements
  *****************************************************************************/
 
 /*****************************************************************************
@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.16.0"
+#define EDIT_VERSION "0.17.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -94,6 +94,8 @@ enum key_code {
 
 	/* Function keys. */
 	KEY_F2 = -91,
+	KEY_F3 = -76,
+	KEY_F4 = -75,
 
 	/* Alt key combinations. */
 	KEY_ALT_N = -88,
@@ -376,6 +378,15 @@ static const struct syntax_color THEME_LINE_NUMBER_ACTIVE = {0xA0, 0xA0, 0xA0};
 /* Cursor line: Highlight for the line containing the cursor.
  * Noticeably lighter than background (#121212) for clear visibility. */
 static const struct syntax_color THEME_CURSOR_LINE = {0x28, 0x28, 0x28};
+
+/* Whitespace indicators: Subtle but visible when show_whitespace is on. */
+static const struct syntax_color THEME_WHITESPACE = {0x50, 0x50, 0x50};
+
+/* Trailing whitespace: Warning background for unwanted trailing spaces. */
+static const struct syntax_color THEME_TRAILING_WHITESPACE = {0x50, 0x30, 0x30};
+
+/* Color column: Subtle vertical line at specified column. */
+static const struct syntax_color THEME_COLOR_COLUMN = {0x2A, 0x2A, 0x2A};
 
 /*****************************************************************************
  * WCAG Color Contrast Utilities
@@ -701,6 +712,10 @@ struct editor_state {
 	/* Soft wrap settings. */
 	enum wrap_mode wrap_mode;
 	enum wrap_indicator wrap_indicator;
+
+	/* Visual display settings. */
+	bool show_whitespace;        /* Render whitespace characters visibly */
+	uint32_t color_column;       /* Column to highlight (0 = off) */
 };
 
 /*****************************************************************************
@@ -941,6 +956,35 @@ static bool cell_is_word_end(struct cell *cell)
 {
 	enum token_position pos = neighbor_get_position(cell->neighbor);
 	return pos == TOKEN_POSITION_END || pos == TOKEN_POSITION_SOLO;
+}
+
+/*
+ * Check if a cell is trailing whitespace (whitespace with no non-whitespace
+ * content after it on the line). Used for visual highlighting.
+ */
+static bool is_trailing_whitespace(struct line *line, uint32_t column)
+{
+	if (column >= line->cell_count) {
+		return false;
+	}
+
+	/* First check if current cell is whitespace. */
+	enum character_class current_class =
+		neighbor_get_class(line->cells[column].neighbor);
+	if (current_class != CHAR_CLASS_WHITESPACE) {
+		return false;
+	}
+
+	/* Check if there's any non-whitespace after this position. */
+	for (uint32_t i = column + 1; i < line->cell_count; i++) {
+		enum character_class cell_class =
+			neighbor_get_class(line->cells[i].neighbor);
+		if (cell_class != CHAR_CLASS_WHITESPACE) {
+			return false;
+		}
+	}
+
+	return true;
 }
 
 /* Find start of previous word. */
@@ -1795,6 +1839,10 @@ static int input_read_key(void)
 					if (sequence[3] == '~') {
 						if (sequence[1] == '1' && sequence[2] == '2') {
 							return KEY_F2;
+						} else if (sequence[1] == '1' && sequence[2] == '3') {
+							return KEY_F3;
+						} else if (sequence[1] == '1' && sequence[2] == '4') {
+							return KEY_F4;
 						}
 					}
 				}
@@ -1821,6 +1869,8 @@ static int input_read_key(void)
 				case 'H': return KEY_HOME;
 				case 'F': return KEY_END;
 				case 'Q': return KEY_F2;
+				case 'R': return KEY_F3;
+				case 'S': return KEY_F4;
 			}
 		}
 
@@ -5944,7 +5994,10 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		uint32_t codepoint = line->cells[cell_index].codepoint;
 		enum syntax_token syntax = line->cells[cell_index].syntax;
 
-		/* Determine highlight type: search current > search other > selection > none */
+		/*
+		 * Determine highlight type with priority:
+		 * search current > search other > selection > trailing ws > cursor line
+		 */
 		int highlight = 0;
 		int match_type = search_match_type(file_row, cell_index);
 		if (match_type == 2) {
@@ -5953,6 +6006,8 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			highlight = 2;  /* Other search match */
 		} else if (selection_contains(file_row, cell_index)) {
 			highlight = 1;  /* Selection */
+		} else if (is_trailing_whitespace(line, cell_index)) {
+			highlight = 4;  /* Trailing whitespace */
 		}
 
 		/* Change colors if syntax or highlight changed */
@@ -5962,6 +6017,9 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			struct syntax_color bg;
 
 			switch (highlight) {
+				case 4:  /* Trailing whitespace - warning red */
+					bg = THEME_TRAILING_WHITESPACE;
+					break;
 				case 3:  /* Current search match - gold */
 					bg = THEME_SEARCH_CURRENT;
 					break;
@@ -5991,11 +6049,42 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		int width;
 		if (codepoint == '\t') {
 			width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
-			/* Render spaces for tab */
-			for (int i = 0; i < width && rendered_width < max_width; i++) {
-				output_buffer_append_string(output, " ");
+			/* Render tab with optional visible indicator */
+			if (editor.show_whitespace) {
+				/* Show → in subtle gray followed by spaces */
+				char ws_escape[48];
+				snprintf(ws_escape, sizeof(ws_escape),
+				         "\x1b[38;2;%d;%d;%dm",
+				         THEME_WHITESPACE.red, THEME_WHITESPACE.green,
+				         THEME_WHITESPACE.blue);
+				output_buffer_append_string(output, ws_escape);
+				output_buffer_append_string(output, "→");
 				rendered_width++;
+				for (int i = 1; i < width && rendered_width < max_width; i++) {
+					output_buffer_append_string(output, " ");
+					rendered_width++;
+				}
+				/* Restore syntax color */
+				render_set_syntax_color(output, current_syntax);
+			} else {
+				/* Render spaces for tab */
+				for (int i = 0; i < width && rendered_width < max_width; i++) {
+					output_buffer_append_string(output, " ");
+					rendered_width++;
+				}
 			}
+		} else if (codepoint == ' ' && editor.show_whitespace) {
+			/* Show space as middle dot in subtle gray */
+			char ws_escape[48];
+			snprintf(ws_escape, sizeof(ws_escape),
+			         "\x1b[38;2;%d;%d;%dm",
+			         THEME_WHITESPACE.red, THEME_WHITESPACE.green,
+			         THEME_WHITESPACE.blue);
+			output_buffer_append_string(output, ws_escape);
+			output_buffer_append_string(output, "·");
+			render_set_syntax_color(output, current_syntax);
+			rendered_width++;
+			width = 1;
 		} else {
 			width = utflite_codepoint_width(codepoint);
 			if (width < 0) {
@@ -6083,6 +6172,22 @@ static void render_draw_rows(struct output_buffer *output)
 					output_buffer_append_string(output, " ");
 				}
 				output_buffer_append(output, welcome, welcome_length);
+			} else if (editor.color_column > 0) {
+				/* Draw color column marker on empty lines */
+				uint32_t col_pos = editor.color_column - 1;
+				if (col_pos < (uint32_t)text_area_width) {
+					for (uint32_t i = 0; i < editor.gutter_width + col_pos; i++) {
+						output_buffer_append_string(output, " ");
+					}
+					char col_escape[64];
+					snprintf(col_escape, sizeof(col_escape),
+					         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm",
+					         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
+					         THEME_COLOR_COLUMN.blue,
+					         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
+					         THEME_BACKGROUND.blue);
+					output_buffer_append_string(output, col_escape);
+				}
 			}
 		} else if (file_row < editor.buffer.line_count) {
 			struct line *line = &editor.buffer.lines[file_row];
@@ -6148,16 +6253,109 @@ static void render_draw_rows(struct output_buffer *output)
 				                    text_area_width, is_cursor_line_segment);
 			}
 
-			/* Fill rest of cursor line segment with highlight */
+			/* Fill rest of line with appropriate background */
 			if (is_cursor_line_segment) {
-				char fill_escape[64];
-				snprintf(fill_escape, sizeof(fill_escape),
-				         "\x1b[48;2;%d;%d;%dm\x1b[K\x1b[48;2;%d;%d;%dm",
-				         THEME_CURSOR_LINE.red, THEME_CURSOR_LINE.green,
-				         THEME_CURSOR_LINE.blue,
+				if (editor.color_column > 0) {
+					/*
+					 * Cursor line with color column: calculate position
+					 * and draw the column marker with cursor line background.
+					 */
+					uint32_t line_visual_width = 0;
+					for (uint32_t i = 0; i < line->cell_count; i++) {
+						uint32_t cp = line->cells[i].codepoint;
+						if (cp == '\t') {
+							line_visual_width += TAB_STOP_WIDTH -
+								(line_visual_width % TAB_STOP_WIDTH);
+						} else {
+							int w = utflite_codepoint_width(cp);
+							line_visual_width += (w > 0) ? w : 1;
+						}
+					}
+					uint32_t col_pos = editor.color_column - 1;
+					if (col_pos >= line_visual_width &&
+					    col_pos < line_visual_width + (uint32_t)text_area_width) {
+						/* Set cursor line bg and fill to column */
+						char cursor_bg[48];
+						snprintf(cursor_bg, sizeof(cursor_bg),
+						         "\x1b[48;2;%d;%d;%dm",
+						         THEME_CURSOR_LINE.red,
+						         THEME_CURSOR_LINE.green,
+						         THEME_CURSOR_LINE.blue);
+						output_buffer_append_string(output, cursor_bg);
+						uint32_t spaces_before = col_pos - line_visual_width;
+						for (uint32_t i = 0; i < spaces_before; i++) {
+							output_buffer_append_string(output, " ");
+						}
+						/* Draw color column marker */
+						char col_escape[64];
+						snprintf(col_escape, sizeof(col_escape),
+						         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
+						         THEME_COLOR_COLUMN.red,
+						         THEME_COLOR_COLUMN.green,
+						         THEME_COLOR_COLUMN.blue,
+						         THEME_CURSOR_LINE.red,
+						         THEME_CURSOR_LINE.green,
+						         THEME_CURSOR_LINE.blue);
+						output_buffer_append_string(output, col_escape);
+					} else {
+						/* Column not in visible area, just fill */
+						char fill_escape[64];
+						snprintf(fill_escape, sizeof(fill_escape),
+						         "\x1b[48;2;%d;%d;%dm\x1b[K",
+						         THEME_CURSOR_LINE.red,
+						         THEME_CURSOR_LINE.green,
+						         THEME_CURSOR_LINE.blue);
+						output_buffer_append_string(output, fill_escape);
+					}
+				} else {
+					char fill_escape[64];
+					snprintf(fill_escape, sizeof(fill_escape),
+					         "\x1b[48;2;%d;%d;%dm\x1b[K",
+					         THEME_CURSOR_LINE.red,
+					         THEME_CURSOR_LINE.green,
+					         THEME_CURSOR_LINE.blue);
+					output_buffer_append_string(output, fill_escape);
+				}
+				/* Reset to normal background */
+				char reset_bg[48];
+				snprintf(reset_bg, sizeof(reset_bg),
+				         "\x1b[48;2;%d;%d;%dm",
 				         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
 				         THEME_BACKGROUND.blue);
-				output_buffer_append_string(output, fill_escape);
+				output_buffer_append_string(output, reset_bg);
+			} else if (editor.color_column > 0) {
+				/*
+				 * Draw color column marker in empty area if applicable.
+				 * Calculate where we are and if the color column is visible.
+				 */
+				uint32_t line_visual_width = 0;
+				line_warm(line, &editor.buffer);
+				for (uint32_t i = 0; i < line->cell_count; i++) {
+					uint32_t cp = line->cells[i].codepoint;
+					if (cp == '\t') {
+						line_visual_width += TAB_STOP_WIDTH -
+							(line_visual_width % TAB_STOP_WIDTH);
+					} else {
+						int w = utflite_codepoint_width(cp);
+						line_visual_width += (w > 0) ? w : 1;
+					}
+				}
+				uint32_t col_pos = editor.color_column - 1;
+				if (col_pos >= line_visual_width &&
+				    col_pos < line_visual_width + (uint32_t)text_area_width) {
+					uint32_t spaces_before = col_pos - line_visual_width;
+					for (uint32_t i = 0; i < spaces_before; i++) {
+						output_buffer_append_string(output, " ");
+					}
+					char col_escape[64];
+					snprintf(col_escape, sizeof(col_escape),
+					         "\x1b[48;2;%d;%d;%dm \x1b[48;2;%d;%d;%dm\x1b[K",
+					         THEME_COLOR_COLUMN.red, THEME_COLOR_COLUMN.green,
+					         THEME_COLOR_COLUMN.blue,
+					         THEME_BACKGROUND.red, THEME_BACKGROUND.green,
+					         THEME_BACKGROUND.blue);
+					output_buffer_append_string(output, col_escape);
+				}
 			}
 
 			/* Advance to next segment or line */
@@ -7335,6 +7533,27 @@ static void editor_process_keypress(void)
 			editor.show_line_numbers = !editor.show_line_numbers;
 			editor_update_gutter_width();
 			editor_set_status_message("Line numbers %s", editor.show_line_numbers ? "on" : "off");
+			break;
+
+		case KEY_F3:
+			editor.show_whitespace = !editor.show_whitespace;
+			editor_set_status_message("Whitespace %s", editor.show_whitespace ? "visible" : "hidden");
+			break;
+
+		case KEY_F4:
+			/* Cycle color column: 0 -> 80 -> 120 -> 0 */
+			if (editor.color_column == 0) {
+				editor.color_column = 80;
+			} else if (editor.color_column == 80) {
+				editor.color_column = 120;
+			} else {
+				editor.color_column = 0;
+			}
+			if (editor.color_column > 0) {
+				editor_set_status_message("Color column at %u", editor.color_column);
+			} else {
+				editor_set_status_message("Color column off");
+			}
 			break;
 
 		case KEY_ALT_Z:
