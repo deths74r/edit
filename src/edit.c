@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.19.0"
+#define EDIT_VERSION "0.20.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -68,6 +68,9 @@
 
 /* Starting allocation size for the output buffer used in rendering. */
 #define INITIAL_OUTPUT_CAPACITY 4096
+
+/* Maximum number of simultaneous cursors for multi-cursor editing. */
+#define MAX_CURSORS 100
 
 /*****************************************************************************
  * Data Structures
@@ -677,6 +680,19 @@ struct output_buffer {
 	size_t capacity;
 };
 
+/*
+ * A single cursor with optional selection for multi-cursor editing.
+ * When cursor_count > 0, we use the cursors array instead of the
+ * legacy cursor_row/cursor_column fields.
+ */
+struct cursor {
+	uint32_t row;
+	uint32_t column;
+	uint32_t anchor_row;      /* Selection anchor (same as row/col if no selection) */
+	uint32_t anchor_column;
+	bool has_selection;
+};
+
 /* Global editor state including the buffer, cursor position, scroll
  * offsets, screen dimensions, and UI settings. */
 struct editor_state {
@@ -731,6 +747,12 @@ struct editor_state {
 	bool show_whitespace;        /* Render whitespace characters visibly */
 	uint32_t color_column;       /* Column to highlight (0 = off) */
 	enum color_column_style color_column_style;  /* Visual style for column */
+
+	/* Multi-cursor support. When cursor_count > 0, cursors[] is used
+	 * instead of cursor_row/cursor_column/selection_* fields. */
+	struct cursor cursors[MAX_CURSORS];
+	uint32_t cursor_count;       /* Number of active cursors (0 = single cursor mode) */
+	uint32_t primary_cursor;     /* Index of main cursor for scrolling */
 };
 
 /*****************************************************************************
@@ -2563,6 +2585,8 @@ static void editor_init(void)
 	editor.show_whitespace = false;
 	editor.color_column = 0;
 	editor.color_column_style = COLOR_COLUMN_SOLID;
+	editor.cursor_count = 0;
+	editor.primary_cursor = 0;
 }
 
 /* Start a new selection at the current cursor position. The anchor is set
@@ -2579,6 +2603,193 @@ static void selection_clear(void)
 {
 	editor.selection_active = false;
 }
+
+/*****************************************************************************
+ * Multi-Cursor Management
+ *****************************************************************************/
+
+/*
+ * Compare two cursors by position (for qsort).
+ * Sorts by row first, then by column.
+ */
+static int cursor_compare(const void *a, const void *b)
+{
+	const struct cursor *cursor_a = (const struct cursor *)a;
+	const struct cursor *cursor_b = (const struct cursor *)b;
+
+	if (cursor_a->row != cursor_b->row) {
+		return (cursor_a->row < cursor_b->row) ? -1 : 1;
+	}
+	if (cursor_a->column != cursor_b->column) {
+		return (cursor_a->column < cursor_b->column) ? -1 : 1;
+	}
+	return 0;
+}
+
+/*
+ * Transition from single-cursor to multi-cursor mode.
+ * Copies current cursor/selection state to cursors[0].
+ */
+static void multicursor_enter(void)
+{
+	if (editor.cursor_count > 0) {
+		return;  /* Already in multi-cursor mode */
+	}
+
+	editor.cursors[0].row = editor.cursor_row;
+	editor.cursors[0].column = editor.cursor_column;
+	editor.cursors[0].anchor_row = editor.selection_anchor_row;
+	editor.cursors[0].anchor_column = editor.selection_anchor_column;
+	editor.cursors[0].has_selection = editor.selection_active;
+
+	editor.cursor_count = 1;
+	editor.primary_cursor = 0;
+}
+
+/*
+ * Exit multi-cursor mode, keeping only the primary cursor.
+ */
+static void multicursor_exit(void)
+{
+	if (editor.cursor_count == 0) {
+		return;
+	}
+
+	/* Copy primary cursor back to legacy fields */
+	struct cursor *primary = &editor.cursors[editor.primary_cursor];
+	editor.cursor_row = primary->row;
+	editor.cursor_column = primary->column;
+	editor.selection_anchor_row = primary->anchor_row;
+	editor.selection_anchor_column = primary->anchor_column;
+	editor.selection_active = primary->has_selection;
+
+	editor.cursor_count = 0;
+
+	editor_set_status_message("Exited multi-cursor mode");
+}
+
+/*
+ * Sort cursors by position and remove duplicates.
+ */
+static void multicursor_normalize(void)
+{
+	if (editor.cursor_count <= 1) {
+		return;
+	}
+
+	/* Sort by position */
+	qsort(editor.cursors, editor.cursor_count,
+	      sizeof(struct cursor), cursor_compare);
+
+	/* Remove duplicates (cursors at same position) */
+	uint32_t write_index = 1;
+	for (uint32_t read_index = 1; read_index < editor.cursor_count; read_index++) {
+		struct cursor *prev = &editor.cursors[write_index - 1];
+		struct cursor *curr = &editor.cursors[read_index];
+
+		if (curr->row != prev->row || curr->column != prev->column) {
+			if (write_index != read_index) {
+				editor.cursors[write_index] = *curr;
+			}
+			write_index++;
+		}
+	}
+	editor.cursor_count = write_index;
+
+	/* Ensure primary cursor index is valid */
+	if (editor.primary_cursor >= editor.cursor_count) {
+		editor.primary_cursor = editor.cursor_count - 1;
+	}
+}
+
+/*
+ * Add a new cursor at the specified position with selection.
+ * Returns true if added successfully.
+ */
+static bool multicursor_add(uint32_t row, uint32_t column,
+                            uint32_t anchor_row, uint32_t anchor_column,
+                            bool has_selection)
+{
+	if (editor.cursor_count == 0) {
+		multicursor_enter();
+	}
+
+	if (editor.cursor_count >= MAX_CURSORS) {
+		editor_set_status_message("Maximum cursors reached (%d)", MAX_CURSORS);
+		return false;
+	}
+
+	/* Check for duplicate position */
+	for (uint32_t i = 0; i < editor.cursor_count; i++) {
+		if (editor.cursors[i].anchor_row == anchor_row &&
+		    editor.cursors[i].anchor_column == anchor_column) {
+			return false;  /* Already have cursor here */
+		}
+	}
+
+	struct cursor *new_cursor = &editor.cursors[editor.cursor_count];
+	new_cursor->row = row;
+	new_cursor->column = column;
+	new_cursor->anchor_row = anchor_row;
+	new_cursor->anchor_column = anchor_column;
+	new_cursor->has_selection = has_selection;
+
+	editor.cursor_count++;
+
+	return true;
+}
+
+/*
+ * Check if a position is within any cursor's selection.
+ */
+static bool multicursor_selection_contains(uint32_t row, uint32_t column)
+{
+	if (editor.cursor_count == 0) {
+		return false;
+	}
+
+	for (uint32_t i = 0; i < editor.cursor_count; i++) {
+		struct cursor *cursor = &editor.cursors[i];
+		if (!cursor->has_selection) {
+			continue;
+		}
+
+		/* Determine selection bounds */
+		uint32_t start_row, start_column, end_row, end_column;
+		if (cursor->anchor_row < cursor->row ||
+		    (cursor->anchor_row == cursor->row &&
+		     cursor->anchor_column <= cursor->column)) {
+			start_row = cursor->anchor_row;
+			start_column = cursor->anchor_column;
+			end_row = cursor->row;
+			end_column = cursor->column;
+		} else {
+			start_row = cursor->row;
+			start_column = cursor->column;
+			end_row = cursor->anchor_row;
+			end_column = cursor->anchor_column;
+		}
+
+		/* Check if position is within bounds */
+		if (row < start_row || row > end_row) {
+			continue;
+		}
+		if (row == start_row && column < start_column) {
+			continue;
+		}
+		if (row == end_row && column >= end_column) {
+			continue;
+		}
+
+		return true;
+	}
+
+	return false;
+}
+
+/*****************************************************************************
+ * Selection Range Functions
+ *****************************************************************************/
 
 /* Get the normalized selection range (start always before end). The selection
  * spans from (start_row, start_col) to (end_row, end_col) where start <= end. */
@@ -4981,6 +5192,140 @@ static void editor_handle_backspace(void)
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 }
 
+/*****************************************************************************
+ * Multi-Cursor Editing
+ *****************************************************************************/
+
+/*
+ * Insert a character at all cursor positions.
+ * Processes cursors in reverse order to preserve positions.
+ */
+static void multicursor_insert_character(uint32_t codepoint)
+{
+	if (editor.cursor_count == 0) {
+		editor_insert_character(codepoint);
+		return;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	/* Process in reverse order (bottom to top) so positions stay valid */
+	for (int i = (int)editor.cursor_count - 1; i >= 0; i--) {
+		struct cursor *cursor = &editor.cursors[i];
+
+		/* TODO: Delete selection at this cursor if any */
+
+		/* Insert character */
+		undo_record_insert_char(&editor.buffer, cursor->row,
+		                        cursor->column, codepoint);
+		buffer_insert_cell_at_column(&editor.buffer, cursor->row,
+		                             cursor->column, codepoint);
+
+		/* Update cursor position */
+		cursor->column++;
+		cursor->anchor_row = cursor->row;
+		cursor->anchor_column = cursor->column;
+		cursor->has_selection = false;
+
+		/* Adjust all earlier cursors on the same line */
+		for (int j = i - 1; j >= 0; j--) {
+			if (editor.cursors[j].row == cursor->row) {
+				editor.cursors[j].column++;
+				if (editor.cursors[j].anchor_row == cursor->row) {
+					editor.cursors[j].anchor_column++;
+				}
+			}
+		}
+	}
+
+	editor.buffer.is_modified = true;
+	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
+	undo_end_group(&editor.buffer);
+
+	/* Update primary cursor in legacy fields for rendering */
+	struct cursor *primary = &editor.cursors[editor.primary_cursor];
+	editor.cursor_row = primary->row;
+	editor.cursor_column = primary->column;
+}
+
+/*
+ * Delete character before all cursor positions (backspace).
+ * Processes cursors in reverse order to preserve positions.
+ */
+static void multicursor_backspace(void)
+{
+	if (editor.cursor_count == 0) {
+		editor_handle_backspace();
+		return;
+	}
+
+	undo_begin_group(&editor.buffer);
+
+	/* Process in reverse order */
+	for (int i = (int)editor.cursor_count - 1; i >= 0; i--) {
+		struct cursor *cursor = &editor.cursors[i];
+
+		/* TODO: Delete selection at this cursor if any */
+
+		if (cursor->column == 0 && cursor->row == 0) {
+			continue;  /* Nothing to delete at buffer start */
+		}
+
+		if (cursor->column > 0) {
+			/* Delete character before cursor on same line */
+			struct line *line = &editor.buffer.lines[cursor->row];
+			line_warm(line, &editor.buffer);
+
+			uint32_t delete_column = cursor->column - 1;
+			uint32_t deleted_codepoint = line->cells[delete_column].codepoint;
+
+			undo_record_delete_char(&editor.buffer, cursor->row,
+			                        delete_column, deleted_codepoint);
+			line_delete_cell(line, delete_column);
+
+			cursor->column--;
+			cursor->anchor_column = cursor->column;
+
+			/* Update line metadata */
+			neighbor_compute_line(line);
+			syntax_highlight_line(line, &editor.buffer, cursor->row);
+			line_invalidate_wrap_cache(line);
+
+			/* Adjust earlier cursors on same line */
+			for (int j = i - 1; j >= 0; j--) {
+				if (editor.cursors[j].row == cursor->row &&
+				    editor.cursors[j].column > delete_column) {
+					editor.cursors[j].column--;
+				}
+				if (editor.cursors[j].anchor_row == cursor->row &&
+				    editor.cursors[j].anchor_column > delete_column) {
+					editor.cursors[j].anchor_column--;
+				}
+			}
+		} else {
+			/* At start of line - skip line joining in multi-cursor mode */
+			/* This is a limitation we accept for Phase 20 */
+		}
+	}
+
+	editor.buffer.is_modified = true;
+	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
+	undo_end_group(&editor.buffer);
+
+	multicursor_normalize();
+
+	/* Update primary cursor in legacy fields */
+	if (editor.cursor_count > 0) {
+		struct cursor *primary = &editor.cursors[editor.primary_cursor];
+		editor.cursor_row = primary->row;
+		editor.cursor_column = primary->column;
+	}
+}
+
+/*****************************************************************************
+ * File Operations
+ *****************************************************************************/
+
 /*
  * Save the buffer to disk using Ctrl-S. Displays an error in the status
  * bar if no filename is set or if the save fails. Resets the quit
@@ -5255,7 +5600,7 @@ static void editor_select_next_occurrence(void)
 	}
 
 	/*
-	 * Selection exists - find next occurrence.
+	 * Selection exists - find next occurrence and ADD a cursor.
 	 */
 	size_t text_length;
 	char *text = selection_get_text(&text_length);
@@ -5271,47 +5616,79 @@ static void editor_select_next_occurrence(void)
 	selection_get_range(&selection_start_row, &selection_start_column,
 	                    &selection_end_row, &selection_end_column);
 
-	/* Count cells in selection for positioning new selection */
+	/* Count cells in selection for positioning new cursor */
 	uint32_t selection_cells = selection_end_column - selection_start_column;
 	if (selection_end_row != selection_start_row) {
-		/* Multi-line selection - just use text length as approximation */
+		/* Multi-line selection - use text length as approximation */
 		selection_cells = search_query_cell_count(text, text_length);
 	}
 
-	/* Start searching after current selection */
+	/* Determine search start position */
+	uint32_t search_row, search_column;
+	if (editor.cursor_count > 0) {
+		/* Multi-cursor mode: search after the last cursor */
+		struct cursor *last = &editor.cursors[editor.cursor_count - 1];
+		search_row = last->row;
+		search_column = last->column;
+	} else {
+		search_row = selection_end_row;
+		search_column = selection_end_column;
+	}
+
 	uint32_t found_row, found_column;
 	if (find_next_occurrence(text, text_length,
-	                         selection_end_row, selection_end_column,
+	                         search_row, search_column,
 	                         true,  /* wrap */
 	                         &found_row, &found_column)) {
 
-		/* Check if we found the same position (only occurrence) */
-		if (found_row == selection_start_row && found_column == selection_start_column) {
-			editor_set_status_message("Only occurrence");
-		} else {
-			/* Move selection to new occurrence */
-			editor.selection_anchor_row = found_row;
-			editor.selection_anchor_column = found_column;
-			editor.cursor_row = found_row;
-			editor.cursor_column = found_column + selection_cells;
+		/* Check if this is the original selection (wrapped around) */
+		bool is_original = (found_row == selection_start_row &&
+		                    found_column == selection_start_column);
 
-			/* Clamp cursor column to line length */
-			if (editor.cursor_row < editor.buffer.line_count) {
-				struct line *line = &editor.buffer.lines[editor.cursor_row];
+		/* Check if we already have a cursor here */
+		bool already_exists = false;
+		if (editor.cursor_count > 0) {
+			for (uint32_t i = 0; i < editor.cursor_count; i++) {
+				if (editor.cursors[i].anchor_row == found_row &&
+				    editor.cursors[i].anchor_column == found_column) {
+					already_exists = true;
+					break;
+				}
+			}
+		}
+
+		if (is_original || already_exists) {
+			uint32_t count = editor.cursor_count > 0 ? editor.cursor_count : 1;
+			editor_set_status_message("%u cursor%s (all occurrences)",
+			                          count, count > 1 ? "s" : "");
+		} else {
+			/* Calculate new cursor end position */
+			uint32_t new_cursor_column = found_column + selection_cells;
+
+			/* Clamp to line length */
+			if (found_row < editor.buffer.line_count) {
+				struct line *line = &editor.buffer.lines[found_row];
 				line_warm(line, &editor.buffer);
-				if (editor.cursor_column > line->cell_count) {
-					editor.cursor_column = line->cell_count;
+				if (new_cursor_column > line->cell_count) {
+					new_cursor_column = line->cell_count;
 				}
 			}
 
-			/* Ensure new position is visible */
-			if (editor.cursor_row < editor.row_offset) {
-				editor.row_offset = editor.cursor_row;
-			} else if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
-				editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
-			}
+			/* Add new cursor at found position */
+			if (multicursor_add(found_row, new_cursor_column,
+			                    found_row, found_column, true)) {
+				multicursor_normalize();
 
-			editor_set_status_message("Next occurrence");
+				editor_set_status_message("%u cursors",
+				                          editor.cursor_count);
+
+				/* Scroll to show new cursor if needed */
+				if (found_row < editor.row_offset) {
+					editor.row_offset = found_row;
+				} else if (found_row >= editor.row_offset + editor.screen_rows) {
+					editor.row_offset = found_row - editor.screen_rows + 1;
+				}
+			}
 		}
 	} else {
 		editor_set_status_message("No more occurrences");
@@ -6284,7 +6661,8 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			highlight = 3;  /* Current search match */
 		} else if (match_type == 1) {
 			highlight = 2;  /* Other search match */
-		} else if (selection_contains(file_row, cell_index)) {
+		} else if (selection_contains(file_row, cell_index) ||
+		           multicursor_selection_contains(file_row, cell_index)) {
 			highlight = 1;  /* Selection */
 		} else if (is_trailing_whitespace(line, cell_index)) {
 			highlight = 4;  /* Trailing whitespace */
@@ -8037,7 +8415,7 @@ static void editor_process_keypress(void)
 
 		case KEY_BACKSPACE:
 		case CONTROL_KEY('h'):
-			editor_handle_backspace();
+			multicursor_backspace();
 			break;
 
 		case KEY_DELETE:
@@ -8049,8 +8427,12 @@ static void editor_process_keypress(void)
 			break;
 
 		case '\x1b':
-			/* Escape clears selection */
-			selection_clear();
+			/* Escape exits multi-cursor mode first, then clears selection */
+			if (editor.cursor_count > 0) {
+				multicursor_exit();
+			} else {
+				selection_clear();
+			}
 			break;
 
 		case CONTROL_KEY('l'):
@@ -8077,7 +8459,7 @@ static void editor_process_keypress(void)
 		default:
 			/* Insert printable ASCII (32-126) and Unicode codepoints (>= 128) */
 			if ((key >= 32 && key < 127) || key >= 128) {
-				editor_insert_character((uint32_t)key);
+				multicursor_insert_character((uint32_t)key);
 			}
 			break;
 	}
