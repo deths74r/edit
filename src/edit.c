@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 23A: Theme Infrastructure
+ * Phase 23B: Dialog Panel System
  *****************************************************************************/
 
 /*****************************************************************************
@@ -36,7 +36,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.23.0"
+#define EDIT_VERSION "0.23.1"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -78,6 +78,9 @@
 /* Theme directory and config file locations (relative to HOME) */
 #define THEME_DIR "/.edit/themes/"
 #define CONFIG_FILE "/.editrc"
+
+/* Double-click timing threshold for dialogs (milliseconds) */
+#define DIALOG_DOUBLE_CLICK_MS 400
 
 /*****************************************************************************
  * Data Structures
@@ -398,6 +401,12 @@ struct theme {
 	struct syntax_color color_column;     /* Color column background */
 	struct syntax_color color_column_line; /* Color column line character */
 
+	/* Dialog panel colors */
+	struct syntax_color dialog_bg;        /* Dialog background */
+	struct syntax_color dialog_fg;        /* Dialog text foreground */
+	struct syntax_color dialog_highlight_bg; /* Selected item background */
+	struct syntax_color dialog_highlight_fg; /* Selected item foreground */
+
 	/* Syntax highlighting colors (indexed by enum syntax_token) */
 	struct syntax_color syntax[SYNTAX_TOKEN_COUNT];
 };
@@ -409,6 +418,52 @@ static int current_theme_index = 0;
 
 /* Active theme - this is what rendering uses */
 static struct theme active_theme;
+
+/*
+ * Generic dialog state for modal popups.
+ * Used by file browser, theme picker, and future dialogs.
+ */
+struct dialog_state {
+	bool active;                    /* Is dialog currently open? */
+	int selected_index;             /* Currently highlighted item */
+	int scroll_offset;              /* First visible item index */
+	int item_count;                 /* Total number of items */
+	int visible_rows;               /* Number of visible list rows */
+
+	/* Panel dimensions (calculated on draw) */
+	int panel_top;
+	int panel_left;
+	int panel_width;
+	int panel_height;
+
+	/* Mouse interaction */
+	bool mouse_down;                /* Is left button currently held? */
+	struct timespec last_click;     /* For double-click detection */
+	int last_click_index;           /* Item index of last click */
+};
+
+/*
+ * Represents a file or directory entry in the file browser.
+ */
+struct file_list_item {
+	char *display_name;     /* Name with trailing / for directories */
+	char *actual_name;      /* Actual filesystem name */
+	bool is_directory;      /* True if this is a directory */
+};
+
+/*
+ * Result codes for dialog input handling.
+ */
+enum dialog_result {
+	DIALOG_CONTINUE,    /* Continue dialog loop */
+	DIALOG_CONFIRM,     /* User confirmed selection (Enter or double-click) */
+	DIALOG_CANCEL,      /* User cancelled (Escape) */
+	DIALOG_NAVIGATE     /* Navigation occurred, redraw needed */
+};
+
+/* Dialog mouse mode flag - when true, mouse events go to dialog handler */
+static bool dialog_mouse_mode = false;
+static struct mouse_input dialog_last_mouse = {0};
 
 /*****************************************************************************
  * WCAG Color Contrast Utilities
@@ -578,6 +633,12 @@ static struct theme theme_create_default(void)
 	t.trailing_ws = (struct syntax_color){0x50, 0x30, 0x30};
 	t.color_column = (struct syntax_color){0x2A, 0x2A, 0x2A};
 	t.color_column_line = (struct syntax_color){0x45, 0x45, 0x45};
+
+	/* Dialog panel colors */
+	t.dialog_bg = (struct syntax_color){0x1E, 0x1E, 0x1E};
+	t.dialog_fg = (struct syntax_color){0xE0, 0xE0, 0xE0};
+	t.dialog_highlight_bg = (struct syntax_color){0x3D, 0x5A, 0x80};
+	t.dialog_highlight_fg = (struct syntax_color){0xFF, 0xFF, 0xFF};
 
 	/* Syntax colors - Tritanopia-friendly palette */
 	t.syntax[SYNTAX_NORMAL]       = (struct syntax_color){0xE0, 0xE0, 0xE0};
@@ -763,6 +824,19 @@ static struct theme *theme_parse_file(const char *filepath)
 		}
 		else if (strcmp(key, "color_column_line") == 0 && color_parse_hex(value, &color)) {
 			t->color_column_line = color;
+		}
+		/* Dialog colors */
+		else if (strcmp(key, "dialog_bg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_bg = color;
+		}
+		else if (strcmp(key, "dialog_fg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_fg = color;
+		}
+		else if (strcmp(key, "dialog_highlight_bg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_highlight_bg = color;
+		}
+		else if (strcmp(key, "dialog_highlight_fg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_highlight_fg = color;
 		}
 		/* Syntax colors */
 		else if (strcmp(key, "syntax_normal") == 0 && color_parse_hex(value, &color)) {
@@ -969,6 +1043,10 @@ static void theme_apply(struct theme *t)
 
 	/* Color column line against background */
 	active_theme.color_column_line = color_ensure_contrast(t->color_column_line, active_theme.background);
+
+	/* Dialog colors against dialog backgrounds */
+	active_theme.dialog_fg = color_ensure_contrast(t->dialog_fg, active_theme.dialog_bg);
+	active_theme.dialog_highlight_fg = color_ensure_contrast(t->dialog_highlight_fg, active_theme.dialog_highlight_bg);
 
 	/* Syntax colors against main background */
 	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {
@@ -2314,6 +2392,12 @@ static void output_buffer_append_string(struct output_buffer *output, const char
 	output_buffer_append(output, text, strlen(text));
 }
 
+/* Appends a single character to the output buffer. */
+static void output_buffer_append_char(struct output_buffer *output, char character)
+{
+	output_buffer_append(output, &character, 1);
+}
+
 /* Writes all buffered data to stdout and resets the buffer length. */
 static void output_buffer_flush(struct output_buffer *output)
 {
@@ -2463,7 +2547,11 @@ static int input_read_key(void)
 				/* SGR mouse event: \x1b[<button;column;row{M|m} */
 				struct mouse_input mouse = input_parse_sgr_mouse();
 				if (mouse.event != MOUSE_NONE) {
-					editor_handle_mouse(&mouse);
+					if (dialog_mouse_mode) {
+						dialog_last_mouse = mouse;
+					} else {
+						editor_handle_mouse(&mouse);
+					}
 				}
 				return KEY_MOUSE_EVENT;
 			} else {
@@ -8229,6 +8317,615 @@ static void render_refresh_screen(void)
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
+}
+
+/*****************************************************************************
+ * Dialog Panel System
+ *****************************************************************************/
+
+/*
+ * Free a single file list item and its allocated strings.
+ */
+static void file_list_item_free(struct file_list_item *item)
+{
+	if (item == NULL) {
+		return;
+	}
+	free(item->display_name);
+	free(item->actual_name);
+	item->display_name = NULL;
+	item->actual_name = NULL;
+}
+
+/*
+ * Free an array of file list items.
+ */
+static void file_list_free(struct file_list_item *items, int count)
+{
+	if (items == NULL) {
+		return;
+	}
+	for (int i = 0; i < count; i++) {
+		file_list_item_free(&items[i]);
+	}
+	free(items);
+}
+
+/*
+ * Comparison function for sorting file list items.
+ * Directories come first, then alphabetical by display name.
+ */
+static int file_list_compare(const void *first, const void *second)
+{
+	const struct file_list_item *item_first = first;
+	const struct file_list_item *item_second = second;
+
+	/* Directories come before files */
+	if (item_first->is_directory && !item_second->is_directory) {
+		return -1;
+	}
+	if (!item_first->is_directory && item_second->is_directory) {
+		return 1;
+	}
+
+	/* Alphabetical comparison within same type */
+	return strcmp(item_first->display_name, item_second->display_name);
+}
+
+/*
+ * Read directory contents and return sorted file list.
+ * Caller must free the returned array with file_list_free().
+ * Returns NULL on error and sets count to 0.
+ */
+static struct file_list_item *file_list_read_directory(const char *path, int *count)
+{
+	*count = 0;
+
+	DIR *directory = opendir(path);
+	if (directory == NULL) {
+		return NULL;
+	}
+
+	/* First pass: count entries */
+	int capacity = 64;
+	int entry_count = 0;
+	struct file_list_item *items = malloc(capacity * sizeof(struct file_list_item));
+	if (items == NULL) {
+		closedir(directory);
+		return NULL;
+	}
+
+	struct dirent *entry;
+	while ((entry = readdir(directory)) != NULL) {
+		/* Skip . and .. entries */
+		if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) {
+			continue;
+		}
+
+		/* Expand array if needed */
+		if (entry_count >= capacity) {
+			capacity *= 2;
+			struct file_list_item *new_items = realloc(items, capacity * sizeof(struct file_list_item));
+			if (new_items == NULL) {
+				file_list_free(items, entry_count);
+				closedir(directory);
+				return NULL;
+			}
+			items = new_items;
+		}
+
+		/* Build full path to check if directory */
+		size_t path_length = strlen(path);
+		size_t name_length = strlen(entry->d_name);
+		char *full_path = malloc(path_length + name_length + 2);
+		if (full_path == NULL) {
+			file_list_free(items, entry_count);
+			closedir(directory);
+			return NULL;
+		}
+		memcpy(full_path, path, path_length);
+		if (path_length > 0 && path[path_length - 1] != '/') {
+			full_path[path_length] = '/';
+			path_length++;
+		}
+		memcpy(full_path + path_length, entry->d_name, name_length + 1);
+
+		struct stat file_stat;
+		bool is_directory = false;
+		if (stat(full_path, &file_stat) == 0) {
+			is_directory = S_ISDIR(file_stat.st_mode);
+		}
+		free(full_path);
+
+		/* Allocate display name (with trailing / for directories) */
+		char *display_name;
+		if (is_directory) {
+			display_name = malloc(name_length + 2);
+			if (display_name == NULL) {
+				file_list_free(items, entry_count);
+				closedir(directory);
+				return NULL;
+			}
+			memcpy(display_name, entry->d_name, name_length);
+			display_name[name_length] = '/';
+			display_name[name_length + 1] = '\0';
+		} else {
+			display_name = strdup(entry->d_name);
+			if (display_name == NULL) {
+				file_list_free(items, entry_count);
+				closedir(directory);
+				return NULL;
+			}
+		}
+
+		/* Allocate actual name */
+		char *actual_name = strdup(entry->d_name);
+		if (actual_name == NULL) {
+			free(display_name);
+			file_list_free(items, entry_count);
+			closedir(directory);
+			return NULL;
+		}
+
+		items[entry_count].display_name = display_name;
+		items[entry_count].actual_name = actual_name;
+		items[entry_count].is_directory = is_directory;
+		entry_count++;
+	}
+
+	closedir(directory);
+
+	/* Sort the list: directories first, then alphabetically */
+	qsort(items, entry_count, sizeof(struct file_list_item), file_list_compare);
+
+	*count = entry_count;
+	return items;
+}
+
+/*
+ * Calculate dialog panel dimensions based on screen size.
+ * Panel is centered, 50% height, 70% width, with minimum sizes.
+ */
+static void dialog_calculate_dimensions(struct dialog_state *dialog)
+{
+	const int minimum_width = 40;
+	const int minimum_height = 10;
+
+	/* 70% of screen width, at least minimum */
+	dialog->panel_width = (editor.screen_columns * 70) / 100;
+	if (dialog->panel_width < minimum_width) {
+		dialog->panel_width = minimum_width;
+	}
+	if (dialog->panel_width > (int)editor.screen_columns - 2) {
+		dialog->panel_width = (int)editor.screen_columns - 2;
+	}
+
+	/* 50% of screen height, at least minimum */
+	dialog->panel_height = (editor.screen_rows * 50) / 100;
+	if (dialog->panel_height < minimum_height) {
+		dialog->panel_height = minimum_height;
+	}
+	if (dialog->panel_height > (int)editor.screen_rows - 2) {
+		dialog->panel_height = (int)editor.screen_rows - 2;
+	}
+
+	/* Center on screen */
+	dialog->panel_left = (editor.screen_columns - dialog->panel_width) / 2;
+	dialog->panel_top = (editor.screen_rows - dialog->panel_height) / 2;
+
+	/* Content area: subtract 2 for header and footer */
+	dialog->visible_rows = dialog->panel_height - 2;
+	if (dialog->visible_rows < 1) {
+		dialog->visible_rows = 1;
+	}
+}
+
+/*
+ * Ensure the selected item is visible by adjusting scroll offset.
+ */
+static void dialog_ensure_visible(struct dialog_state *dialog)
+{
+	if (dialog->selected_index < dialog->scroll_offset) {
+		dialog->scroll_offset = dialog->selected_index;
+	}
+	if (dialog->selected_index >= dialog->scroll_offset + dialog->visible_rows) {
+		dialog->scroll_offset = dialog->selected_index - dialog->visible_rows + 1;
+	}
+}
+
+/*
+ * Clamp selection index to valid range and ensure visibility.
+ */
+static void dialog_clamp_selection(struct dialog_state *dialog)
+{
+	if (dialog->selected_index < 0) {
+		dialog->selected_index = 0;
+	}
+	if (dialog->selected_index >= dialog->item_count) {
+		dialog->selected_index = dialog->item_count - 1;
+	}
+	if (dialog->selected_index < 0) {
+		dialog->selected_index = 0;
+	}
+	dialog_ensure_visible(dialog);
+}
+
+/*
+ * Set foreground color for dialog output.
+ */
+static void dialog_set_fg(struct output_buffer *output, struct syntax_color color)
+{
+	char escape[32];
+	snprintf(escape, sizeof(escape), "\x1b[38;2;%d;%d;%dm",
+		color.red, color.green, color.blue);
+	output_buffer_append_string(output, escape);
+}
+
+/*
+ * Set background color for dialog output.
+ */
+static void dialog_set_bg(struct output_buffer *output, struct syntax_color color)
+{
+	char escape[32];
+	snprintf(escape, sizeof(escape), "\x1b[48;2;%d;%d;%dm",
+		color.red, color.green, color.blue);
+	output_buffer_append_string(output, escape);
+}
+
+/*
+ * Move cursor to dialog row and column (1-based terminal coordinates).
+ */
+static void dialog_goto(struct output_buffer *output, int row, int column)
+{
+	char escape[32];
+	snprintf(escape, sizeof(escape), "\x1b[%d;%dH", row, column);
+	output_buffer_append_string(output, escape);
+}
+
+/*
+ * Draw the dialog header with title centered.
+ */
+static void dialog_draw_header(struct output_buffer *output,
+			       struct dialog_state *dialog,
+			       const char *title)
+{
+	dialog_goto(output, dialog->panel_top + 1, dialog->panel_left + 1);
+	dialog_set_bg(output, active_theme.dialog_bg);
+	dialog_set_fg(output, active_theme.dialog_fg);
+
+	/* Calculate title position for centering */
+	int title_length = strlen(title);
+	int padding_left = (dialog->panel_width - title_length) / 2;
+	if (padding_left < 1) {
+		padding_left = 1;
+	}
+
+	/* Draw header with centered title */
+	for (int i = 0; i < dialog->panel_width; i++) {
+		if (i >= padding_left && i < padding_left + title_length) {
+			output_buffer_append_char(output, title[i - padding_left]);
+		} else {
+			output_buffer_append_char(output, ' ');
+		}
+	}
+}
+
+/*
+ * Draw the dialog footer with hint text.
+ */
+static void dialog_draw_footer(struct output_buffer *output,
+			       struct dialog_state *dialog,
+			       const char *hint)
+{
+	int footer_row = dialog->panel_top + dialog->panel_height;
+	dialog_goto(output, footer_row, dialog->panel_left + 1);
+	dialog_set_bg(output, active_theme.dialog_bg);
+	dialog_set_fg(output, active_theme.dialog_fg);
+
+	/* Draw hint left-aligned with padding */
+	int hint_length = strlen(hint);
+	int chars_written = 0;
+
+	output_buffer_append_char(output, ' ');
+	chars_written++;
+
+	for (int i = 0; i < hint_length && chars_written < dialog->panel_width - 1; i++) {
+		output_buffer_append_char(output, hint[i]);
+		chars_written++;
+	}
+
+	/* Fill rest with spaces */
+	while (chars_written < dialog->panel_width) {
+		output_buffer_append_char(output, ' ');
+		chars_written++;
+	}
+}
+
+/*
+ * Draw an empty row in the dialog content area.
+ */
+static void dialog_draw_empty_row(struct output_buffer *output,
+				  struct dialog_state *dialog,
+				  int row_index)
+{
+	int screen_row = dialog->panel_top + 2 + row_index;
+	dialog_goto(output, screen_row, dialog->panel_left + 1);
+	dialog_set_bg(output, active_theme.dialog_bg);
+
+	for (int i = 0; i < dialog->panel_width; i++) {
+		output_buffer_append_char(output, ' ');
+	}
+}
+
+/*
+ * Draw a single list item in the dialog.
+ */
+static void dialog_draw_list_item(struct output_buffer *output,
+				  struct dialog_state *dialog,
+				  int row_index,
+				  const char *text,
+				  bool is_selected)
+{
+	int screen_row = dialog->panel_top + 2 + row_index;
+	dialog_goto(output, screen_row, dialog->panel_left + 1);
+
+	if (is_selected) {
+		dialog_set_bg(output, active_theme.dialog_highlight_bg);
+		dialog_set_fg(output, active_theme.dialog_highlight_fg);
+	} else {
+		dialog_set_bg(output, active_theme.dialog_bg);
+		dialog_set_fg(output, active_theme.dialog_fg);
+	}
+
+	/* Draw text with padding */
+	int text_length = strlen(text);
+	int chars_written = 0;
+
+	output_buffer_append_char(output, ' ');
+	chars_written++;
+
+	for (int i = 0; i < text_length && chars_written < dialog->panel_width - 1; i++) {
+		output_buffer_append_char(output, text[i]);
+		chars_written++;
+	}
+
+	/* Fill rest with spaces */
+	while (chars_written < dialog->panel_width) {
+		output_buffer_append_char(output, ' ');
+		chars_written++;
+	}
+}
+
+/*
+ * Check if a click qualifies as a double-click based on timing and position.
+ */
+static bool dialog_is_double_click(struct dialog_state *dialog, int item_index)
+{
+	struct timespec now;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+
+	/* Check if same item was clicked */
+	if (item_index != dialog->last_click_index) {
+		dialog->last_click = now;
+		dialog->last_click_index = item_index;
+		return false;
+	}
+
+	/* Calculate elapsed milliseconds */
+	long elapsed_ms = (now.tv_sec - dialog->last_click.tv_sec) * 1000 +
+			  (now.tv_nsec - dialog->last_click.tv_nsec) / 1000000;
+
+	dialog->last_click = now;
+	dialog->last_click_index = item_index;
+
+	return elapsed_ms <= DIALOG_DOUBLE_CLICK_MS;
+}
+
+/*
+ * Handle keyboard input for dialog navigation.
+ * Returns the action to take.
+ */
+static enum dialog_result dialog_handle_key(struct dialog_state *dialog, int key)
+{
+	switch (key) {
+		case KEY_ARROW_UP:
+			dialog->selected_index--;
+			dialog_clamp_selection(dialog);
+			return DIALOG_CONTINUE;
+
+		case KEY_ARROW_DOWN:
+			dialog->selected_index++;
+			dialog_clamp_selection(dialog);
+			return DIALOG_CONTINUE;
+
+		case KEY_PAGE_UP:
+			dialog->selected_index -= dialog->visible_rows;
+			dialog_clamp_selection(dialog);
+			return DIALOG_CONTINUE;
+
+		case KEY_PAGE_DOWN:
+			dialog->selected_index += dialog->visible_rows;
+			dialog_clamp_selection(dialog);
+			return DIALOG_CONTINUE;
+
+		case KEY_HOME:
+			dialog->selected_index = 0;
+			dialog_clamp_selection(dialog);
+			return DIALOG_CONTINUE;
+
+		case KEY_END:
+			dialog->selected_index = dialog->item_count - 1;
+			dialog_clamp_selection(dialog);
+			return DIALOG_CONTINUE;
+
+		case '\r':
+		case '\n':
+			return DIALOG_CONFIRM;
+
+		case '\x1b':
+			return DIALOG_CANCEL;
+
+		default:
+			return DIALOG_CONTINUE;
+	}
+}
+
+/*
+ * Handle mouse input for dialog interaction.
+ * Returns the action to take.
+ */
+static enum dialog_result dialog_handle_mouse(struct dialog_state *dialog,
+					      struct mouse_input *mouse)
+{
+	/* Check if click is within dialog bounds */
+	int content_top = dialog->panel_top + 2;
+	int content_bottom = dialog->panel_top + dialog->panel_height - 1;
+	int content_left = dialog->panel_left + 1;
+	int content_right = dialog->panel_left + dialog->panel_width;
+
+	/* Handle scroll wheel */
+	if (mouse->event == MOUSE_SCROLL_UP) {
+		dialog->scroll_offset -= 3;
+		if (dialog->scroll_offset < 0) {
+			dialog->scroll_offset = 0;
+		}
+		return DIALOG_CONTINUE;
+	}
+
+	if (mouse->event == MOUSE_SCROLL_DOWN) {
+		int max_scroll = dialog->item_count - dialog->visible_rows;
+		if (max_scroll < 0) {
+			max_scroll = 0;
+		}
+		dialog->scroll_offset += 3;
+		if (dialog->scroll_offset > max_scroll) {
+			dialog->scroll_offset = max_scroll;
+		}
+		return DIALOG_CONTINUE;
+	}
+
+	/* Check if within content area */
+	if ((int)mouse->column < content_left || (int)mouse->column >= content_right) {
+		return DIALOG_CONTINUE;
+	}
+	if ((int)mouse->row < content_top || (int)mouse->row >= content_bottom) {
+		return DIALOG_CONTINUE;
+	}
+
+	/* Calculate which item was clicked */
+	int row_offset = mouse->row - content_top;
+	int item_index = dialog->scroll_offset + row_offset;
+
+	if (item_index < 0 || item_index >= dialog->item_count) {
+		return DIALOG_CONTINUE;
+	}
+
+	/* Handle click */
+	if (mouse->event == MOUSE_LEFT_PRESS) {
+		dialog->mouse_down = true;
+
+		/* Check for double-click */
+		if (dialog_is_double_click(dialog, item_index)) {
+			dialog->selected_index = item_index;
+			return DIALOG_CONFIRM;
+		}
+
+		dialog->selected_index = item_index;
+		return DIALOG_CONTINUE;
+	}
+
+	if (mouse->event == MOUSE_LEFT_RELEASE) {
+		dialog->mouse_down = false;
+	}
+
+	return DIALOG_CONTINUE;
+}
+
+/*
+ * Get the parent directory of a path.
+ * Returns newly allocated string, caller must free.
+ * Returns "/" for root path or paths without parent.
+ */
+static char *path_get_parent(const char *path)
+{
+	if (path == NULL || path[0] == '\0') {
+		return strdup("/");
+	}
+
+	size_t length = strlen(path);
+
+	/* Skip trailing slashes */
+	while (length > 1 && path[length - 1] == '/') {
+		length--;
+	}
+
+	/* Find last slash */
+	while (length > 0 && path[length - 1] != '/') {
+		length--;
+	}
+
+	/* Skip the slash itself unless it's root */
+	if (length > 1) {
+		length--;
+	}
+
+	if (length == 0) {
+		return strdup("/");
+	}
+
+	char *parent = malloc(length + 1);
+	if (parent == NULL) {
+		return strdup("/");
+	}
+
+	memcpy(parent, path, length);
+	parent[length] = '\0';
+
+	return parent;
+}
+
+/*
+ * Join a directory path and filename.
+ * Returns newly allocated string, caller must free.
+ */
+static char *path_join(const char *directory, const char *filename)
+{
+	if (directory == NULL || directory[0] == '\0') {
+		return strdup(filename);
+	}
+	if (filename == NULL || filename[0] == '\0') {
+		return strdup(directory);
+	}
+
+	size_t directory_length = strlen(directory);
+	size_t filename_length = strlen(filename);
+
+	/* Check if directory ends with slash */
+	bool has_slash = (directory[directory_length - 1] == '/');
+
+	size_t total_length = directory_length + filename_length + (has_slash ? 1 : 2);
+	char *result = malloc(total_length);
+	if (result == NULL) {
+		return NULL;
+	}
+
+	memcpy(result, directory, directory_length);
+	if (!has_slash) {
+		result[directory_length] = '/';
+		directory_length++;
+	}
+	memcpy(result + directory_length, filename, filename_length + 1);
+
+	return result;
+}
+
+/*
+ * Close the dialog and restore normal editor state.
+ */
+static void dialog_close(struct dialog_state *dialog)
+{
+	dialog->active = false;
+	dialog_mouse_mode = false;
 }
 
 /*****************************************************************************
