@@ -1,0 +1,20 @@
+# Build artifacts
+edit
+*.o
+
+# Development logs
+TRANSACTION_LOG.md
+
+# Sift index
+.sift/
+
+# Test files
+*_test.txt
+test_*.txt
+
+# Screenshots and images
+*.png
+
+# Editor backup files
+*.bak
+*~
