@@ -33,7 +33,7 @@
 #include "../third_party/utflite/single_include/utflite.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.18.0"
+#define EDIT_VERSION "0.19.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -5048,17 +5048,17 @@ static uint32_t screen_column_to_cell(uint32_t row, uint32_t target_visual_colum
  * Select the word at the given position using neighbor layer data.
  * Does nothing if position is whitespace.
  */
-static void editor_select_word(uint32_t row, uint32_t column)
+static bool editor_select_word(uint32_t row, uint32_t column)
 {
 	if (row >= editor.buffer.line_count) {
-		return;
+		return false;
 	}
 
 	struct line *line = &editor.buffer.lines[row];
 	line_warm(line, &editor.buffer);
 
 	if (line->cell_count == 0) {
-		return;
+		return false;
 	}
 
 	if (column >= line->cell_count) {
@@ -5072,7 +5072,7 @@ static void editor_select_word(uint32_t row, uint32_t column)
 	if (click_class == CHAR_CLASS_WHITESPACE) {
 		editor.cursor_column = column;
 		selection_clear();
-		return;
+		return false;
 	}
 
 	/* Find word start */
@@ -5102,6 +5102,7 @@ static void editor_select_word(uint32_t row, uint32_t column)
 	editor.cursor_row = row;
 	editor.cursor_column = word_end;
 	editor.selection_active = true;
+	return true;
 }
 
 /*
@@ -5121,6 +5122,202 @@ static void editor_select_line(uint32_t row)
 	editor.cursor_row = row;
 	editor.cursor_column = line->cell_count;
 	editor.selection_active = true;
+}
+
+/* Forward declarations for search functions used by select next occurrence */
+static bool search_matches_at(struct line *line, struct buffer *buffer,
+                              uint32_t column, const char *query, uint32_t query_len);
+static uint32_t search_query_cell_count(const char *query, uint32_t query_len);
+
+/*
+ * Select the word at the current cursor position.
+ * If cursor is on whitespace, tries to find the next word to the right.
+ * Returns true if a word was selected.
+ */
+static bool editor_select_word_at_cursor(void)
+{
+	if (editor.cursor_row >= editor.buffer.line_count) {
+		return false;
+	}
+
+	struct line *line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(line, &editor.buffer);
+
+	if (line->cell_count == 0) {
+		return false;
+	}
+
+	uint32_t column = editor.cursor_column;
+
+	/* Clamp to line length */
+	if (column >= line->cell_count) {
+		column = line->cell_count > 0 ? line->cell_count - 1 : 0;
+	}
+
+	/* Check if cursor is on whitespace */
+	enum character_class current_class = neighbor_get_class(line->cells[column].neighbor);
+
+	if (current_class == CHAR_CLASS_WHITESPACE) {
+		/* On whitespace - try to find word to the right */
+		while (column < line->cell_count) {
+			current_class = neighbor_get_class(line->cells[column].neighbor);
+			if (current_class != CHAR_CLASS_WHITESPACE) {
+				break;
+			}
+			column++;
+		}
+		if (column >= line->cell_count) {
+			return false;  /* No word found */
+		}
+	}
+
+	return editor_select_word(editor.cursor_row, column);
+}
+
+/*
+ * Find the next occurrence of the given text starting from a position.
+ * Uses case-insensitive matching (same as search).
+ * Returns true if found, with position in out_row/out_column.
+ */
+static bool find_next_occurrence(const char *text, size_t text_length,
+                                 uint32_t start_row, uint32_t start_column,
+                                 bool wrap,
+                                 uint32_t *out_row, uint32_t *out_column)
+{
+	if (text == NULL || text_length == 0) {
+		return false;
+	}
+
+	uint32_t row = start_row;
+	uint32_t column = start_column;
+	bool wrapped = false;
+
+	while (true) {
+		if (row >= editor.buffer.line_count) {
+			if (!wrap || wrapped) {
+				return false;
+			}
+			/* Wrap to beginning */
+			row = 0;
+			column = 0;
+			wrapped = true;
+		}
+
+		struct line *line = &editor.buffer.lines[row];
+		line_warm(line, &editor.buffer);
+
+		/* Search this line from column onwards */
+		while (column < line->cell_count) {
+			if (search_matches_at(line, &editor.buffer, column, text, text_length)) {
+				*out_row = row;
+				*out_column = column;
+				return true;
+			}
+			column++;
+		}
+
+		/* Move to next line */
+		row++;
+		column = 0;
+
+		/* Check if we've wrapped back past start */
+		if (wrapped && row > start_row) {
+			return false;
+		}
+	}
+}
+
+/*
+ * Select the word under cursor, or find next occurrence of selection.
+ * Mimics VS Code / Sublime Text Ctrl+D behavior.
+ */
+static void editor_select_next_occurrence(void)
+{
+	if (!editor.selection_active || selection_is_empty()) {
+		/*
+		 * No selection - select word under cursor.
+		 */
+		if (editor_select_word_at_cursor()) {
+			size_t length;
+			char *text = selection_get_text(&length);
+			if (text) {
+				if (length > 20) {
+					editor_set_status_message("Selected: %.17s...", text);
+				} else {
+					editor_set_status_message("Selected: %s", text);
+				}
+				free(text);
+			}
+		} else {
+			editor_set_status_message("No word at cursor");
+		}
+		return;
+	}
+
+	/*
+	 * Selection exists - find next occurrence.
+	 */
+	size_t text_length;
+	char *text = selection_get_text(&text_length);
+
+	if (text == NULL || text_length == 0) {
+		editor_set_status_message("Empty selection");
+		return;
+	}
+
+	/* Get current selection range */
+	uint32_t selection_start_row, selection_start_column;
+	uint32_t selection_end_row, selection_end_column;
+	selection_get_range(&selection_start_row, &selection_start_column,
+	                    &selection_end_row, &selection_end_column);
+
+	/* Count cells in selection for positioning new selection */
+	uint32_t selection_cells = selection_end_column - selection_start_column;
+	if (selection_end_row != selection_start_row) {
+		/* Multi-line selection - just use text length as approximation */
+		selection_cells = search_query_cell_count(text, text_length);
+	}
+
+	/* Start searching after current selection */
+	uint32_t found_row, found_column;
+	if (find_next_occurrence(text, text_length,
+	                         selection_end_row, selection_end_column,
+	                         true,  /* wrap */
+	                         &found_row, &found_column)) {
+
+		/* Check if we found the same position (only occurrence) */
+		if (found_row == selection_start_row && found_column == selection_start_column) {
+			editor_set_status_message("Only occurrence");
+		} else {
+			/* Move selection to new occurrence */
+			editor.selection_anchor_row = found_row;
+			editor.selection_anchor_column = found_column;
+			editor.cursor_row = found_row;
+			editor.cursor_column = found_column + selection_cells;
+
+			/* Clamp cursor column to line length */
+			if (editor.cursor_row < editor.buffer.line_count) {
+				struct line *line = &editor.buffer.lines[editor.cursor_row];
+				line_warm(line, &editor.buffer);
+				if (editor.cursor_column > line->cell_count) {
+					editor.cursor_column = line->cell_count;
+				}
+			}
+
+			/* Ensure new position is visible */
+			if (editor.cursor_row < editor.row_offset) {
+				editor.row_offset = editor.cursor_row;
+			} else if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
+				editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+			}
+
+			editor_set_status_message("Next occurrence");
+		}
+	} else {
+		editor_set_status_message("No more occurrences");
+	}
+
+	free(text);
 }
 
 /*
@@ -7783,6 +7980,10 @@ static void editor_process_keypress(void)
 
 		case CONTROL_KEY('a'):
 			editor_select_all();
+			break;
+
+		case CONTROL_KEY('d'):
+			editor_select_next_occurrence();
 			break;
 
 		case KEY_ALT_K:
