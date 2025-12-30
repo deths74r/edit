@@ -4,6 +4,7 @@ LDFLAGS = -lm
 
 PREFIX = $(HOME)/.local
 BINDIR = $(PREFIX)/bin
+THEMEDIR = $(HOME)/.edit/themes
 
 SRC = src/edit.c
 TARGET = edit
@@ -27,8 +28,11 @@ clean:
 install: $(TARGET)
 	mkdir -p $(BINDIR)
 	cp $(TARGET) $(BINDIR)/
+	mkdir -p $(THEMEDIR)
+	cp themes/*.ini $(THEMEDIR)/
 
 uninstall:
 	rm -f $(BINDIR)/$(TARGET)
+	rm -rf $(THEMEDIR)
 
 .PHONY: all clean install uninstall test
