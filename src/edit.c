@@ -917,6 +917,16 @@ static struct theme *theme_parse_file(const char *filepath)
 }
 
 /*
+ * Compare themes by name for sorting.
+ */
+static int theme_compare(const void *a, const void *b)
+{
+	const struct theme *ta = a;
+	const struct theme *tb = b;
+	return strcmp(ta->name, tb->name);
+}
+
+/*
  * Load all themes from ~/.edit/themes/ directory.
  * Always includes the built-in default theme first.
  */
@@ -996,6 +1006,12 @@ static void themes_load(void)
 	}
 
 	closedir(dir);
+
+	/* Sort themes alphabetically, keeping built-in first */
+	if (theme_count > 2) {
+		qsort(&loaded_themes[1], theme_count - 1,
+		      sizeof(struct theme), theme_compare);
+	}
 }
 
 /*
