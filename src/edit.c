@@ -419,6 +419,10 @@ struct theme {
 	/* Dialog panel colors */
 	struct syntax_color dialog_bg;        /* Dialog background */
 	struct syntax_color dialog_fg;        /* Dialog text foreground */
+	struct syntax_color dialog_header_bg; /* Header/title bar background */
+	struct syntax_color dialog_header_fg; /* Header/title bar foreground */
+	struct syntax_color dialog_footer_bg; /* Footer/hint bar background */
+	struct syntax_color dialog_footer_fg; /* Footer/hint bar foreground */
 	struct syntax_color dialog_highlight_bg; /* Selected item background */
 	struct syntax_color dialog_highlight_fg; /* Selected item foreground */
 
@@ -679,6 +683,10 @@ static struct theme theme_create_default(void)
 	/* Dialog panel colors */
 	t.dialog_bg = (struct syntax_color){0x1A, 0x1A, 0x1A};
 	t.dialog_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
+	t.dialog_header_bg = (struct syntax_color){0x1A, 0x1A, 0x1A};
+	t.dialog_header_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
+	t.dialog_footer_bg = (struct syntax_color){0x1A, 0x1A, 0x1A};
+	t.dialog_footer_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
 	t.dialog_highlight_bg = (struct syntax_color){0x40, 0x40, 0x40};
 	t.dialog_highlight_fg = (struct syntax_color){0xFF, 0xFF, 0xFF};
 
@@ -746,6 +754,10 @@ static struct theme theme_create_mono_white(void)
 	/* Dialog panel colors */
 	t.dialog_bg = (struct syntax_color){0xEC, 0xEC, 0xEC};
 	t.dialog_fg = (struct syntax_color){0x20, 0x20, 0x20};
+	t.dialog_header_bg = (struct syntax_color){0xEC, 0xEC, 0xEC};
+	t.dialog_header_fg = (struct syntax_color){0x20, 0x20, 0x20};
+	t.dialog_footer_bg = (struct syntax_color){0xEC, 0xEC, 0xEC};
+	t.dialog_footer_fg = (struct syntax_color){0x20, 0x20, 0x20};
 	t.dialog_highlight_bg = (struct syntax_color){0xC8, 0xC8, 0xC8};
 	t.dialog_highlight_fg = (struct syntax_color){0x00, 0x00, 0x00};
 
@@ -954,6 +966,18 @@ static struct theme *theme_parse_file(const char *filepath)
 		}
 		else if (strcmp(key, "dialog_fg") == 0 && color_parse_hex(value, &color)) {
 			t->dialog_fg = color;
+		}
+		else if (strcmp(key, "dialog_header_bg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_header_bg = color;
+		}
+		else if (strcmp(key, "dialog_header_fg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_header_fg = color;
+		}
+		else if (strcmp(key, "dialog_footer_bg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_footer_bg = color;
+		}
+		else if (strcmp(key, "dialog_footer_fg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_footer_fg = color;
 		}
 		else if (strcmp(key, "dialog_highlight_bg") == 0 && color_parse_hex(value, &color)) {
 			t->dialog_highlight_bg = color;
@@ -1236,6 +1260,8 @@ static void theme_apply(struct theme *t)
 
 	/* Dialog colors against dialog backgrounds */
 	active_theme.dialog_fg = color_ensure_contrast(t->dialog_fg, active_theme.dialog_bg);
+	active_theme.dialog_header_fg = color_ensure_contrast(t->dialog_header_fg, active_theme.dialog_header_bg);
+	active_theme.dialog_footer_fg = color_ensure_contrast(t->dialog_footer_fg, active_theme.dialog_footer_bg);
 	active_theme.dialog_highlight_fg = color_ensure_contrast(t->dialog_highlight_fg, active_theme.dialog_highlight_bg);
 
 	/* Syntax colors against main background */
@@ -3452,6 +3478,7 @@ static void editor_init(void)
 	editor.show_whitespace = false;
 	editor.color_column = 0;
 	editor.color_column_style = COLOR_COLUMN_SOLID;
+	editor.theme_indicator = THEME_INDICATOR_CHECK;
 	editor.cursor_count = 0;
 	editor.primary_cursor = 0;
 
@@ -8862,8 +8889,8 @@ static void dialog_draw_header(struct output_buffer *output,
 			       const char *title)
 {
 	dialog_goto(output, dialog->panel_top + 1, dialog->panel_left + 1);
-	dialog_set_bg(output, active_theme.dialog_bg);
-	dialog_set_fg(output, active_theme.dialog_fg);
+	dialog_set_bg(output, active_theme.dialog_header_bg);
+	dialog_set_fg(output, active_theme.dialog_header_fg);
 
 	/* Calculate title position for centering */
 	int title_length = strlen(title);
@@ -8891,8 +8918,8 @@ static void dialog_draw_footer(struct output_buffer *output,
 {
 	int footer_row = dialog->panel_top + dialog->panel_height;
 	dialog_goto(output, footer_row, dialog->panel_left + 1);
-	dialog_set_bg(output, active_theme.dialog_bg);
-	dialog_set_fg(output, active_theme.dialog_fg);
+	dialog_set_bg(output, active_theme.dialog_footer_bg);
+	dialog_set_fg(output, active_theme.dialog_footer_fg);
 
 	/* Draw hint left-aligned with padding */
 	int hint_length = strlen(hint);
