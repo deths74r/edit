@@ -2639,6 +2639,7 @@ static int __must_check output_buffer_init_checked(struct output_buffer *output)
  * Initialize an output buffer with starting capacity.
  * Crashes on allocation failure - use output_buffer_init_checked() for error handling.
  */
+__attribute__((unused))
 static void output_buffer_init(struct output_buffer *output)
 {
 	int ret = output_buffer_init_checked(output);
@@ -3065,6 +3066,7 @@ static int __must_check line_append_cells_from_line_checked(struct line *dest,
  * Appends all cells from src line to the end of dest line. Both lines
  * must already be warm or hot. Crashes on allocation failure.
  */
+__attribute__((unused))
 static void line_append_cells_from_line(struct line *dest, struct line *src)
 {
 	int ret = line_append_cells_from_line_checked(dest, src);
@@ -3282,14 +3284,13 @@ static void buffer_ensure_capacity(struct buffer *buffer, uint32_t required)
 	BUG_ON(ret);
 }
 
-/* Inserts a new empty line at the specified position. */
-static void buffer_insert_empty_line(struct buffer *buffer, uint32_t position)
+static int __must_check buffer_insert_empty_line_checked(struct buffer *buffer,
+                                                          uint32_t position)
 {
-	if (position > buffer->line_count) {
+	if (position > buffer->line_count)
 		position = buffer->line_count;
-	}
 
-	buffer_ensure_capacity(buffer, buffer->line_count + 1);
+	PROPAGATE(buffer_ensure_capacity_checked(buffer, buffer->line_count + 1));
 
 	if (position < buffer->line_count) {
 		memmove(&buffer->lines[position + 1], &buffer->lines[position],
@@ -3299,6 +3300,17 @@ static void buffer_insert_empty_line(struct buffer *buffer, uint32_t position)
 	line_init(&buffer->lines[position]);
 	buffer->line_count++;
 	buffer->is_modified = true;
+	return 0;
+}
+
+/*
+ * Inserts a new empty line at the specified position.
+ * Crashes on allocation failure - use buffer_insert_empty_line_checked().
+ */
+static void buffer_insert_empty_line(struct buffer *buffer, uint32_t position)
+{
+	int ret = buffer_insert_empty_line_checked(buffer, position);
+	BUG_ON(ret);
 }
 
 /* Deletes the line at the specified position, freeing its memory. */
@@ -3319,22 +3331,20 @@ static void buffer_delete_line(struct buffer *buffer, uint32_t position)
 	buffer->is_modified = true;
 }
 
-/* Inserts a single codepoint at the specified row and column. Warms the
- * line if cold and marks it as hot since content is being modified. */
-static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, uint32_t column,
-                                         uint32_t codepoint)
+static int __must_check buffer_insert_cell_at_column_checked(struct buffer *buffer,
+                                                              uint32_t row, uint32_t column,
+                                                              uint32_t codepoint)
 {
-	if (row > buffer->line_count) {
+	if (row > buffer->line_count)
 		row = buffer->line_count;
-	}
 
 	if (row == buffer->line_count) {
-		buffer_insert_empty_line(buffer, buffer->line_count);
+		PROPAGATE(buffer_insert_empty_line_checked(buffer, buffer->line_count));
 	}
 
 	struct line *line = &buffer->lines[row];
-	line_warm(line, buffer);
-	line_insert_cell(line, column, codepoint);
+	PROPAGATE(line_warm_checked(line, buffer));
+	PROPAGATE(line_insert_cell_checked(line, column, codepoint));
 	line->temperature = LINE_TEMPERATURE_HOT;
 	buffer->is_modified = true;
 
@@ -3346,18 +3356,28 @@ static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, ui
 
 	/* Invalidate wrap cache since line content changed. */
 	line_invalidate_wrap_cache(line);
+	return 0;
 }
 
-/* Deletes the grapheme cluster at the specified position. If at end of line,
- * joins with the next line instead. Warms lines and marks as hot. */
-static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row, uint32_t column)
+/*
+ * Inserts a single codepoint at the specified row and column.
+ * Crashes on allocation failure - use buffer_insert_cell_at_column_checked().
+ */
+static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row, uint32_t column,
+                                         uint32_t codepoint)
 {
-	if (row >= buffer->line_count) {
-		return;
-	}
+	int ret = buffer_insert_cell_at_column_checked(buffer, row, column, codepoint);
+	BUG_ON(ret);
+}
+
+static int __must_check buffer_delete_grapheme_at_column_checked(struct buffer *buffer,
+                                                                   uint32_t row, uint32_t column)
+{
+	if (row >= buffer->line_count)
+		return 0;
 
 	struct line *line = &buffer->lines[row];
-	line_warm(line, buffer);
+	PROPAGATE(line_warm_checked(line, buffer));
 
 	if (column < line->cell_count) {
 		/* Find the end of this grapheme (skip over combining marks) */
@@ -3376,8 +3396,8 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 	} else if (row + 1 < buffer->line_count) {
 		/* Join with next line */
 		struct line *next_line = &buffer->lines[row + 1];
-		line_warm(next_line, buffer);
-		line_append_cells_from_line(line, next_line);
+		PROPAGATE(line_warm_checked(next_line, buffer));
+		PROPAGATE(line_append_cells_from_line_checked(line, next_line));
 		line->temperature = LINE_TEMPERATURE_HOT;
 		buffer_delete_line(buffer, row + 1);
 		/* Recompute neighbors and re-highlight */
@@ -3386,52 +3406,67 @@ static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row
 		/* Invalidate wrap cache since line content changed. */
 		line_invalidate_wrap_cache(line);
 	}
+	return 0;
+}
+
+/*
+ * Deletes the grapheme cluster at the specified position. If at end of line,
+ * joins with the next line instead. Crashes on allocation failure.
+ */
+__attribute__((unused))
+static void buffer_delete_grapheme_at_column(struct buffer *buffer, uint32_t row, uint32_t column)
+{
+	int ret = buffer_delete_grapheme_at_column_checked(buffer, row, column);
+	BUG_ON(ret);
+}
+
+static int __must_check buffer_insert_newline_checked(struct buffer *buffer,
+                                                        uint32_t row, uint32_t column)
+{
+	if (row > buffer->line_count)
+		return 0;
+
+	if (row == buffer->line_count)
+		return buffer_insert_empty_line_checked(buffer, buffer->line_count);
+
+	struct line *line = &buffer->lines[row];
+	PROPAGATE(line_warm_checked(line, buffer));
+
+	if (column >= line->cell_count) {
+		return buffer_insert_empty_line_checked(buffer, row + 1);
+	}
+
+	/* Insert new line and copy cells after cursor */
+	PROPAGATE(buffer_insert_empty_line_checked(buffer, row + 1));
+	struct line *new_line = &buffer->lines[row + 1];
+
+	for (uint32_t i = column; i < line->cell_count; i++) {
+		PROPAGATE(line_append_cell_checked(new_line, line->cells[i].codepoint));
+	}
+
+	/* Truncate original line */
+	line->cell_count = column;
+	line->temperature = LINE_TEMPERATURE_HOT;
+
+	/* Recompute neighbors and re-highlight both lines */
+	neighbor_compute_line(line);
+	neighbor_compute_line(new_line);
+	syntax_highlight_line(line, buffer, row);
+	syntax_highlight_line(new_line, buffer, row + 1);
+
+	/* Invalidate wrap cache for truncated line. */
+	line_invalidate_wrap_cache(line);
+	return 0;
 }
 
 /*
  * Split a line at the given column position, creating a new line.
- * The portion of the line after the cursor moves to the new line below.
- * If cursor is at end of line, creates an empty line. If row equals
- * line_count, appends a new empty line at the end. Warms line and marks hot.
+ * Crashes on allocation failure - use buffer_insert_newline_checked().
  */
 static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t column)
 {
-	if (row > buffer->line_count) {
-		return;
-	}
-
-	if (row == buffer->line_count) {
-		buffer_insert_empty_line(buffer, buffer->line_count);
-		return;
-	}
-
-	struct line *line = &buffer->lines[row];
-	line_warm(line, buffer);
-
-	if (column >= line->cell_count) {
-		buffer_insert_empty_line(buffer, row + 1);
-	} else {
-		/* Insert new line and copy cells after cursor */
-		buffer_insert_empty_line(buffer, row + 1);
-		struct line *new_line = &buffer->lines[row + 1];
-
-		for (uint32_t i = column; i < line->cell_count; i++) {
-			line_append_cell(new_line, line->cells[i].codepoint);
-		}
-
-		/* Truncate original line */
-		line->cell_count = column;
-		line->temperature = LINE_TEMPERATURE_HOT;
-
-		/* Recompute neighbors and re-highlight both lines */
-		neighbor_compute_line(line);
-		neighbor_compute_line(new_line);
-		syntax_highlight_line(line, buffer, row);
-		syntax_highlight_line(new_line, buffer, row + 1);
-
-		/* Invalidate wrap cache for truncated line. */
-		line_invalidate_wrap_cache(line);
-	}
+	int ret = buffer_insert_newline_checked(buffer, row, column);
+	BUG_ON(ret);
 }
 
 /*****************************************************************************
@@ -4098,6 +4133,7 @@ static void undo_begin_group(struct buffer *buffer)
 		struct undo_group *new_groups = realloc(history->groups,
 		                                        new_capacity * sizeof(struct undo_group));
 		if (new_groups == NULL) {
+			WARN_ON_ONCE(1);  /* Undo recording disabled due to OOM */
 			return;
 		}
 		history->groups = new_groups;
@@ -4164,6 +4200,7 @@ static void undo_record_operation(struct buffer *buffer, struct edit_operation *
 		struct edit_operation *new_ops = realloc(group->operations,
 		                                         new_capacity * sizeof(struct edit_operation));
 		if (new_ops == NULL) {
+			WARN_ON_ONCE(1);  /* Undo operation lost due to OOM */
 			return;
 		}
 		group->operations = new_ops;
@@ -6025,8 +6062,13 @@ static void editor_delete_selection(void)
 		struct line *end_line = &editor.buffer.lines[end_row];
 		line_warm(end_line, &editor.buffer);
 
+		int ret = 0;
 		for (uint32_t i = end_col; i < end_line->cell_count; i++) {
-			line_append_cell(start_line, end_line->cells[i].codepoint);
+			ret = line_append_cell_checked(start_line, end_line->cells[i].codepoint);
+			if (ret) {
+				editor_set_status_message("Delete failed: %s", edit_strerror(ret));
+				break;
+			}
 		}
 
 		/* 3. Delete lines from start_row+1 to end_row inclusive */
@@ -6136,6 +6178,7 @@ static void editor_paste(void)
 	/* Insert text character by character, handling newlines */
 	size_t offset = 0;
 	uint32_t chars_inserted = 0;
+	int ret = 0;
 
 	while (offset < length) {
 		uint32_t codepoint;
@@ -6149,7 +6192,10 @@ static void editor_paste(void)
 
 		if (codepoint == '\n') {
 			undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
-			buffer_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
+			ret = buffer_insert_newline_checked(&editor.buffer, editor.cursor_row,
+			                                     editor.cursor_column);
+			if (ret)
+				break;
 			editor.cursor_row++;
 			editor.cursor_column = 0;
 		} else if (codepoint == '\r') {
@@ -6157,8 +6203,10 @@ static void editor_paste(void)
 		} else {
 			undo_record_insert_char(&editor.buffer, editor.cursor_row,
 			                        editor.cursor_column, codepoint);
-			buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row,
-			                             editor.cursor_column, codepoint);
+			ret = buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
+			                                            editor.cursor_column, codepoint);
+			if (ret)
+				break;
 			editor.cursor_column++;
 		}
 
@@ -6167,6 +6215,11 @@ static void editor_paste(void)
 	}
 
 	undo_end_group(&editor.buffer);
+
+	if (ret) {
+		editor_set_status_message("Paste failed after %u chars: %s",
+		                          chars_inserted, edit_strerror(ret));
+	}
 
 	/* Recompute pairs and re-highlight affected lines */
 	buffer_compute_pairs(&editor.buffer);
@@ -6180,7 +6233,8 @@ static void editor_paste(void)
 	free(text);
 	editor.buffer.is_modified = true;
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
-	editor_set_status_message("Pasted %u characters", chars_inserted);
+	if (!ret)
+		editor_set_status_message("Pasted %u characters", chars_inserted);
 }
 
 /*
@@ -6198,7 +6252,13 @@ static void editor_insert_character(uint32_t codepoint)
 	}
 
 	undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
-	buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
+	int ret = buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
+	                                                editor.cursor_column, codepoint);
+	if (ret) {
+		editor_set_status_message("Insert failed: %s", edit_strerror(ret));
+		undo_end_group(&editor.buffer);
+		return;
+	}
 	editor.cursor_column++;
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
@@ -6267,14 +6327,26 @@ static void editor_insert_newline(void)
 	}
 
 	undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
-	buffer_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	int ret = buffer_insert_newline_checked(&editor.buffer, editor.cursor_row,
+	                                         editor.cursor_column);
+	if (ret) {
+		editor_set_status_message("Cannot insert line: %s", edit_strerror(ret));
+		undo_end_group(&editor.buffer);
+		return;
+	}
 	editor.cursor_row++;
 	editor.cursor_column = 0;
 
 	/* Insert auto-indent characters on the new line */
 	for (uint32_t i = 0; i < indent_count; i++) {
 		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, indent_chars[i]);
-		buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column, indent_chars[i]);
+		ret = buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
+		                                            editor.cursor_column, indent_chars[i]);
+		if (ret) {
+			editor_set_status_message("Auto-indent failed: %s", edit_strerror(ret));
+			undo_end_group(&editor.buffer);
+			return;
+		}
 		editor.cursor_column++;
 	}
 
@@ -6316,7 +6388,13 @@ static void editor_delete_character(void)
 		undo_record_delete_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
 	}
 
-	buffer_delete_grapheme_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	int ret = buffer_delete_grapheme_at_column_checked(&editor.buffer, editor.cursor_row,
+	                                                     editor.cursor_column);
+	if (ret) {
+		editor_set_status_message("Delete failed: %s", edit_strerror(ret));
+		undo_end_group(&editor.buffer);
+		return;
+	}
 	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
 	undo_end_group(&editor.buffer);
@@ -6344,6 +6422,7 @@ static void editor_handle_backspace(void)
 
 	undo_begin_group(&editor.buffer);
 
+	int ret;
 	if (editor.cursor_column > 0) {
 		struct line *line = &editor.buffer.lines[editor.cursor_row];
 		line_warm(line, &editor.buffer);
@@ -6352,7 +6431,13 @@ static void editor_handle_backspace(void)
 		uint32_t codepoint = line->cells[new_column].codepoint;
 		undo_record_delete_char(&editor.buffer, editor.cursor_row, new_column, codepoint);
 		editor.cursor_column = new_column;
-		buffer_delete_grapheme_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		ret = buffer_delete_grapheme_at_column_checked(&editor.buffer, editor.cursor_row,
+		                                                editor.cursor_column);
+		if (ret) {
+			editor_set_status_message("Delete failed: %s", edit_strerror(ret));
+			undo_end_group(&editor.buffer);
+			return;
+		}
 	} else {
 		/* Join with previous line - record newline deletion at end of previous line */
 		uint32_t previous_line_length = editor_get_line_length(editor.cursor_row - 1);
@@ -6361,7 +6446,12 @@ static void editor_handle_backspace(void)
 		struct line *current_line = &editor.buffer.lines[editor.cursor_row];
 		line_warm(previous_line, &editor.buffer);
 		line_warm(current_line, &editor.buffer);
-		line_append_cells_from_line(previous_line, current_line);
+		ret = line_append_cells_from_line_checked(previous_line, current_line);
+		if (ret) {
+			editor_set_status_message("Join lines failed: %s", edit_strerror(ret));
+			undo_end_group(&editor.buffer);
+			return;
+		}
 		previous_line->temperature = LINE_TEMPERATURE_HOT;
 		buffer_delete_line(&editor.buffer, editor.cursor_row);
 		editor.cursor_row--;
@@ -7931,7 +8021,13 @@ static bool search_replace_current(void)
 		                        insert_position, codepoint);
 
 		/* Make room and insert */
-		line_ensure_capacity(line, line->cell_count + 1);
+		int ret = line_ensure_capacity_checked(line, line->cell_count + 1);
+		if (ret) {
+			editor_set_status_message("Replace failed: %s", edit_strerror(ret));
+			free(final_replacement);
+			undo_end_group(&editor.buffer);
+			return false;
+		}
 
 		if (insert_position < line->cell_count) {
 			memmove(&line->cells[insert_position + 1],
@@ -8797,13 +8893,15 @@ static void render_draw_message_bar(struct output_buffer *output)
  * cursor using rendered column to account for tabs and wide characters.
  * The cursor is hidden during drawing to avoid flicker.
  */
-static void render_refresh_screen(void)
+static int __must_check render_refresh_screen(void)
 {
 	editor_update_gutter_width();
 	editor_scroll();
 
 	struct output_buffer output;
-	output_buffer_init(&output);
+	int ret = output_buffer_init_checked(&output);
+	if (ret)
+		return ret;
 
 	/* Hide cursor */
 	output_buffer_append_string(&output, "\x1b[?25l");
@@ -8872,6 +8970,7 @@ static void render_refresh_screen(void)
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
+	return 0;
 }
 
 /*****************************************************************************
@@ -9699,7 +9798,7 @@ static char *open_file_dialog(void)
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
 			}
-			render_refresh_screen();
+			int __unused = render_refresh_screen(); (void)__unused;
 			continue;
 		}
 
@@ -9812,7 +9911,7 @@ static void editor_command_open_file(void)
 	char *path = open_file_dialog();
 
 	/* Redraw screen after dialog closes */
-	render_refresh_screen();
+	int __unused = render_refresh_screen(); (void)__unused;
 
 	if (path) {
 		editor_open_file(path);
@@ -9973,7 +10072,7 @@ static int theme_picker_dialog(void)
 			last_preview_index = theme_picker.dialog.selected_index;
 
 			/* Redraw entire screen with new theme, then overlay dialog */
-			render_refresh_screen();
+			int __unused = render_refresh_screen(); (void)__unused;
 		}
 
 		theme_picker_draw();
@@ -9991,7 +10090,7 @@ static int theme_picker_dialog(void)
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
 			}
-			render_refresh_screen();
+			int __unused = render_refresh_screen(); (void)__unused;
 			continue;
 		}
 
@@ -10046,7 +10145,7 @@ static void editor_command_theme_picker(void)
 	int selected = theme_picker_dialog();
 
 	/* Redraw screen after dialog closes */
-	render_refresh_screen();
+	int __unused = render_refresh_screen(); (void)__unused;
 
 	if (selected >= 0) {
 		editor_set_status_message("Switched to %s theme", active_theme.name);
@@ -11711,7 +11810,13 @@ int main(int argument_count, char *argument_values[])
 	editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | F2 = toggle line numbers");
 
 	while (1) {
-		render_refresh_screen();
+		int ret = render_refresh_screen();
+		if (ret) {
+			/* Minimal recovery on render failure */
+			write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
+			fprintf(stderr, "Render error: %s\n", edit_strerror(ret));
+			usleep(100000);
+		}
 		editor_process_keypress();
 	}
 
