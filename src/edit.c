@@ -276,6 +276,17 @@ enum color_column_style {
 	COLOR_COLUMN_HEAVY           /* ┃ U+2503 */
 };
 
+/* Theme selector indicator styles for the theme picker. */
+enum theme_indicator {
+	THEME_INDICATOR_ASTERISK = 0, /* * */
+	THEME_INDICATOR_BULLET,       /* ● */
+	THEME_INDICATOR_DIAMOND,      /* ◆ */
+	THEME_INDICATOR_TRIANGLE,     /* ▶ */
+	THEME_INDICATOR_CHECK,        /* ✓ */
+	THEME_INDICATOR_ARROW,        /* → */
+	THEME_INDICATOR_DOT           /* • */
+};
+
 /* Types of edit operations that can be undone/redone. */
 enum edit_operation_type {
 	EDIT_OP_INSERT_CHAR,    /* Single character inserted */
@@ -388,7 +399,8 @@ struct theme {
 	/* Status and message bars */
 	struct syntax_color status_bg;        /* Status bar background */
 	struct syntax_color status_fg;        /* Status bar foreground */
-	struct syntax_color message;          /* Message bar text */
+	struct syntax_color message_bg;       /* Message bar background */
+	struct syntax_color message_fg;       /* Message bar foreground */
 
 	/* Selection and search */
 	struct syntax_color selection;        /* Selected text background */
@@ -645,7 +657,10 @@ static struct theme theme_create_default(void)
 	/* Status bar */
 	t.status_bg = (struct syntax_color){0x2A, 0x2A, 0x2A};
 	t.status_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
-	t.message = (struct syntax_color){0xD0, 0xD0, 0xD0};
+
+	/* Message bar */
+	t.message_bg = (struct syntax_color){0x0A, 0x0A, 0x0A};
+	t.message_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
 
 	/* Selection and search */
 	t.selection = (struct syntax_color){0x40, 0x40, 0x40};
@@ -709,7 +724,10 @@ static struct theme theme_create_mono_white(void)
 	/* Status bar */
 	t.status_bg = (struct syntax_color){0xD8, 0xD8, 0xD8};
 	t.status_fg = (struct syntax_color){0x20, 0x20, 0x20};
-	t.message = (struct syntax_color){0x20, 0x20, 0x20};
+
+	/* Message bar */
+	t.message_bg = (struct syntax_color){0xF8, 0xF8, 0xF8};
+	t.message_fg = (struct syntax_color){0x20, 0x20, 0x20};
 
 	/* Selection and search */
 	t.selection = (struct syntax_color){0xC8, 0xC8, 0xC8};
@@ -892,8 +910,16 @@ static struct theme *theme_parse_file(const char *filepath)
 		else if (strcmp(key, "status_fg") == 0 && color_parse_hex(value, &color)) {
 			t->status_fg = color;
 		}
+		/* Message bar */
+		else if (strcmp(key, "message_bg") == 0 && color_parse_hex(value, &color)) {
+			t->message_bg = color;
+		}
+		else if (strcmp(key, "message_fg") == 0 && color_parse_hex(value, &color)) {
+			t->message_fg = color;
+		}
+		/* Legacy: "message" maps to message_fg for backwards compatibility */
 		else if (strcmp(key, "message") == 0 && color_parse_hex(value, &color)) {
-			t->message = color;
+			t->message_fg = color;
 		}
 		/* Selection and search */
 		else if (strcmp(key, "selection") == 0 && color_parse_hex(value, &color)) {
@@ -1198,7 +1224,9 @@ static void theme_apply(struct theme *t)
 
 	/* Status bar text against status background */
 	active_theme.status_fg = color_ensure_contrast(t->status_fg, active_theme.status_bg);
-	active_theme.message = color_ensure_contrast(t->message, active_theme.background);
+
+	/* Message bar text against message background */
+	active_theme.message_fg = color_ensure_contrast(t->message_fg, active_theme.message_bg);
 
 	/* Whitespace indicator against background */
 	active_theme.whitespace = color_ensure_contrast(t->whitespace, active_theme.background);
@@ -1535,6 +1563,7 @@ struct editor_state {
 	bool show_whitespace;        /* Render whitespace characters visibly */
 	uint32_t color_column;       /* Column to highlight (0 = off) */
 	enum color_column_style color_column_style;  /* Visual style for column */
+	enum theme_indicator theme_indicator;  /* Current theme marker style */
 
 	/* Multi-cursor support. When cursor_count > 0, cursors[] is used
 	 * instead of cursor_row/cursor_column/selection_* fields. */
@@ -4865,6 +4894,53 @@ static void editor_cycle_color_column_style(void)
 	editor_set_status_message("Column %u style: %s",
 	                          editor.color_column,
 	                          color_column_style_name(editor.color_column_style));
+}
+
+/*
+ * Get the UTF-8 string for a theme indicator style.
+ */
+static const char *theme_indicator_char(enum theme_indicator ind)
+{
+	switch (ind) {
+		case THEME_INDICATOR_ASTERISK: return "*";
+		case THEME_INDICATOR_BULLET:   return "●";  /* U+25CF */
+		case THEME_INDICATOR_DIAMOND:  return "◆";  /* U+25C6 */
+		case THEME_INDICATOR_TRIANGLE: return "▶";  /* U+25B6 */
+		case THEME_INDICATOR_CHECK:    return "✓";  /* U+2713 */
+		case THEME_INDICATOR_ARROW:    return "→";  /* U+2192 */
+		case THEME_INDICATOR_DOT:      return "•";  /* U+2022 */
+		default: return "*";
+	}
+}
+
+/*
+ * Cycle to the next theme indicator style.
+ */
+static void editor_cycle_theme_indicator(void)
+{
+	switch (editor.theme_indicator) {
+		case THEME_INDICATOR_ASTERISK:
+			editor.theme_indicator = THEME_INDICATOR_BULLET;
+			break;
+		case THEME_INDICATOR_BULLET:
+			editor.theme_indicator = THEME_INDICATOR_DIAMOND;
+			break;
+		case THEME_INDICATOR_DIAMOND:
+			editor.theme_indicator = THEME_INDICATOR_TRIANGLE;
+			break;
+		case THEME_INDICATOR_TRIANGLE:
+			editor.theme_indicator = THEME_INDICATOR_CHECK;
+			break;
+		case THEME_INDICATOR_CHECK:
+			editor.theme_indicator = THEME_INDICATOR_ARROW;
+			break;
+		case THEME_INDICATOR_ARROW:
+			editor.theme_indicator = THEME_INDICATOR_DOT;
+			break;
+		case THEME_INDICATOR_DOT:
+			editor.theme_indicator = THEME_INDICATOR_ASTERISK;
+			break;
+	}
 }
 
 /*
@@ -8261,14 +8337,19 @@ static void render_draw_rows(struct output_buffer *output)
 }
 
 /*
- * Draw the status bar with inverted colors. Shows the filename (or
+ * Draw the status bar using theme colors. Shows the filename (or
  * "[No Name]") on the left with a [+] indicator if modified, and the
  * cursor position (current line / total lines) on the right.
  */
 static void render_draw_status_bar(struct output_buffer *output)
 {
-	/* Reset all attributes then set reverse video */
-	output_buffer_append_string(output, "\x1b[0m\x1b[7m");
+	/* Set status bar colors from theme */
+	char color_escape[64];
+	snprintf(color_escape, sizeof(color_escape),
+	         "\x1b[0m\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+	         active_theme.status_fg.red, active_theme.status_fg.green, active_theme.status_fg.blue,
+	         active_theme.status_bg.red, active_theme.status_bg.green, active_theme.status_bg.blue);
+	output_buffer_append_string(output, color_escape);
 
 	char left_status[256];
 	char right_status[64];
@@ -8303,11 +8384,20 @@ static void render_draw_status_bar(struct output_buffer *output)
 
 /*
  * Draw the message bar at the bottom of the screen. Shows the current
- * status message if one was set within the last 5 seconds. Clears the
- * line before drawing.
+ * status message if one was set within the last 5 seconds. Uses theme
+ * colors for the message bar background and text.
  */
 static void render_draw_message_bar(struct output_buffer *output)
 {
+	/* Set message bar colors from theme */
+	char color_escape[64];
+	snprintf(color_escape, sizeof(color_escape),
+	         "\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+	         active_theme.message_fg.red, active_theme.message_fg.green, active_theme.message_fg.blue,
+	         active_theme.message_bg.red, active_theme.message_bg.green, active_theme.message_bg.blue);
+	output_buffer_append_string(output, color_escape);
+
+	/* Clear line with message bar background color */
 	output_buffer_append_string(output, "\x1b[K");
 
 	if (save_as.active) {
@@ -8959,8 +9049,13 @@ static enum dialog_result dialog_handle_key(struct dialog_state *dialog, int key
 static enum dialog_result dialog_handle_mouse(struct dialog_state *dialog,
 					      struct mouse_input *mouse)
 {
-	/* Check if click is within dialog bounds */
-	int content_top = dialog->panel_top + 2;
+	/*
+	 * Mouse coordinates are 0-based (parsed from 1-based terminal coords).
+	 * Dialog panel_top is 0-based. Drawing uses panel_top + 1 for ANSI
+	 * escape sequences (which are 1-based), so first content row is at
+	 * ANSI row (panel_top + 2), which equals 0-based row (panel_top + 1).
+	 */
+	int content_top = dialog->panel_top + 1;
 	int content_bottom = dialog->panel_top + dialog->panel_height - 1;
 	int content_left = dialog->panel_left + 1;
 	int content_right = dialog->panel_left + dialog->panel_width;
@@ -9108,6 +9203,9 @@ static void dialog_close(struct dialog_state *dialog)
 {
 	dialog->active = false;
 	dialog_mouse_mode = false;
+
+	/* Show cursor again now that dialog is closed */
+	write(STDOUT_FILENO, "\x1b[?25h", 6);
 }
 
 /*****************************************************************************
@@ -9248,8 +9346,8 @@ static void open_file_draw(void)
 	dialog_draw_footer(&output, &open_file.dialog,
 	                   "Enter:Open  Left:Parent  Esc:Cancel");
 
-	/* Reset attributes and show cursor */
-	output_buffer_append_string(&output, "\x1b[0m\x1b[?25h");
+	/* Reset attributes, keep cursor hidden while dialog is active */
+	output_buffer_append_string(&output, "\x1b[0m");
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
@@ -9469,8 +9567,10 @@ static void theme_picker_draw(void)
 			struct theme *t = &loaded_themes[item_index];
 			bool is_selected = (item_index == theme_picker.dialog.selected_index);
 
-			/* Mark current theme with asterisk */
-			char marker = (item_index == current_theme_index) ? '*' : ' ';
+			/* Get marker for current theme */
+			const char *marker = (item_index == current_theme_index)
+			                     ? theme_indicator_char(editor.theme_indicator)
+			                     : " ";
 
 			/* Position cursor */
 			int screen_row = theme_picker.dialog.panel_top + 2 + row;
@@ -9487,7 +9587,7 @@ static void theme_picker_draw(void)
 
 			/* Write marker and name */
 			char name_buf[64];
-			int name_len = snprintf(name_buf, sizeof(name_buf), " %c %s",
+			int name_len = snprintf(name_buf, sizeof(name_buf), " %s %s",
 			                        marker, t->name ? t->name : "Unknown");
 
 			int max_name = theme_picker.dialog.panel_width - 12;
@@ -9541,10 +9641,10 @@ static void theme_picker_draw(void)
 	}
 
 	dialog_draw_footer(&output, &theme_picker.dialog,
-	                   "Enter:Select  Esc:Cancel");
+	                   "Enter:Select  Tab:Marker  Esc:Cancel");
 
-	/* Reset attributes and show cursor */
-	output_buffer_append_string(&output, "\x1b[0m\x1b[?25h");
+	/* Reset attributes, keep cursor hidden while dialog is active */
+	output_buffer_append_string(&output, "\x1b[0m");
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
@@ -9610,6 +9710,12 @@ static int theme_picker_dialog(void)
 			} else if (dr == DIALOG_CANCEL) {
 				theme_picker.dialog.active = false;
 			}
+			continue;
+		}
+
+		/* Tab cycles theme indicator style */
+		if (key == '\t') {
+			editor_cycle_theme_indicator();
 			continue;
 		}
 
