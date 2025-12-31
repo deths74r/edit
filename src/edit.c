@@ -9174,7 +9174,8 @@ static char *path_get_parent(const char *path)
 	}
 
 	if (length == 0) {
-		return strdup("/");
+		/* No directory component - return "." for current directory */
+		return strdup(".");
 	}
 
 	char *parent = malloc(length + 1);
@@ -9393,17 +9394,19 @@ static char *open_file_dialog(void)
 
 	/* Start in directory of current file, or current working directory */
 	char start_path[PATH_MAX];
+	start_path[0] = '\0';
 	if (editor.buffer.filename) {
 		char *parent = path_get_parent(editor.buffer.filename);
 		if (parent) {
 			strncpy(start_path, parent, PATH_MAX - 1);
 			start_path[PATH_MAX - 1] = '\0';
 			free(parent);
-		} else {
-			getcwd(start_path, PATH_MAX);
 		}
-	} else {
-		getcwd(start_path, PATH_MAX);
+	}
+	if (start_path[0] == '\0') {
+		if (getcwd(start_path, PATH_MAX) == NULL) {
+			start_path[0] = '\0';
+		}
 	}
 
 	if (!open_file_load_directory(start_path)) {
@@ -9612,15 +9615,17 @@ static void theme_picker_draw(void)
 				dialog_set_fg(&output, active_theme.dialog_fg);
 			}
 
-			/* Write marker and name */
+			/* Write marker and name - use display width, not byte count */
 			char name_buf[64];
-			int name_len = snprintf(name_buf, sizeof(name_buf), " %s %s",
-			                        marker, t->name ? t->name : "Unknown");
+			int bytes = snprintf(name_buf, sizeof(name_buf), " %s %s",
+			                     marker, t->name ? t->name : "Unknown");
+			int name_len = utflite_string_width(name_buf, bytes);
 
 			int max_name = theme_picker.dialog.panel_width - 12;
 			if (name_len > max_name) {
+				int trunc_byte = utflite_truncate(name_buf, bytes, max_name);
+				name_buf[trunc_byte] = '\0';
 				name_len = max_name;
-				name_buf[max_name] = '\0';
 			}
 			output_buffer_append_string(&output, name_buf);
 
