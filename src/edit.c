@@ -1098,9 +1098,12 @@ static void themes_load(void)
 			continue;
 		}
 
-		/* Build full path */
+		/* Build full path, skip if it would be truncated */
 		char filepath[PATH_MAX];
-		snprintf(filepath, sizeof(filepath), "%s%s", theme_dir, entry->d_name);
+		int path_len = snprintf(filepath, sizeof(filepath), "%s%s", theme_dir, entry->d_name);
+		if (path_len < 0 || (size_t)path_len >= sizeof(filepath)) {
+			continue;
+		}
 
 		/* Parse the theme file */
 		struct theme *parsed = theme_parse_file(filepath);
