@@ -6,7 +6,7 @@ PREFIX = $(HOME)/.local
 BINDIR = $(PREFIX)/bin
 THEMEDIR = $(HOME)/.edit/themes
 
-SRC = src/edit.c
+SRC = src/edit.c src/error.c
 TARGET = edit
 TEST_SRC = test_utf8.c
 TEST_TARGET = test_utf8
@@ -14,7 +14,7 @@ TEST_TARGET = test_utf8
 all: $(TARGET)
 
 $(TARGET): $(SRC)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(TEST_TARGET): $(TEST_SRC)
 	$(CC) $(CFLAGS) -o $@ $<

@@ -2505,10 +2505,23 @@ void terminal_disable_raw_mode(void)
 
 /* Puts the terminal into raw mode for character-by-character input.
  * Disables echo, canonical mode, and signal processing. Registers
- * terminal_disable_raw_mode() to run at exit. */
-static void terminal_enable_raw_mode(void)
+ * terminal_disable_raw_mode() to run at exit.
+ *
+ * Returns 0 on success, negative error code on failure:
+ *   -EEDIT_NOTTY   if stdin is not a terminal
+ *   -EEDIT_TERMRAW if terminal configuration fails
+ */
+static int __must_check terminal_enable_raw_mode(void)
 {
-	tcgetattr(STDIN_FILENO, &original_terminal_settings);
+	/* Verify stdin is a terminal */
+	if (!isatty(STDIN_FILENO))
+		return -EEDIT_NOTTY;
+
+	/* Save original settings for restoration at exit */
+	if (tcgetattr(STDIN_FILENO, &original_terminal_settings) < 0)
+		return -EEDIT_TERMRAW;
+
+	/* Register cleanup only after we have valid settings to restore */
 	atexit(terminal_disable_raw_mode);
 
 	struct termios raw = original_terminal_settings;
@@ -2519,7 +2532,10 @@ static void terminal_enable_raw_mode(void)
 	raw.c_cc[VMIN] = 0;
 	raw.c_cc[VTIME] = 1;
 
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0)
+		return -EEDIT_TERMRAW;
+
+	return 0;
 }
 
 /* Signal handler for SIGWINCH (terminal resize). Sets a flag that the
@@ -2551,27 +2567,28 @@ static void fatal_signal_handler(int sig)
 }
 
 /* Queries the terminal for its current size in rows and columns.
- * Returns true on success, false if the size could not be determined. */
-static bool terminal_get_size(uint32_t *rows, uint32_t *columns)
+ *
+ * Returns 0 on success, -EEDIT_TERMSIZE on failure (ioctl failed or
+ * dimensions too small). Minimum usable size is 10x10.
+ */
+static int __must_check terminal_get_size(uint32_t *rows, uint32_t *columns)
 {
 	struct winsize window_size;
 
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) == -1) {
-		return false;
-	}
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) == -1)
+		return -EEDIT_TERMSIZE;
 
 	/*
 	 * Sanity check: reject unreasonably small dimensions.
 	 * When stdout is a pipe (not a TTY), ioctl may succeed but
 	 * return garbage values. Minimum usable size is 10x10.
 	 */
-	if (window_size.ws_col < 10 || window_size.ws_row < 10) {
-		return false;
-	}
+	if (window_size.ws_col < 10 || window_size.ws_row < 10)
+		return -EEDIT_TERMSIZE;
 
 	*columns = window_size.ws_col;
 	*rows = window_size.ws_row;
-	return true;
+	return 0;
 }
 
 /* Clears the entire screen and moves the cursor to the home position. */
@@ -4763,7 +4780,9 @@ static void editor_update_gutter_width(void)
  */
 static void editor_update_screen_size(void)
 {
-	if (!terminal_get_size(&editor.screen_rows, &editor.screen_columns)) {
+	int ret = terminal_get_size(&editor.screen_rows, &editor.screen_columns);
+	if (ret) {
+		/* Fall back to standard 80x24 */
 		editor.screen_rows = 24;
 		editor.screen_columns = 80;
 	}
@@ -9541,7 +9560,10 @@ static char *open_file_dialog(void)
 
 		/* Handle resize */
 		if (key == -2) {
-			terminal_get_size(&editor.screen_rows, &editor.screen_columns);
+			if (terminal_get_size(&editor.screen_rows, &editor.screen_columns)) {
+				editor.screen_rows = 24;
+				editor.screen_columns = 80;
+			}
 			render_refresh_screen();
 			continue;
 		}
@@ -9829,7 +9851,10 @@ static int theme_picker_dialog(void)
 
 		/* Handle resize */
 		if (key == -2) {
-			terminal_get_size(&editor.screen_rows, &editor.screen_columns);
+			if (terminal_get_size(&editor.screen_rows, &editor.screen_columns)) {
+				editor.screen_rows = 24;
+				editor.screen_columns = 80;
+			}
 			render_refresh_screen();
 			continue;
 		}
@@ -11501,7 +11526,12 @@ static void editor_process_keypress(void)
  */
 int main(int argument_count, char *argument_values[])
 {
-	terminal_enable_raw_mode();
+	int ret = terminal_enable_raw_mode();
+	if (ret) {
+		fprintf(stderr, "edit: %s\n", edit_strerror(ret));
+		return 1;
+	}
+
 	terminal_enable_mouse();
 
 	/* Set up signal handler for window resize */
