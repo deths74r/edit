@@ -9429,36 +9429,36 @@ static void theme_picker_draw(void)
 			}
 			output_buffer_append_string(&output, name_buf);
 
-			/* Draw color preview strip (4 colored blocks) */
+			/* Draw color preview strip (4 colored squares) */
 			if (t) {
 				output_buffer_append_string(&output, " ");
 				name_len++;
 
-				/* Background color block */
-				dialog_set_bg(&output, t->background);
-				output_buffer_append_string(&output, "  ");
-				name_len += 2;
+				/* Background color square */
+				dialog_set_fg(&output, t->background);
+				output_buffer_append_string(&output, "■");
+				name_len++;
 
-				/* Keyword color block */
-				dialog_set_bg(&output, t->syntax[SYNTAX_KEYWORD]);
-				output_buffer_append_string(&output, "  ");
-				name_len += 2;
+				/* Keyword color square */
+				dialog_set_fg(&output, t->syntax[SYNTAX_KEYWORD]);
+				output_buffer_append_string(&output, "■");
+				name_len++;
 
-				/* String color block */
-				dialog_set_bg(&output, t->syntax[SYNTAX_STRING]);
-				output_buffer_append_string(&output, "  ");
-				name_len += 2;
+				/* String color square */
+				dialog_set_fg(&output, t->syntax[SYNTAX_STRING]);
+				output_buffer_append_string(&output, "■");
+				name_len++;
 
-				/* Comment color block */
-				dialog_set_bg(&output, t->syntax[SYNTAX_COMMENT]);
-				output_buffer_append_string(&output, "  ");
-				name_len += 2;
+				/* Comment color square */
+				dialog_set_fg(&output, t->syntax[SYNTAX_COMMENT]);
+				output_buffer_append_string(&output, "■");
+				name_len++;
 
-				/* Reset background for padding */
+				/* Reset foreground for padding */
 				if (is_selected) {
-					dialog_set_bg(&output, active_theme.dialog_highlight_bg);
+					dialog_set_fg(&output, active_theme.dialog_highlight_fg);
 				} else {
-					dialog_set_bg(&output, active_theme.dialog_bg);
+					dialog_set_fg(&output, active_theme.dialog_fg);
 				}
 			}
 
