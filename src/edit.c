@@ -35,6 +35,8 @@
 #define UTFLITE_IMPLEMENTATION
 #include "../third_party/utflite/single_include/utflite.h"
 
+#include "error.h"
+
 /* Current version of the editor, displayed in welcome message and status. */
 #define EDIT_VERSION "0.23.2"
 
@@ -2493,8 +2495,9 @@ static void syntax_highlight_line(struct line *line, struct buffer *buffer,
 static void terminal_disable_mouse(void);
 
 /* Restores the terminal to its original settings. Called automatically
- * at exit via atexit() to ensure the terminal is usable after the editor. */
-static void terminal_disable_raw_mode(void)
+ * at exit via atexit() to ensure the terminal is usable after the editor.
+ * Also called by fatal signal handler and BUG macros. */
+void terminal_disable_raw_mode(void)
 {
 	terminal_disable_mouse();
 	tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_terminal_settings);
@@ -2525,6 +2528,26 @@ static void terminal_handle_resize(int signal)
 {
 	(void)signal;
 	terminal_resized = 1;
+}
+
+/*
+ * Fatal signal handler - attempts to save user data before dying.
+ *
+ * Called on SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL. Restores the
+ * terminal to a sane state and attempts emergency save, then re-raises
+ * the signal with default handler to get proper exit status.
+ */
+static void fatal_signal_handler(int sig)
+{
+	/* Restore terminal first so error output is visible */
+	terminal_disable_raw_mode();
+
+	/* Attempt to save user's work */
+	emergency_save();
+
+	/* Re-raise with default handler to get proper exit status */
+	signal(sig, SIG_DFL);
+	raise(sig);
 }
 
 /* Queries the terminal for its current size in rows and columns.
@@ -3291,6 +3314,85 @@ static void buffer_insert_newline(struct buffer *buffer, uint32_t row, uint32_t 
 
 /* Forward declaration - status messages used by file operations */
 static void editor_set_status_message(const char *format, ...);
+
+/*
+ * Emergency save - attempt to save buffer contents on crash.
+ *
+ * This function is called by fatal signal handlers and BUG macros to
+ * preserve user data when the editor crashes. It's designed to be as
+ * simple and robust as possible:
+ *
+ * - Guards against recursive calls (crash during emergency save)
+ * - Skips if there's nothing to save
+ * - Tries original location first, falls back to /tmp
+ * - Handles both cold (mmap'd) and warm/hot (cell-based) lines
+ * - Best effort: ignores write errors since we're already dying
+ */
+void emergency_save(void)
+{
+	static bool in_emergency_save = false;
+
+	/* Guard against recursive calls */
+	if (in_emergency_save)
+		return;
+	in_emergency_save = true;
+
+	struct buffer *buffer = &editor.buffer;
+
+	/* Nothing to save? */
+	if (buffer->line_count == 0 || !buffer->is_modified)
+		return;
+
+	/* Build emergency filename */
+	char emergency_path[PATH_MAX];
+	pid_t pid = getpid();
+
+	if (buffer->filename) {
+		snprintf(emergency_path, sizeof(emergency_path),
+		         "%s.emergency.%d", buffer->filename, pid);
+	} else {
+		snprintf(emergency_path, sizeof(emergency_path),
+		         "/tmp/edit.emergency.%d", pid);
+	}
+
+	/* Try to open file for writing */
+	FILE *file = fopen(emergency_path, "w");
+	if (!file && buffer->filename) {
+		/* Fallback to /tmp if original location fails */
+		snprintf(emergency_path, sizeof(emergency_path),
+		         "/tmp/edit.emergency.%d", pid);
+		file = fopen(emergency_path, "w");
+	}
+
+	if (!file)
+		return;
+
+	/* Write all lines - best effort, ignore errors */
+	for (uint32_t row = 0; row < buffer->line_count; row++) {
+		struct line *line = &buffer->lines[row];
+
+		if (line->temperature == LINE_TEMPERATURE_COLD) {
+			/* Cold line: write directly from mmap */
+			if (buffer->mmap_base && line->mmap_length > 0) {
+				fwrite(buffer->mmap_base + line->mmap_offset,
+				       1, line->mmap_length, file);
+			}
+		} else {
+			/* Warm/hot line: encode cells to UTF-8 */
+			for (uint32_t col = 0; col < line->cell_count; col++) {
+				char utf8_buffer[UTFLITE_MAX_BYTES];
+				int bytes = utflite_encode(
+					line->cells[col].codepoint, utf8_buffer);
+				fwrite(utf8_buffer, 1, bytes, file);
+			}
+		}
+
+		fwrite("\n", 1, 1, file);
+	}
+
+	fclose(file);
+	fprintf(stderr, "edit: emergency save to %s\n", emergency_path);
+}
 
 /*
  * Build the line index by scanning the mmap for newlines. Each line is
@@ -11408,6 +11510,13 @@ int main(int argument_count, char *argument_values[])
 	sigemptyset(&signal_action.sa_mask);
 	signal_action.sa_flags = SA_RESTART;
 	sigaction(SIGWINCH, &signal_action, NULL);
+
+	/* Set up fatal signal handlers for crash recovery */
+	signal(SIGSEGV, fatal_signal_handler);
+	signal(SIGABRT, fatal_signal_handler);
+	signal(SIGBUS, fatal_signal_handler);
+	signal(SIGFPE, fatal_signal_handler);
+	signal(SIGILL, fatal_signal_handler);
 
 	editor_init();
 	editor_update_screen_size();
