@@ -630,53 +630,53 @@ static struct syntax_color color_ensure_contrast(struct syntax_color fg,
 static struct theme theme_create_default(void)
 {
 	struct theme t = {0};
-	t.name = strdup("Default");
+	t.name = strdup("Mono Black");
 
-	/* Core UI */
-	t.background = (struct syntax_color){0x12, 0x12, 0x12};
-	t.foreground = (struct syntax_color){0xE0, 0xE0, 0xE0};
+	/* Core UI - pure monochrome dark theme */
+	t.background = (struct syntax_color){0x0A, 0x0A, 0x0A};
+	t.foreground = (struct syntax_color){0xD0, 0xD0, 0xD0};
 
 	/* Line numbers */
-	t.line_number = (struct syntax_color){0x60, 0x60, 0x60};
-	t.line_number_active = (struct syntax_color){0xA0, 0xA0, 0xA0};
+	t.line_number = (struct syntax_color){0x50, 0x50, 0x50};
+	t.line_number_active = (struct syntax_color){0x80, 0x80, 0x80};
 
 	/* Status bar */
-	t.status_bg = (struct syntax_color){0x30, 0x30, 0x30};
-	t.status_fg = (struct syntax_color){0xE0, 0xE0, 0xE0};
-	t.message = (struct syntax_color){0xA0, 0xA0, 0xA0};
+	t.status_bg = (struct syntax_color){0x2A, 0x2A, 0x2A};
+	t.status_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
+	t.message = (struct syntax_color){0xD0, 0xD0, 0xD0};
 
 	/* Selection and search */
-	t.selection = (struct syntax_color){0x2D, 0x4F, 0x4F};
-	t.search_match = (struct syntax_color){0x3D, 0x3D, 0x5D};
-	t.search_current = (struct syntax_color){0x5D, 0x4D, 0x3D};
+	t.selection = (struct syntax_color){0x40, 0x40, 0x40};
+	t.search_match = (struct syntax_color){0x60, 0x60, 0x60};
+	t.search_current = (struct syntax_color){0x90, 0x90, 0x90};
 
 	/* Cursor line */
-	t.cursor_line = (struct syntax_color){0x28, 0x28, 0x28};
+	t.cursor_line = (struct syntax_color){0x1A, 0x1A, 0x1A};
 
 	/* Whitespace and guides */
-	t.whitespace = (struct syntax_color){0x50, 0x50, 0x50};
-	t.trailing_ws = (struct syntax_color){0x50, 0x30, 0x30};
-	t.color_column = (struct syntax_color){0x2A, 0x2A, 0x2A};
-	t.color_column_line = (struct syntax_color){0x45, 0x45, 0x45};
+	t.whitespace = (struct syntax_color){0x38, 0x38, 0x38};
+	t.trailing_ws = (struct syntax_color){0x4A, 0x30, 0x30};
+	t.color_column = (struct syntax_color){0x1A, 0x1A, 0x1A};
+	t.color_column_line = (struct syntax_color){0x38, 0x38, 0x38};
 
 	/* Dialog panel colors */
-	t.dialog_bg = (struct syntax_color){0x1E, 0x1E, 0x1E};
-	t.dialog_fg = (struct syntax_color){0xE0, 0xE0, 0xE0};
-	t.dialog_highlight_bg = (struct syntax_color){0x3D, 0x5A, 0x80};
+	t.dialog_bg = (struct syntax_color){0x1A, 0x1A, 0x1A};
+	t.dialog_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
+	t.dialog_highlight_bg = (struct syntax_color){0x40, 0x40, 0x40};
 	t.dialog_highlight_fg = (struct syntax_color){0xFF, 0xFF, 0xFF};
 
-	/* Syntax colors - Tritanopia-friendly palette */
-	t.syntax[SYNTAX_NORMAL]       = (struct syntax_color){0xE0, 0xE0, 0xE0};
-	t.syntax[SYNTAX_KEYWORD]      = (struct syntax_color){0xFF, 0x79, 0xC6};
-	t.syntax[SYNTAX_TYPE]         = (struct syntax_color){0x8B, 0xE9, 0xFD};
-	t.syntax[SYNTAX_STRING]       = (struct syntax_color){0xFF, 0x95, 0x80};
-	t.syntax[SYNTAX_NUMBER]       = (struct syntax_color){0xFF, 0xB0, 0x90};
-	t.syntax[SYNTAX_COMMENT]      = (struct syntax_color){0x90, 0x90, 0x90};
-	t.syntax[SYNTAX_PREPROCESSOR] = (struct syntax_color){0xFF, 0xB3, 0xD9};
-	t.syntax[SYNTAX_FUNCTION]     = (struct syntax_color){0xA0, 0xF0, 0xF0};
-	t.syntax[SYNTAX_OPERATOR]     = (struct syntax_color){0xFF, 0xFF, 0xFF};
-	t.syntax[SYNTAX_BRACKET]      = (struct syntax_color){0xD0, 0xD0, 0xD0};
-	t.syntax[SYNTAX_ESCAPE]       = (struct syntax_color){0xFF, 0x80, 0x80};
+	/* Syntax colors - grayscale with varying intensity */
+	t.syntax[SYNTAX_NORMAL]       = (struct syntax_color){0xD0, 0xD0, 0xD0};
+	t.syntax[SYNTAX_KEYWORD]      = (struct syntax_color){0xFF, 0xFF, 0xFF};
+	t.syntax[SYNTAX_TYPE]         = (struct syntax_color){0xE0, 0xE0, 0xE0};
+	t.syntax[SYNTAX_STRING]       = (struct syntax_color){0xA0, 0xA0, 0xA0};
+	t.syntax[SYNTAX_NUMBER]       = (struct syntax_color){0xC0, 0xC0, 0xC0};
+	t.syntax[SYNTAX_COMMENT]      = (struct syntax_color){0x60, 0x60, 0x60};
+	t.syntax[SYNTAX_PREPROCESSOR] = (struct syntax_color){0x90, 0x90, 0x90};
+	t.syntax[SYNTAX_FUNCTION]     = (struct syntax_color){0xF0, 0xF0, 0xF0};
+	t.syntax[SYNTAX_OPERATOR]     = (struct syntax_color){0xB0, 0xB0, 0xB0};
+	t.syntax[SYNTAX_BRACKET]      = (struct syntax_color){0xC8, 0xC8, 0xC8};
+	t.syntax[SYNTAX_ESCAPE]       = (struct syntax_color){0xCC, 0xCC, 0xCC};
 
 	return t;
 }
@@ -956,17 +956,17 @@ static void themes_load(void)
 		return;  /* No theme directory - use default only */
 	}
 
-	/* Scan for .edit files */
+	/* Scan for .ini files */
 	struct dirent *entry;
 	while ((entry = readdir(dir)) != NULL) {
-		/* Check for .edit extension */
+		/* Check for .ini extension */
 		size_t name_len = strlen(entry->d_name);
-		if (name_len < 6) {
-			continue;  /* Too short for "x.edit" */
+		if (name_len < 5) {
+			continue;  /* Too short for "x.ini" */
 		}
 
-		const char *ext = entry->d_name + name_len - 5;
-		if (strcmp(ext, ".edit") != 0) {
+		const char *ext = entry->d_name + name_len - 4;
+		if (strcmp(ext, ".ini") != 0) {
 			continue;
 		}
 
@@ -2399,7 +2399,7 @@ static void output_buffer_init(struct output_buffer *output)
 static void output_buffer_append(struct output_buffer *output, const char *text, size_t length)
 {
 	if (output->length + length > output->capacity) {
-		size_t new_capacity = output->capacity * 2;
+		size_t new_capacity = output->capacity ? output->capacity * 2 : 256;
 		while (new_capacity < output->length + length) {
 			new_capacity *= 2;
 		}
@@ -2932,7 +2932,7 @@ static void buffer_free(struct buffer *buffer)
 static void buffer_ensure_capacity(struct buffer *buffer, uint32_t required)
 {
 	if (required > buffer->line_capacity) {
-		uint32_t new_capacity = buffer->line_capacity * 2;
+		uint32_t new_capacity = buffer->line_capacity ? buffer->line_capacity * 2 : INITIAL_BUFFER_CAPACITY;
 		while (new_capacity < required) {
 			new_capacity *= 2;
 		}
@@ -3133,6 +3133,10 @@ static void file_build_line_index(struct buffer *buffer)
 			line->mmap_offset = line_start;
 			line->mmap_length = line_end - line_start;
 			line->temperature = LINE_TEMPERATURE_COLD;
+			line->wrap_columns = NULL;
+			line->wrap_segment_count = 0;
+			line->wrap_cache_width = 0;
+			line->wrap_cache_mode = WRAP_NONE;
 
 			buffer->line_count++;
 			line_start = i + 1;
@@ -9146,8 +9150,9 @@ static char *open_file_dialog(void)
 		}
 	}
 
-	/* Enable dialog mouse mode */
+	/* Enable dialog mouse mode and flush any pending input */
 	dialog_mouse_mode = true;
+	tcflush(STDIN_FILENO, TCIFLUSH);
 
 	char *result = NULL;
 
@@ -9419,8 +9424,9 @@ static int theme_picker_dialog(void)
 	dialog_calculate_dimensions(&theme_picker.dialog);
 	dialog_ensure_visible(&theme_picker.dialog);
 
-	/* Enable dialog mouse mode */
+	/* Enable dialog mouse mode and flush pending input */
 	dialog_mouse_mode = true;
+	tcflush(STDIN_FILENO, TCIFLUSH);
 
 	int result = -1;
 	int last_preview_index = -1;
