@@ -3458,20 +3458,24 @@ static void file_build_line_index(struct buffer *buffer)
 /*
  * Load a file from disk into a buffer using mmap. The file is memory-mapped
  * and lines are created as cold references into the mmap. Only lines that
- * are accessed will have cells allocated. Returns true on success, false
- * if the file couldn't be opened.
+ * are accessed will have cells allocated.
+ *
+ * Returns 0 on success, negative error code on failure:
+ *   -ENOENT, -EACCES, etc. from open()
+ *   -errno from fstat() or mmap()
+ *   -ENOMEM from allocation failure
  */
-static bool file_open(struct buffer *buffer, const char *filename)
+static int __must_check file_open(struct buffer *buffer, const char *filename)
 {
 	int fd = open(filename, O_RDONLY);
-	if (fd < 0) {
-		return false;
-	}
+	if (fd < 0)
+		return -errno;
 
 	struct stat st;
 	if (fstat(fd, &st) < 0) {
+		int err = errno;
 		close(fd);
-		return false;
+		return -err;
 	}
 
 	size_t file_size = st.st_size;
@@ -3480,8 +3484,9 @@ static bool file_open(struct buffer *buffer, const char *filename)
 	if (file_size > 0) {
 		mapped = mmap(NULL, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
 		if (mapped == MAP_FAILED) {
+			int err = errno;
 			close(fd);
-			return false;
+			return -err;
 		}
 		/* Hint: we'll access this randomly as user scrolls */
 		madvise(mapped, file_size, MADV_RANDOM);
@@ -3494,7 +3499,15 @@ static bool file_open(struct buffer *buffer, const char *filename)
 	/* Build line index by scanning for newlines */
 	file_build_line_index(buffer);
 
-	buffer->filename = strdup(filename);
+	char *name = edit_strdup(filename);
+	if (IS_ERR(name)) {
+		/* Clean up on allocation failure */
+		if (mapped)
+			munmap(mapped, file_size);
+		close(fd);
+		return (int)PTR_ERR(name);
+	}
+	buffer->filename = name;
 	buffer->is_modified = false;
 
 	/* Compute pairs across entire buffer (warms all lines) */
@@ -3505,20 +3518,23 @@ static bool file_open(struct buffer *buffer, const char *filename)
 		syntax_highlight_line(&buffer->lines[row], buffer, row);
 	}
 
-	return true;
+	return 0;
 }
 
 /*
  * Write a buffer's contents to disk. All lines are warmed first since
  * opening the file for writing will invalidate any mmap. The mmap is
  * then unmapped before writing. Updates the status message with bytes
- * written. Returns true on success, false if save fails.
+ * written on success.
+ *
+ * Returns 0 on success, negative error code on failure:
+ *   -EINVAL if buffer->filename is NULL
+ *   -errno from fopen(), fwrite(), or fclose()
  */
-static bool file_save(struct buffer *buffer)
+static int __must_check file_save(struct buffer *buffer)
 {
-	if (buffer->filename == NULL) {
-		return false;
-	}
+	if (buffer->filename == NULL)
+		return -EINVAL;
 
 	/* Warm all cold lines before we invalidate the mmap */
 	for (uint32_t row = 0; row < buffer->line_count; row++) {
@@ -3537,9 +3553,8 @@ static bool file_save(struct buffer *buffer)
 	}
 
 	FILE *file = fopen(buffer->filename, "w");
-	if (file == NULL) {
-		return false;
-	}
+	if (file == NULL)
+		return -errno;
 
 	size_t total_bytes = 0;
 
@@ -3550,20 +3565,29 @@ static bool file_save(struct buffer *buffer)
 		for (uint32_t col = 0; col < line->cell_count; col++) {
 			char utf8_buffer[UTFLITE_MAX_BYTES];
 			int bytes = utflite_encode(line->cells[col].codepoint, utf8_buffer);
-			fwrite(utf8_buffer, 1, bytes, file);
+			if (fwrite(utf8_buffer, 1, bytes, file) != (size_t)bytes) {
+				int err = errno;
+				fclose(file);
+				return -err;
+			}
 			total_bytes += bytes;
 		}
 
-		fwrite("\n", 1, 1, file);
+		if (fwrite("\n", 1, 1, file) != 1) {
+			int err = errno;
+			fclose(file);
+			return -err;
+		}
 		total_bytes++;
 	}
 
-	fclose(file);
-	buffer->is_modified = false;
+	if (fclose(file) != 0)
+		return -errno;
 
+	buffer->is_modified = false;
 	editor_set_status_message("%zu bytes written to disk", total_bytes);
 
-	return true;
+	return 0;
 }
 
 /*****************************************************************************
@@ -6386,10 +6410,12 @@ static void editor_save(void)
 		return;
 	}
 
-	if (file_save(&editor.buffer)) {
-		editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
+	int ret = file_save(&editor.buffer);
+	if (ret) {
+		editor_set_status_message("Save failed: %s", edit_strerror(ret));
 	} else {
-		editor_set_status_message("Error saving file: %s", strerror(errno));
+		editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
+		/* Success message is set by file_save */
 	}
 }
 
@@ -9648,9 +9674,10 @@ static bool editor_open_file(const char *path)
 	buffer_init(&editor.buffer);
 
 	/* Load the file */
-	if (!file_open(&editor.buffer, path)) {
-		/* Failed to load - create empty buffer */
-		editor_set_status_message("Cannot open file: %s", path);
+	int ret = file_open(&editor.buffer, path);
+	if (ret) {
+		/* Failed to load - show error with reason */
+		editor_set_status_message("Cannot open file: %s", edit_strerror(ret));
 		return false;
 	}
 
@@ -10317,8 +10344,13 @@ static bool save_as_execute(void)
 
 	free(old_filename);
 
-	/* Use existing save function */
-	editor_save();
+	/* Save the file - editor_save handles error display */
+	int ret = file_save(&editor.buffer);
+	if (ret) {
+		editor_set_status_message("Save failed: %s", edit_strerror(ret));
+		return false;
+	}
+	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
 	/* Exit save as mode */
 	save_as_exit();
@@ -11552,10 +11584,17 @@ int main(int argument_count, char *argument_values[])
 	editor_update_screen_size();
 
 	if (argument_count >= 2) {
-		if (!file_open(&editor.buffer, argument_values[1])) {
-			/* File doesn't exist yet, just set filename for new file */
-			editor.buffer.filename = strdup(argument_values[1]);
-			editor.buffer.is_modified = false;
+		int ret = file_open(&editor.buffer, argument_values[1]);
+		if (ret) {
+			if (ret == -ENOENT) {
+				/* File doesn't exist yet - that's OK, new file */
+				editor.buffer.filename = strdup(argument_values[1]);
+				editor.buffer.is_modified = false;
+			} else {
+				/* Real error - show message but continue with empty buffer */
+				editor_set_status_message("Cannot open file: %s",
+				                          edit_strerror(ret));
+			}
 		}
 	}
 
