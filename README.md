@@ -19,7 +19,7 @@ A minimal terminal text editor written in C.
   - [Multi-Cursor Editing](#multi-cursor-editing)
   - [The Rendering Pipeline](#the-rendering-pipeline)
   - [Error Handling](#error-handling)
-  - [Color and Accessibility](#color-and-accessibility)
+  - [The Theme System](#the-theme-system)
 - [Extending the Editor](#extending-the-editor)
 - [Building from Source](#building-from-source)
 
@@ -29,13 +29,13 @@ A minimal terminal text editor written in C.
 
 Most terminal editors fall into two camps. The first—nano, micro, and their kin—offer simplicity at the cost of power. The second—vim, emacs, kakoune—offer power at the cost of a learning curve that resembles a cliff face. Both camps assume you'll eventually want plugins, configuration files, and an ecosystem of extensions.
 
-This editor makes a different bet: that a small C codebase, compiled without dependencies beyond libc, can provide enough functionality for daily use while remaining small enough to understand completely. The entire implementation fits in roughly 12,000 lines across three source files. There are no plugins, no configuration files, no runtime dependencies. What you compile is what you get.
+This editor makes a different bet: that a small C codebase, compiled without dependencies beyond libc, can provide enough functionality for daily use while remaining small enough to understand completely. The implementation spans roughly 12,000 lines across three source files. There are no plugins, no runtime dependencies. What you compile is what you get.
 
-The feature set reflects this philosophy. Full Unicode support, because text in 2025 is Unicode. C syntax highlighting, because the editor is written in C and should be able to edit itself pleasantly. Soft line wrapping, because modern displays are wide and horizontal scrolling is tedious. Multiple cursors, because some edits are naturally parallel. Undo with automatic grouping, because mistakes happen. Find and replace with regex support, because pattern matching is fundamental to text editing.
+The feature set reflects this philosophy. Full Unicode support, because text in 2025 is Unicode. C syntax highlighting, because the editor is written in C and should be able to edit itself pleasantly. Soft line wrapping, because modern displays are wide and horizontal scrolling is tedious. Multiple cursors, because some edits are naturally parallel. Undo with automatic grouping, because mistakes happen. Find and replace with regex support, because pattern matching is fundamental to text editing. A theme system with 49 built-in themes, because aesthetics matter.
 
-What's deliberately absent is equally telling. No plugin system, because plugins require an API, and APIs require maintenance. No configuration file, because sensible defaults should suffice. No language server protocol support, because that's a different tool's job. No split panes, because a terminal multiplexer handles that better.
+What's deliberately absent is equally telling. No plugin system, because plugins require an API, and APIs require maintenance. No language server protocol support, because that's a different tool's job. No split panes, because a terminal multiplexer handles that better.
 
-The result is an editor that starts instantly, uses minimal memory, and does exactly what it appears to do. The entire state of the program lives in a single global struct. The entire rendering pipeline fits in one function. If something breaks, there's only one place to look.
+The result is an editor that starts instantly, uses minimal memory, and does exactly what it appears to do. The entire state of the program lives in a single global struct. If something breaks, there's one place to look.
 
 ---
 
@@ -45,21 +45,25 @@ The editor provides:
 
 - **Full Unicode support** — UTF-8 encoding, grapheme cluster navigation, proper display widths for CJK characters and emoji. The cursor moves by what humans perceive as characters, not by bytes or codepoints.
 
-- **C syntax highlighting** — Keywords, types, strings, comments, preprocessor directives, function calls, operators, and escape sequences are colored distinctly.
+- **C syntax highlighting** — Keywords, types, strings, comments, preprocessor directives, function calls, operators, numbers, and escape sequences are colored distinctly. Highlighting is computed once per edit, not on every render.
 
-- **Soft line wrapping** — Three modes: no wrapping (horizontal scroll), word wrap (break at word boundaries), and character wrap (break anywhere). Configurable continuation indicators.
+- **Soft line wrapping** — Three modes: no wrapping (horizontal scroll), word wrap (break at word boundaries), and character wrap (break anywhere). Eight wrap indicator styles available.
 
 - **Find and replace** — Incremental search with real-time highlighting. Case sensitivity, whole-word matching, and POSIX extended regular expressions with backreference support in replacements.
 
-- **Multiple cursors** — Select a word with Ctrl+D, press again to add a cursor at the next occurrence. Type to insert at all cursors simultaneously.
+- **Multiple cursors** — Select a word with Ctrl+D, press again to add a cursor at the next occurrence. Type to insert at all cursors simultaneously. Supports up to 100 concurrent cursors.
 
-- **Bracket matching** — Paired delimiters are tracked across the entire buffer. Jump between matching brackets with Ctrl+].
+- **Bracket matching** — Paired delimiters are tracked across the entire buffer. Jump between matching brackets with Ctrl+]. Supports parentheses, brackets, braces, quotes, and block comments.
 
-- **Undo and redo** — Full history with automatic grouping. Rapid keystrokes are grouped together; pauses create new undo points.
+- **Undo and redo** — Full history with automatic grouping. Rapid keystrokes within one second are grouped together; pauses create new undo points. Cursor position is restored on undo/redo.
 
-- **Mouse support** — Click to position cursor, drag to select, double-click for word selection, triple-click for line selection, scroll wheel with adaptive speed.
+- **Mouse support** — Click to position cursor, drag to select, double-click for word selection, triple-click for line selection. Scroll wheel with adaptive velocity-based scrolling.
 
-- **Visual aids** — Optional color column at 80 or 120 characters, trailing whitespace highlighting, visible whitespace mode, cursor line highlighting.
+- **File dialogs** — Visual file browser for opening files, theme picker with live preview. Mouse and keyboard navigation.
+
+- **Theme system** — 49 built-in themes plus support for custom themes in `~/.edit/themes/`. WCAG 2.1 AA compliant contrast ratios.
+
+- **Visual aids** — Optional color column at 80 or 120 characters with five display styles, trailing whitespace highlighting, visible whitespace mode, cursor line highlighting.
 
 ---
 
@@ -69,7 +73,7 @@ The editor provides:
 git clone https://github.com/yourusername/edit.git
 cd edit
 make
-make install    # Installs to ~/.local/bin
+make install    # Installs to ~/.local/bin and themes to ~/.edit/themes
 ```
 
 To uninstall:
@@ -87,6 +91,7 @@ make uninstall
 | Key | Action |
 |-----|--------|
 | Ctrl+S | Save |
+| Ctrl+O | Open file dialog |
 | F12 or Alt+Shift+S | Save As |
 | Ctrl+Q | Quit (press 3 times if unsaved changes) |
 
@@ -96,7 +101,7 @@ make uninstall
 |-----|--------|
 | Arrows | Move cursor |
 | Ctrl+Arrow | Move by word |
-| Home / End | Start / end of line (or segment in wrap mode) |
+| Home / End | Start / end of line |
 | Page Up / Page Down | Scroll by screen |
 | Ctrl+G | Go to line number |
 | Ctrl+] or Alt+] | Jump to matching bracket |
@@ -140,7 +145,7 @@ make uninstall
 | Alt+W | Toggle whole word matching |
 | Alt+R | Toggle regex mode |
 | Tab | Switch between search and replace fields |
-| Enter | Replace current match |
+| Enter | Replace current match and find next |
 | Alt+A | Replace all matches |
 | Escape | Cancel search |
 
@@ -152,6 +157,7 @@ make uninstall
 | F3 | Toggle whitespace visibility |
 | F4 | Cycle color column (off / 80 / 120) |
 | Shift+F4 | Cycle color column style |
+| F5 or Ctrl+T | Open theme picker |
 | Alt+Z | Cycle wrap mode (off / word / character) |
 | Alt+Shift+Z | Cycle wrap indicator style |
 
@@ -177,7 +183,7 @@ WARM   →   cells decoded, ready for display (~24 + 12n bytes, n = characters)
 HOT    →   cells edited, mmap content stale (same memory as warm)
 ```
 
-The practical effect is that opening a 100,000-line file allocates only line metadata until you scroll to a particular region. Lines you never view never consume more than a few bytes each.
+The practical effect is that opening a 100,000-line file allocates only line metadata until you scroll to a particular region. Lines you never view never consume more than their metadata overhead.
 
 ### The Cell
 
@@ -221,6 +227,7 @@ The `context` field links matching delimiters:
 Bits 0-23:   Pair ID (unique identifier, up to 16 million pairs)
 Bits 24-26:  Pair type (parenthesis, bracket, brace, quote, comment)
 Bits 27-28:  Pair role (opener or closer)
+Bits 29-31:  Reserved
 ```
 
 When a file is loaded, the editor scans for delimiters and assigns each matched pair a unique ID. An opening parenthesis and its matching closer share the same pair ID. This makes jumping to the matching bracket trivial: read the pair ID from the current cell, search for another cell with the same ID and opposite role.
@@ -231,18 +238,18 @@ The 24-bit pair ID field supports up to 16 million unique pairs in a single file
 
 ### Syntax Highlighting
 
-Highlighting is performed per-line in `syntax_highlight_line()`. The algorithm:
+Highlighting is performed per-line. The algorithm:
 
 1. Check if the line starts with `#` (preprocessor directive)
 2. Scan for string literals, handling escape sequences
 3. Check pair entanglement to detect block comment regions
 4. Scan for line comments (`//`)
-5. Match keywords (`if`, `else`, `for`, `while`, etc.)
-6. Match type keywords (`int`, `char`, `void`, `struct`, etc.)
+5. Match keywords (`if`, `else`, `for`, `while`, `return`, etc.)
+6. Match type keywords (`int`, `char`, `void`, `struct`, `uint32_t`, etc.)
 7. Detect function calls (identifier immediately followed by `(`)
-8. Mark numbers, operators, and brackets
+8. Mark numbers (decimal, hex, floats with suffixes), operators, and brackets
 
-Each cell's `syntax` field is set to the appropriate token type. During rendering, the token type indexes into a color table to determine the foreground color.
+Each cell's `syntax` field is set to one of eleven token types. During rendering, the token type indexes into the active theme's color table to determine the foreground color.
 
 Highlighting is recomputed only when a line is edited. Scrolling through a file that hasn't been modified performs no highlighting work—the colors were computed when the lines were first warmed.
 
@@ -271,7 +278,7 @@ The undo system records operations, not snapshots. Each edit generates an operat
 
 ```c
 struct edit_operation {
-    enum edit_operation_type type;  // INSERT_CHAR, DELETE_CHAR, etc.
+    enum edit_operation_type type;  // INSERT_CHAR, DELETE_CHAR, INSERT_NEWLINE, DELETE_NEWLINE, DELETE_TEXT
     uint32_t row, column;           // Position
     uint32_t codepoint;             // For single-character operations
     char *text;                     // For multi-character operations
@@ -334,7 +341,7 @@ if (IS_ERR(ptr))
     return (int)PTR_ERR(ptr);  // Propagate error code
 ```
 
-**Checked Functions** — Core operations have `_checked` variants that return error codes instead of crashing. The pattern enables graceful error handling at appropriate boundaries:
+**Checked Functions** — Core operations have `_checked` variants that return error codes instead of crashing. Editor commands use these and display errors in the status bar:
 
 ```c
 int ret = buffer_insert_cell_at_column_checked(&buffer, row, col, codepoint);
@@ -344,41 +351,62 @@ if (ret) {
 }
 ```
 
-**Emergency Save** — Fatal errors trigger `emergency_save()`, which writes buffer contents to a recovery file before terminating. Signal handlers for SIGSEGV, SIGBUS, and similar signals invoke this automatically.
+**Emergency Save** — Fatal errors trigger `emergency_save()`, which writes buffer contents to a recovery file before terminating. Signal handlers for SIGSEGV, SIGBUS, SIGABRT, SIGFPE, and SIGILL invoke this automatically.
 
 **BUG/WARN Macros** — Invariant violations are caught with `BUG_ON()` (fatal, triggers emergency save) and `WARN_ON()` (logs but continues). These serve as runtime assertions for conditions that indicate programming errors rather than recoverable failures.
 
 The error handling philosophy is defense in depth: editor commands show user-friendly messages for recoverable errors (out of memory during paste), while internal invariant violations trigger emergency save to preserve work. The goal is that no crash should lose unsaved edits.
 
-### Color and Accessibility
+### The Theme System
 
-The color scheme is designed for Tritanopia (blue-yellow color blindness) while meeting WCAG 2.1 AA accessibility standards. Every foreground/background combination maintains at least a 4.5:1 contrast ratio.
+The editor includes 49 built-in themes and supports custom themes loaded from `~/.edit/themes/`.
 
-The design principles:
-
-- **Luminance as primary differentiator** — Colors are distinguishable by brightness alone, not just hue
-- **Red-cyan axis** — These colors remain distinct to people with Tritanopia
-- **No blue-yellow distinctions** — Critical information is never conveyed through blue vs. yellow
-
-When text appears on a colored background (selection, search highlight), the editor automatically adjusts the foreground color if the original combination would have insufficient contrast:
+Each theme defines over 30 colors:
 
 ```c
-struct syntax_color color_ensure_contrast(struct syntax_color fg, struct syntax_color bg) {
-    double ratio = color_contrast_ratio(fg, bg);
-    if (ratio >= 4.5) return fg;  // Already compliant
-    // Iteratively adjust toward lighter or darker...
-}
+struct theme {
+    char *name;
+    struct syntax_color background, foreground;
+    struct syntax_color line_number, line_number_active;
+    struct syntax_color status_bg, status_fg;
+    struct syntax_color message_bg, message_fg;
+    struct syntax_color selection, search_match, search_current;
+    struct syntax_color cursor_line, whitespace, trailing_ws;
+    struct syntax_color color_column, color_column_line;
+    struct syntax_color dialog_bg, dialog_fg;
+    struct syntax_color dialog_header_bg, dialog_header_fg;
+    struct syntax_color dialog_footer_bg, dialog_footer_fg;
+    struct syntax_color dialog_highlight_bg, dialog_highlight_fg;
+    struct syntax_color syntax[11];      // Per-token colors
+    struct syntax_color syntax_bg[11];   // Optional token backgrounds
+    bool syntax_bg_set[11];
+};
 ```
+
+Custom themes use INI format with hex color values:
+
+```ini
+[theme]
+name = My Theme
+background = 1a1a2e
+foreground = eaeaea
+keyword = ff79c6
+string = f1fa8c
+```
+
+The theme picker (F5 or Ctrl+T) provides live preview—selecting a theme immediately applies it so you can see how your code looks before confirming.
+
+All themes enforce WCAG 2.1 AA contrast requirements. The editor automatically adjusts foreground colors when they would have insufficient contrast against backgrounds (selection, search highlights), iteratively lightening or darkening until the 4.5:1 ratio is achieved.
 
 ---
 
 ## Extending the Editor
 
-The single-file architecture makes extension straightforward. Common modifications:
+The architecture makes extension straightforward. Common modifications:
 
 **Adding a key binding:** Define a key code in `enum key_code`, detect it in `input_read_key()`, handle it in `editor_process_keypress()`.
 
-**Adding a syntax token:** Add to `enum syntax_token`, define its color in `THEME_COLORS[]`, update `syntax_highlight_line()` to detect and mark it.
+**Adding a syntax token:** Add to `enum syntax_token`, define its color in theme files, update `syntax_highlight_line()` to detect and mark it.
 
 **Adding a new mode:** Follow the pattern of search, goto, or save-as: a state struct, enter/exit functions, a key handler that returns true if it consumed the key.
 
@@ -388,7 +416,7 @@ The codebase follows Linux kernel style: tabs for indentation, explicit `struct`
 
 ## Building from Source
 
-Requirements: a C17 compiler and make. The editor compiles on Linux, macOS, and BSD. Dependencies (the utflite UTF-8 library) are bundled.
+Requirements: a C17 compiler and make. The editor compiles on Linux, macOS, and BSD. The utflite UTF-8 library is bundled.
 
 The source consists of three files:
 - `src/edit.c` — Main editor implementation (~11,800 lines)
@@ -399,8 +427,8 @@ The source consists of three files:
 make              # Build the editor
 make test         # Run UTF-8 validation tests
 make clean        # Remove build artifacts
-make install      # Install to ~/.local/bin
-make uninstall    # Remove installed binary
+make install      # Install to ~/.local/bin and themes to ~/.edit/themes
+make uninstall    # Remove installed binary and themes
 ```
 
 The compiler is invoked with `-Wall -Wextra -pedantic -O2`. The build should complete with no warnings.
