@@ -412,6 +412,8 @@ struct theme {
 
 	/* Syntax highlighting colors (indexed by enum syntax_token) */
 	struct syntax_color syntax[SYNTAX_TOKEN_COUNT];
+	struct syntax_color syntax_bg[SYNTAX_TOKEN_COUNT];
+	bool syntax_bg_set[SYNTAX_TOKEN_COUNT];
 };
 
 /* Array of loaded themes */
@@ -678,6 +680,12 @@ static struct theme theme_create_default(void)
 	t.syntax[SYNTAX_BRACKET]      = (struct syntax_color){0xC8, 0xC8, 0xC8};
 	t.syntax[SYNTAX_ESCAPE]       = (struct syntax_color){0xCC, 0xCC, 0xCC};
 
+	/* Syntax backgrounds default to editor background, none explicitly set */
+	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {
+		t.syntax_bg[i] = t.background;
+		t.syntax_bg_set[i] = false;
+	}
+
 	return t;
 }
 
@@ -735,6 +743,12 @@ static struct theme theme_create_mono_white(void)
 	t.syntax[SYNTAX_OPERATOR]     = (struct syntax_color){0x40, 0x40, 0x40};
 	t.syntax[SYNTAX_BRACKET]      = (struct syntax_color){0x28, 0x28, 0x28};
 	t.syntax[SYNTAX_ESCAPE]       = (struct syntax_color){0x30, 0x30, 0x30};
+
+	/* Syntax backgrounds default to editor background, none explicitly set */
+	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {
+		t.syntax_bg[i] = t.background;
+		t.syntax_bg_set[i] = false;
+	}
 
 	return t;
 }
@@ -954,6 +968,51 @@ static struct theme *theme_parse_file(const char *filepath)
 		}
 		else if (strcmp(key, "syntax_escape") == 0 && color_parse_hex(value, &color)) {
 			t->syntax[SYNTAX_ESCAPE] = color;
+		}
+		/* Syntax background colors */
+		else if (strcmp(key, "syntax_normal_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_NORMAL] = color;
+			t->syntax_bg_set[SYNTAX_NORMAL] = true;
+		}
+		else if (strcmp(key, "syntax_keyword_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_KEYWORD] = color;
+			t->syntax_bg_set[SYNTAX_KEYWORD] = true;
+		}
+		else if (strcmp(key, "syntax_type_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_TYPE] = color;
+			t->syntax_bg_set[SYNTAX_TYPE] = true;
+		}
+		else if (strcmp(key, "syntax_string_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_STRING] = color;
+			t->syntax_bg_set[SYNTAX_STRING] = true;
+		}
+		else if (strcmp(key, "syntax_number_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_NUMBER] = color;
+			t->syntax_bg_set[SYNTAX_NUMBER] = true;
+		}
+		else if (strcmp(key, "syntax_comment_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_COMMENT] = color;
+			t->syntax_bg_set[SYNTAX_COMMENT] = true;
+		}
+		else if (strcmp(key, "syntax_preprocessor_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_PREPROCESSOR] = color;
+			t->syntax_bg_set[SYNTAX_PREPROCESSOR] = true;
+		}
+		else if (strcmp(key, "syntax_function_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_FUNCTION] = color;
+			t->syntax_bg_set[SYNTAX_FUNCTION] = true;
+		}
+		else if (strcmp(key, "syntax_operator_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_OPERATOR] = color;
+			t->syntax_bg_set[SYNTAX_OPERATOR] = true;
+		}
+		else if (strcmp(key, "syntax_bracket_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_BRACKET] = color;
+			t->syntax_bg_set[SYNTAX_BRACKET] = true;
+		}
+		else if (strcmp(key, "syntax_escape_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax_bg[SYNTAX_ESCAPE] = color;
+			t->syntax_bg_set[SYNTAX_ESCAPE] = true;
 		}
 	}
 
@@ -7808,8 +7867,14 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				case 1:  /* Selection */
 					bg = active_theme.selection;
 					break;
-				default: /* Normal or cursor line */
-					bg = is_cursor_line ? active_theme.cursor_line : active_theme.background;
+				default: /* Token background, cursor line, or normal */
+					if (active_theme.syntax_bg_set[syntax]) {
+						bg = active_theme.syntax_bg[syntax];
+					} else if (is_cursor_line) {
+						bg = active_theme.cursor_line;
+					} else {
+						bg = active_theme.background;
+					}
 					break;
 			}
 
