@@ -2989,15 +2989,18 @@ static void line_ensure_capacity(struct line *line, uint32_t required)
 	BUG_ON(ret);
 }
 
-/* Inserts a cell with the given codepoint at the specified position.
- * Shifts existing cells to the right. Position is clamped to cell_count. */
-static void line_insert_cell(struct line *line, uint32_t position, uint32_t codepoint)
+/*
+ * Insert a cell with the given codepoint at the specified position.
+ * Shifts existing cells to the right. Position is clamped to cell_count.
+ * Returns 0 on success, -ENOMEM on allocation failure.
+ */
+static int __must_check line_insert_cell_checked(struct line *line, uint32_t position,
+                                                  uint32_t codepoint)
 {
-	if (position > line->cell_count) {
+	if (position > line->cell_count)
 		position = line->cell_count;
-	}
 
-	line_ensure_capacity(line, line->cell_count + 1);
+	PROPAGATE(line_ensure_capacity_checked(line, line->cell_count + 1));
 
 	if (position < line->cell_count) {
 		memmove(&line->cells[position + 1], &line->cells[position],
@@ -3006,6 +3009,17 @@ static void line_insert_cell(struct line *line, uint32_t position, uint32_t code
 
 	line->cells[position] = (struct cell){.codepoint = codepoint};
 	line->cell_count++;
+	return 0;
+}
+
+/*
+ * Insert a cell with the given codepoint at the specified position.
+ * Crashes on allocation failure - use line_insert_cell_checked() for error handling.
+ */
+static void line_insert_cell(struct line *line, uint32_t position, uint32_t codepoint)
+{
+	int ret = line_insert_cell_checked(line, position, codepoint);
+	BUG_ON(ret);
 }
 
 /* Deletes the cell at the specified position, shifting cells left. */
@@ -3023,31 +3037,44 @@ static void line_delete_cell(struct line *line, uint32_t position)
 	line->cell_count--;
 }
 
-/* Appends a cell with the given codepoint to the end of the line. */
-static void line_append_cell(struct line *line, uint32_t codepoint)
+static int __must_check line_append_cell_checked(struct line *line, uint32_t codepoint)
 {
-	line_insert_cell(line, line->cell_count, codepoint);
-}
-
-/* Appends all cells from src line to the end of dest line. Both lines
- * must already be warm or hot. */
-static void line_append_cells_from_line(struct line *dest, struct line *src)
-{
-	for (uint32_t i = 0; i < src->cell_count; i++) {
-		line_append_cell(dest, src->cells[i].codepoint);
-	}
+	return line_insert_cell_checked(line, line->cell_count, codepoint);
 }
 
 /*
- * Warms a cold line by decoding its UTF-8 content from mmap into cells.
- * Does nothing if the line is already warm or hot. After warming, the
- * line's cells array contains the decoded codepoints and syntax highlighting
- * is applied.
+ * Appends a cell with the given codepoint to the end of the line.
+ * Crashes on allocation failure - use line_append_cell_checked() for error handling.
  */
-static void line_warm(struct line *line, struct buffer *buffer)
+static void line_append_cell(struct line *line, uint32_t codepoint)
+{
+	int ret = line_append_cell_checked(line, codepoint);
+	BUG_ON(ret);
+}
+
+static int __must_check line_append_cells_from_line_checked(struct line *dest,
+                                                             struct line *src)
+{
+	for (uint32_t i = 0; i < src->cell_count; i++) {
+		PROPAGATE(line_append_cell_checked(dest, src->cells[i].codepoint));
+	}
+	return 0;
+}
+
+/*
+ * Appends all cells from src line to the end of dest line. Both lines
+ * must already be warm or hot. Crashes on allocation failure.
+ */
+static void line_append_cells_from_line(struct line *dest, struct line *src)
+{
+	int ret = line_append_cells_from_line_checked(dest, src);
+	BUG_ON(ret);
+}
+
+static int __must_check line_warm_checked(struct line *line, struct buffer *buffer)
 {
 	if (line->temperature != LINE_TEMPERATURE_COLD) {
-		return;
+		return 0;
 	}
 
 	const char *text = buffer->mmap_base + line->mmap_offset;
@@ -3058,7 +3085,7 @@ static void line_warm(struct line *line, struct buffer *buffer)
 	while (offset < length) {
 		uint32_t codepoint;
 		int bytes = utflite_decode(text + offset, length - offset, &codepoint);
-		line_append_cell(line, codepoint);
+		PROPAGATE(line_append_cell_checked(line, codepoint));
 		offset += bytes;
 	}
 
@@ -3067,7 +3094,17 @@ static void line_warm(struct line *line, struct buffer *buffer)
 	/* Compute neighbor data for word boundaries */
 	neighbor_compute_line(line);
 
-	/* Note: syntax highlighting is called separately after pairs are computed */
+	return 0;
+}
+
+/*
+ * Warms a cold line by decoding its UTF-8 content from mmap into cells.
+ * Does nothing if the line is already warm or hot. Crashes on allocation failure.
+ */
+static void line_warm(struct line *line, struct buffer *buffer)
+{
+	int ret = line_warm_checked(line, buffer);
+	BUG_ON(ret);
 }
 
 /*
