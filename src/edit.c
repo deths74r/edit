@@ -2619,28 +2619,65 @@ static void terminal_disable_mouse(void)
  * Output Buffer
  *****************************************************************************/
 
-/* Initializes an output buffer with starting capacity. */
-static void output_buffer_init(struct output_buffer *output)
+/*
+ * Initialize an output buffer with starting capacity.
+ * Returns 0 on success, -ENOMEM on allocation failure.
+ */
+static int __must_check output_buffer_init_checked(struct output_buffer *output)
 {
-	output->data = malloc(INITIAL_OUTPUT_CAPACITY);
+	void *data = edit_malloc(INITIAL_OUTPUT_CAPACITY);
+	if (IS_ERR(data))
+		return (int)PTR_ERR(data);
+
+	output->data = data;
 	output->length = 0;
 	output->capacity = INITIAL_OUTPUT_CAPACITY;
+	return 0;
 }
 
-/* Appends bytes to the output buffer, growing it if necessary. */
-static void output_buffer_append(struct output_buffer *output, const char *text, size_t length)
+/*
+ * Initialize an output buffer with starting capacity.
+ * Crashes on allocation failure - use output_buffer_init_checked() for error handling.
+ */
+static void output_buffer_init(struct output_buffer *output)
+{
+	int ret = output_buffer_init_checked(output);
+	BUG_ON(ret);
+}
+
+/*
+ * Append bytes to the output buffer, growing it if necessary.
+ * Returns 0 on success, -ENOMEM on allocation failure.
+ */
+static int __must_check output_buffer_append_checked(struct output_buffer *output,
+                                                      const char *text, size_t length)
 {
 	if (output->length + length > output->capacity) {
 		size_t new_capacity = output->capacity ? output->capacity * 2 : 256;
-		while (new_capacity < output->length + length) {
+		while (new_capacity < output->length + length)
 			new_capacity *= 2;
-		}
-		output->data = realloc(output->data, new_capacity);
+
+		void *new_data = edit_realloc(output->data, new_capacity);
+		if (IS_ERR(new_data))
+			return (int)PTR_ERR(new_data);
+
+		output->data = new_data;
 		output->capacity = new_capacity;
 	}
 
 	memcpy(output->data + output->length, text, length);
 	output->length += length;
+	return 0;
+}
+
+/*
+ * Append bytes to the output buffer, growing it if necessary.
+ * Crashes on allocation failure - use output_buffer_append_checked() for error handling.
+ */
+static void output_buffer_append(struct output_buffer *output, const char *text, size_t length)
+{
+	int ret = output_buffer_append_checked(output, text, length);
+	BUG_ON(ret);
 }
 
 /* Appends a null-terminated string to the output buffer. */
@@ -2920,20 +2957,36 @@ static void line_free(struct line *line)
 	line->wrap_cache_mode = WRAP_NONE;
 }
 
-/* Ensures the line can hold at least 'required' cells, reallocating if needed. */
-static void line_ensure_capacity(struct line *line, uint32_t required)
+/*
+ * Ensure line can hold at least 'required' cells.
+ * Returns 0 on success, -ENOMEM on allocation failure.
+ */
+static int __must_check line_ensure_capacity_checked(struct line *line, uint32_t required)
 {
-	if (required <= line->cell_capacity) {
-		return;
-	}
+	if (required <= line->cell_capacity)
+		return 0;
 
 	uint32_t new_capacity = line->cell_capacity ? line->cell_capacity * 2 : INITIAL_LINE_CAPACITY;
-	while (new_capacity < required) {
+	while (new_capacity < required)
 		new_capacity *= 2;
-	}
 
-	line->cells = realloc(line->cells, new_capacity * sizeof(struct cell));
+	void *new_cells = edit_realloc(line->cells, new_capacity * sizeof(struct cell));
+	if (IS_ERR(new_cells))
+		return (int)PTR_ERR(new_cells);
+
+	line->cells = new_cells;
 	line->cell_capacity = new_capacity;
+	return 0;
+}
+
+/*
+ * Ensure line can hold at least 'required' cells.
+ * Crashes on allocation failure - use line_ensure_capacity_checked() for error handling.
+ */
+static void line_ensure_capacity(struct line *line, uint32_t required)
+{
+	int ret = line_ensure_capacity_checked(line, required);
+	BUG_ON(ret);
 }
 
 /* Inserts a cell with the given codepoint at the specified position.
@@ -3160,17 +3213,36 @@ static void buffer_free(struct buffer *buffer)
 	buffer->mmap_size = 0;
 }
 
-/* Ensures the buffer can hold at least 'required' lines. */
+/*
+ * Ensure buffer can hold at least 'required' lines.
+ * Returns 0 on success, -ENOMEM on allocation failure.
+ */
+static int __must_check buffer_ensure_capacity_checked(struct buffer *buffer, uint32_t required)
+{
+	if (required <= buffer->line_capacity)
+		return 0;
+
+	uint32_t new_capacity = buffer->line_capacity ? buffer->line_capacity * 2 : INITIAL_BUFFER_CAPACITY;
+	while (new_capacity < required)
+		new_capacity *= 2;
+
+	void *new_lines = edit_realloc(buffer->lines, new_capacity * sizeof(struct line));
+	if (IS_ERR(new_lines))
+		return (int)PTR_ERR(new_lines);
+
+	buffer->lines = new_lines;
+	buffer->line_capacity = new_capacity;
+	return 0;
+}
+
+/*
+ * Ensure buffer can hold at least 'required' lines.
+ * Crashes on allocation failure - use buffer_ensure_capacity_checked() for error handling.
+ */
 static void buffer_ensure_capacity(struct buffer *buffer, uint32_t required)
 {
-	if (required > buffer->line_capacity) {
-		uint32_t new_capacity = buffer->line_capacity ? buffer->line_capacity * 2 : INITIAL_BUFFER_CAPACITY;
-		while (new_capacity < required) {
-			new_capacity *= 2;
-		}
-		buffer->lines = realloc(buffer->lines, new_capacity * sizeof(struct line));
-		buffer->line_capacity = new_capacity;
-	}
+	int ret = buffer_ensure_capacity_checked(buffer, required);
+	BUG_ON(ret);
 }
 
 /* Inserts a new empty line at the specified position. */
