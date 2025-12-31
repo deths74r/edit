@@ -682,6 +682,64 @@ static struct theme theme_create_default(void)
 }
 
 /*
+ * Initialize a theme struct with the Mono White light theme.
+ * Built-in light theme counterpart to Mono Black.
+ */
+static struct theme theme_create_mono_white(void)
+{
+	struct theme t = {0};
+	t.name = strdup("Mono White");
+
+	/* Core UI - pure monochrome light theme */
+	t.background = (struct syntax_color){0xF8, 0xF8, 0xF8};
+	t.foreground = (struct syntax_color){0x20, 0x20, 0x20};
+
+	/* Line numbers */
+	t.line_number = (struct syntax_color){0x90, 0x90, 0x90};
+	t.line_number_active = (struct syntax_color){0x50, 0x50, 0x50};
+
+	/* Status bar */
+	t.status_bg = (struct syntax_color){0xD8, 0xD8, 0xD8};
+	t.status_fg = (struct syntax_color){0x20, 0x20, 0x20};
+	t.message = (struct syntax_color){0x20, 0x20, 0x20};
+
+	/* Selection and search */
+	t.selection = (struct syntax_color){0xC8, 0xC8, 0xC8};
+	t.search_match = (struct syntax_color){0xA8, 0xA8, 0xA8};
+	t.search_current = (struct syntax_color){0x80, 0x80, 0x80};
+
+	/* Cursor line */
+	t.cursor_line = (struct syntax_color){0xEC, 0xEC, 0xEC};
+
+	/* Whitespace and guides */
+	t.whitespace = (struct syntax_color){0xC0, 0xC0, 0xC0};
+	t.trailing_ws = (struct syntax_color){0xD8, 0xC0, 0xC0};
+	t.color_column = (struct syntax_color){0xEC, 0xEC, 0xEC};
+	t.color_column_line = (struct syntax_color){0xC0, 0xC0, 0xC0};
+
+	/* Dialog panel colors */
+	t.dialog_bg = (struct syntax_color){0xEC, 0xEC, 0xEC};
+	t.dialog_fg = (struct syntax_color){0x20, 0x20, 0x20};
+	t.dialog_highlight_bg = (struct syntax_color){0xC8, 0xC8, 0xC8};
+	t.dialog_highlight_fg = (struct syntax_color){0x00, 0x00, 0x00};
+
+	/* Syntax colors - grayscale with varying intensity */
+	t.syntax[SYNTAX_NORMAL]       = (struct syntax_color){0x20, 0x20, 0x20};
+	t.syntax[SYNTAX_KEYWORD]      = (struct syntax_color){0x00, 0x00, 0x00};
+	t.syntax[SYNTAX_TYPE]         = (struct syntax_color){0x18, 0x18, 0x18};
+	t.syntax[SYNTAX_STRING]       = (struct syntax_color){0x50, 0x50, 0x50};
+	t.syntax[SYNTAX_NUMBER]       = (struct syntax_color){0x38, 0x38, 0x38};
+	t.syntax[SYNTAX_COMMENT]      = (struct syntax_color){0x78, 0x78, 0x78};
+	t.syntax[SYNTAX_PREPROCESSOR] = (struct syntax_color){0x60, 0x60, 0x60};
+	t.syntax[SYNTAX_FUNCTION]     = (struct syntax_color){0x10, 0x10, 0x10};
+	t.syntax[SYNTAX_OPERATOR]     = (struct syntax_color){0x40, 0x40, 0x40};
+	t.syntax[SYNTAX_BRACKET]      = (struct syntax_color){0x28, 0x28, 0x28};
+	t.syntax[SYNTAX_ESCAPE]       = (struct syntax_color){0x30, 0x30, 0x30};
+
+	return t;
+}
+
+/*
  * Free a theme's allocated memory.
  */
 static void theme_free(struct theme *t)
@@ -942,13 +1000,14 @@ static void themes_load(void)
 		theme_count = 0;
 	}
 
-	/* Start with built-in default */
-	theme_count = 1;
-	loaded_themes = malloc(sizeof(struct theme));
+	/* Start with built-in themes */
+	theme_count = 2;
+	loaded_themes = malloc(2 * sizeof(struct theme));
 	if (loaded_themes == NULL) {
 		return;
 	}
 	loaded_themes[0] = theme_create_default();
+	loaded_themes[1] = theme_create_mono_white();
 
 	/* Get home directory */
 	const char *home = getenv("HOME");
@@ -1007,9 +1066,9 @@ static void themes_load(void)
 
 	closedir(dir);
 
-	/* Sort themes alphabetically, keeping built-in first */
-	if (theme_count > 2) {
-		qsort(&loaded_themes[1], theme_count - 1,
+	/* Sort themes alphabetically, keeping built-ins first */
+	if (theme_count > 3) {
+		qsort(&loaded_themes[2], theme_count - 2,
 		      sizeof(struct theme), theme_compare);
 	}
 }
