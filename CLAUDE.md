@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`edit` is a minimal terminal text editor written in C (v0.19.0). It features full UTF-8/Unicode 17.0 support, real-time C syntax highlighting, grapheme cluster navigation, paired delimiter matching, jump to matching bracket, select word/next occurrence, soft line wrapping, auto-indent, comment toggling, and find & replace.
+`edit` is a minimal terminal text editor written in C (v0.24.0). It features full UTF-8/Unicode 17.0 support, real-time C syntax highlighting, grapheme cluster navigation, paired delimiter matching, jump to matching bracket, select word/next occurrence, soft line wrapping, auto-indent, comment toggling, find & replace, and Linux kernel-style error handling with emergency save.
 
 ## Build Commands
 

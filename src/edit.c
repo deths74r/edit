@@ -38,7 +38,7 @@
 #include "error.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.23.2"
+#define EDIT_VERSION "0.24.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8

@@ -18,6 +18,7 @@ A minimal terminal text editor written in C.
   - [Undo and Redo](#undo-and-redo)
   - [Multi-Cursor Editing](#multi-cursor-editing)
   - [The Rendering Pipeline](#the-rendering-pipeline)
+  - [Error Handling](#error-handling)
   - [Color and Accessibility](#color-and-accessibility)
 - [Extending the Editor](#extending-the-editor)
 - [Building from Source](#building-from-source)
@@ -28,7 +29,7 @@ A minimal terminal text editor written in C.
 
 Most terminal editors fall into two camps. The first—nano, micro, and their kin—offer simplicity at the cost of power. The second—vim, emacs, kakoune—offer power at the cost of a learning curve that resembles a cliff face. Both camps assume you'll eventually want plugins, configuration files, and an ecosystem of extensions.
 
-This editor makes a different bet: that a single C file, compiled without dependencies beyond libc, can provide enough functionality for daily use while remaining small enough to understand completely. The entire implementation fits in roughly 8,500 lines. There are no plugins, no configuration files, no runtime dependencies. What you compile is what you get.
+This editor makes a different bet: that a small C codebase, compiled without dependencies beyond libc, can provide enough functionality for daily use while remaining small enough to understand completely. The entire implementation fits in roughly 12,000 lines across three source files. There are no plugins, no configuration files, no runtime dependencies. What you compile is what you get.
 
 The feature set reflects this philosophy. Full Unicode support, because text in 2025 is Unicode. C syntax highlighting, because the editor is written in C and should be able to edit itself pleasantly. Soft line wrapping, because modern displays are wide and horizontal scrolling is tedious. Multiple cursors, because some edits are naturally parallel. Undo with automatic grouping, because mistakes happen. Find and replace with regex support, because pattern matching is fundamental to text editing.
 
@@ -321,6 +322,34 @@ The single-write approach minimizes flicker. The terminal receives a complete fr
 
 Line content rendering operates in two modes. In segment mode (wrap enabled), it renders cells from a start index to an end index—one segment of a wrapped line. In scroll mode (wrap disabled), it skips cells until reaching the horizontal scroll offset, then renders from there.
 
+### Error Handling
+
+The editor uses a Linux kernel-inspired error handling system designed to prevent data loss. The infrastructure lives in `error.h` and `error.c`, providing:
+
+**ERR_PTR System** — Functions that return pointers can encode error codes in the pointer value itself, eliminating the need for separate out-parameters:
+
+```c
+void *ptr = edit_malloc(size);
+if (IS_ERR(ptr))
+    return (int)PTR_ERR(ptr);  // Propagate error code
+```
+
+**Checked Functions** — Core operations have `_checked` variants that return error codes instead of crashing. The pattern enables graceful error handling at appropriate boundaries:
+
+```c
+int ret = buffer_insert_cell_at_column_checked(&buffer, row, col, codepoint);
+if (ret) {
+    editor_set_status_message("Insert failed: %s", edit_strerror(ret));
+    return;
+}
+```
+
+**Emergency Save** — Fatal errors trigger `emergency_save()`, which writes buffer contents to a recovery file before terminating. Signal handlers for SIGSEGV, SIGBUS, and similar signals invoke this automatically.
+
+**BUG/WARN Macros** — Invariant violations are caught with `BUG_ON()` (fatal, triggers emergency save) and `WARN_ON()` (logs but continues). These serve as runtime assertions for conditions that indicate programming errors rather than recoverable failures.
+
+The error handling philosophy is defense in depth: editor commands show user-friendly messages for recoverable errors (out of memory during paste), while internal invariant violations trigger emergency save to preserve work. The goal is that no crash should lose unsaved edits.
+
 ### Color and Accessibility
 
 The color scheme is designed for Tritanopia (blue-yellow color blindness) while meeting WCAG 2.1 AA accessibility standards. Every foreground/background combination maintains at least a 4.5:1 contrast ratio.
@@ -361,6 +390,11 @@ The codebase follows Linux kernel style: tabs for indentation, explicit `struct`
 
 Requirements: a C17 compiler and make. The editor compiles on Linux, macOS, and BSD. Dependencies (the utflite UTF-8 library) are bundled.
 
+The source consists of three files:
+- `src/edit.c` — Main editor implementation (~11,800 lines)
+- `src/error.h` — Error handling infrastructure (~320 lines)
+- `src/error.c` — Error string conversion (~70 lines)
+
 ```bash
 make              # Build the editor
 make test         # Run UTF-8 validation tests
@@ -369,7 +403,7 @@ make install      # Install to ~/.local/bin
 make uninstall    # Remove installed binary
 ```
 
-The compiler is invoked with `-Wall -Wextra -pedantic -O2`. One warning is expected: `cell_is_word_end` is marked unused (reserved for future double-click behavior).
+The compiler is invoked with `-Wall -Wextra -pedantic -O2`. The build should complete with no warnings.
 
 ---
 
