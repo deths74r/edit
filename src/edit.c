@@ -427,6 +427,64 @@ struct theme {
 	struct syntax_color dialog_footer_fg; /* Footer/hint bar foreground */
 	struct syntax_color dialog_highlight_bg; /* Selected item background */
 	struct syntax_color dialog_highlight_fg; /* Selected item foreground */
+	struct syntax_color dialog_directory_fg; /* Directory entries */
+	struct syntax_color dialog_directory_bg;
+
+	/* Gutter (line number area) */
+	struct syntax_color gutter_bg;        /* Line number area background */
+	struct syntax_color gutter_active_bg; /* Active line gutter background */
+
+	/* Wrap indicators */
+	struct syntax_color wrap_indicator_fg; /* Wrap continuation indicator */
+	struct syntax_color wrap_indicator_bg;
+
+	/* Welcome screen */
+	struct syntax_color welcome_fg;       /* Welcome message text */
+	struct syntax_color welcome_bg;
+
+	/* Empty lines past EOF */
+	struct syntax_color empty_line_fg;    /* Empty line indicator (e.g., ~) */
+	struct syntax_color empty_line_bg;
+
+	/* Status bar components */
+	struct syntax_color status_filename_fg; /* Filename in status bar */
+	struct syntax_color status_filename_bg;
+	struct syntax_color status_modified_fg; /* [+] modified indicator */
+	struct syntax_color status_modified_bg;
+	struct syntax_color status_position_fg; /* Line/column position */
+	struct syntax_color status_position_bg;
+
+	/* Prompt/input components */
+	struct syntax_color prompt_label_fg;  /* "Search:", "Save as:", etc. */
+	struct syntax_color prompt_label_bg;
+	struct syntax_color prompt_input_fg;  /* User input text */
+	struct syntax_color prompt_input_bg;
+	struct syntax_color prompt_bracket_fg; /* Active field [ ] brackets */
+	struct syntax_color prompt_bracket_bg;
+	struct syntax_color prompt_warning_fg; /* Warning prompts */
+	struct syntax_color prompt_warning_bg;
+
+	/* Search feedback */
+	struct syntax_color search_options_fg; /* [CWR] options display */
+	struct syntax_color search_options_bg;
+	struct syntax_color search_nomatch_fg; /* "(no match)" text */
+	struct syntax_color search_nomatch_bg;
+	struct syntax_color search_error_fg;  /* Regex error indicator */
+	struct syntax_color search_error_bg;
+
+	/* Whitespace indicators (split tab/space) */
+	struct syntax_color whitespace_tab_fg; /* Tab → indicator */
+	struct syntax_color whitespace_tab_bg;
+	struct syntax_color whitespace_space_fg; /* Space · indicator */
+	struct syntax_color whitespace_space_bg;
+
+	/* Multi-cursor */
+	struct syntax_color multicursor_fg;   /* Secondary cursor foreground */
+	struct syntax_color multicursor_bg;   /* Secondary cursor background */
+
+	/* Bracket matching */
+	struct syntax_color bracket_match_fg; /* Matching bracket foreground */
+	struct syntax_color bracket_match_bg; /* Matching bracket background */
 
 	/* Syntax highlighting colors (indexed by enum syntax_token) */
 	struct syntax_color syntax[SYNTAX_TOKEN_COUNT];
@@ -691,6 +749,64 @@ static struct theme theme_create_default(void)
 	t.dialog_footer_fg = (struct syntax_color){0xD0, 0xD0, 0xD0};
 	t.dialog_highlight_bg = (struct syntax_color){0x40, 0x40, 0x40};
 	t.dialog_highlight_fg = (struct syntax_color){0xFF, 0xFF, 0xFF};
+	t.dialog_directory_fg = (struct syntax_color){0x80, 0xB0, 0xFF};
+	t.dialog_directory_bg = t.dialog_bg;
+
+	/* Gutter */
+	t.gutter_bg = t.background;
+	t.gutter_active_bg = t.cursor_line;
+
+	/* Wrap indicator - subtle, like line numbers */
+	t.wrap_indicator_fg = t.line_number;
+	t.wrap_indicator_bg = t.background;
+
+	/* Welcome - dimmed text */
+	t.welcome_fg = (struct syntax_color){0x58, 0x58, 0x58};
+	t.welcome_bg = t.background;
+
+	/* Empty lines - very subtle */
+	t.empty_line_fg = (struct syntax_color){0x38, 0x38, 0x38};
+	t.empty_line_bg = t.background;
+
+	/* Status bar components - inherit from status by default */
+	t.status_filename_fg = t.status_fg;
+	t.status_filename_bg = t.status_bg;
+	t.status_modified_fg = (struct syntax_color){0xE0, 0xA0, 0x00};
+	t.status_modified_bg = t.status_bg;
+	t.status_position_fg = t.status_fg;
+	t.status_position_bg = t.status_bg;
+
+	/* Prompts - inherit from message by default */
+	t.prompt_label_fg = t.message_fg;
+	t.prompt_label_bg = t.message_bg;
+	t.prompt_input_fg = (struct syntax_color){0xFF, 0xFF, 0xFF};
+	t.prompt_input_bg = t.message_bg;
+	t.prompt_bracket_fg = (struct syntax_color){0x80, 0x80, 0xFF};
+	t.prompt_bracket_bg = t.message_bg;
+	t.prompt_warning_fg = (struct syntax_color){0xFF, 0xA0, 0x00};
+	t.prompt_warning_bg = t.message_bg;
+
+	/* Search feedback */
+	t.search_options_fg = (struct syntax_color){0x80, 0xC0, 0x80};
+	t.search_options_bg = t.message_bg;
+	t.search_nomatch_fg = (struct syntax_color){0xFF, 0x60, 0x60};
+	t.search_nomatch_bg = t.message_bg;
+	t.search_error_fg = (struct syntax_color){0xFF, 0x40, 0x40};
+	t.search_error_bg = t.message_bg;
+
+	/* Whitespace - same as base whitespace color */
+	t.whitespace_tab_fg = t.whitespace;
+	t.whitespace_tab_bg = t.background;
+	t.whitespace_space_fg = t.whitespace;
+	t.whitespace_space_bg = t.background;
+
+	/* Multi-cursor - blue-tinted selection */
+	t.multicursor_fg = t.foreground;
+	t.multicursor_bg = (struct syntax_color){0x40, 0x60, 0x80};
+
+	/* Bracket match - yellow-brown highlight */
+	t.bracket_match_fg = t.foreground;
+	t.bracket_match_bg = (struct syntax_color){0x50, 0x50, 0x00};
 
 	/* Syntax colors - grayscale with varying intensity */
 	t.syntax[SYNTAX_NORMAL]       = (struct syntax_color){0xD0, 0xD0, 0xD0};
@@ -762,6 +878,64 @@ static struct theme theme_create_mono_white(void)
 	t.dialog_footer_fg = (struct syntax_color){0x20, 0x20, 0x20};
 	t.dialog_highlight_bg = (struct syntax_color){0xC8, 0xC8, 0xC8};
 	t.dialog_highlight_fg = (struct syntax_color){0x00, 0x00, 0x00};
+	t.dialog_directory_fg = (struct syntax_color){0x30, 0x60, 0xA0};
+	t.dialog_directory_bg = t.dialog_bg;
+
+	/* Gutter */
+	t.gutter_bg = t.background;
+	t.gutter_active_bg = t.cursor_line;
+
+	/* Wrap indicator - subtle, like line numbers */
+	t.wrap_indicator_fg = t.line_number;
+	t.wrap_indicator_bg = t.background;
+
+	/* Welcome - dimmed text */
+	t.welcome_fg = (struct syntax_color){0xA0, 0xA0, 0xA0};
+	t.welcome_bg = t.background;
+
+	/* Empty lines - very subtle */
+	t.empty_line_fg = (struct syntax_color){0xC0, 0xC0, 0xC0};
+	t.empty_line_bg = t.background;
+
+	/* Status bar components - inherit from status by default */
+	t.status_filename_fg = t.status_fg;
+	t.status_filename_bg = t.status_bg;
+	t.status_modified_fg = (struct syntax_color){0xA0, 0x60, 0x00};
+	t.status_modified_bg = t.status_bg;
+	t.status_position_fg = t.status_fg;
+	t.status_position_bg = t.status_bg;
+
+	/* Prompts - inherit from message by default */
+	t.prompt_label_fg = t.message_fg;
+	t.prompt_label_bg = t.message_bg;
+	t.prompt_input_fg = (struct syntax_color){0x00, 0x00, 0x00};
+	t.prompt_input_bg = t.message_bg;
+	t.prompt_bracket_fg = (struct syntax_color){0x40, 0x40, 0xA0};
+	t.prompt_bracket_bg = t.message_bg;
+	t.prompt_warning_fg = (struct syntax_color){0xC0, 0x60, 0x00};
+	t.prompt_warning_bg = t.message_bg;
+
+	/* Search feedback */
+	t.search_options_fg = (struct syntax_color){0x40, 0x80, 0x40};
+	t.search_options_bg = t.message_bg;
+	t.search_nomatch_fg = (struct syntax_color){0xC0, 0x30, 0x30};
+	t.search_nomatch_bg = t.message_bg;
+	t.search_error_fg = (struct syntax_color){0xC0, 0x20, 0x20};
+	t.search_error_bg = t.message_bg;
+
+	/* Whitespace - same as base whitespace color */
+	t.whitespace_tab_fg = t.whitespace;
+	t.whitespace_tab_bg = t.background;
+	t.whitespace_space_fg = t.whitespace;
+	t.whitespace_space_bg = t.background;
+
+	/* Multi-cursor - blue-tinted selection */
+	t.multicursor_fg = t.foreground;
+	t.multicursor_bg = (struct syntax_color){0xA0, 0xC0, 0xE0};
+
+	/* Bracket match - yellow highlight */
+	t.bracket_match_fg = t.foreground;
+	t.bracket_match_bg = (struct syntax_color){0xE0, 0xE0, 0x80};
 
 	/* Syntax colors - grayscale with varying intensity */
 	t.syntax[SYNTAX_NORMAL]       = (struct syntax_color){0x20, 0x20, 0x20};
@@ -1066,6 +1240,131 @@ static struct theme *theme_parse_file(const char *filepath)
 			t->syntax_bg[SYNTAX_ESCAPE] = color;
 			t->syntax_bg_set[SYNTAX_ESCAPE] = true;
 		}
+		/* Dialog directory */
+		else if (strcmp(key, "dialog_directory_fg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_directory_fg = color;
+		}
+		else if (strcmp(key, "dialog_directory_bg") == 0 && color_parse_hex(value, &color)) {
+			t->dialog_directory_bg = color;
+		}
+		/* Gutter */
+		else if (strcmp(key, "gutter_bg") == 0 && color_parse_hex(value, &color)) {
+			t->gutter_bg = color;
+		}
+		else if (strcmp(key, "gutter_active_bg") == 0 && color_parse_hex(value, &color)) {
+			t->gutter_active_bg = color;
+		}
+		/* Wrap indicator */
+		else if (strcmp(key, "wrap_indicator_fg") == 0 && color_parse_hex(value, &color)) {
+			t->wrap_indicator_fg = color;
+		}
+		else if (strcmp(key, "wrap_indicator_bg") == 0 && color_parse_hex(value, &color)) {
+			t->wrap_indicator_bg = color;
+		}
+		/* Welcome */
+		else if (strcmp(key, "welcome_fg") == 0 && color_parse_hex(value, &color)) {
+			t->welcome_fg = color;
+		}
+		else if (strcmp(key, "welcome_bg") == 0 && color_parse_hex(value, &color)) {
+			t->welcome_bg = color;
+		}
+		/* Empty lines */
+		else if (strcmp(key, "empty_line_fg") == 0 && color_parse_hex(value, &color)) {
+			t->empty_line_fg = color;
+		}
+		else if (strcmp(key, "empty_line_bg") == 0 && color_parse_hex(value, &color)) {
+			t->empty_line_bg = color;
+		}
+		/* Status bar components */
+		else if (strcmp(key, "status_filename_fg") == 0 && color_parse_hex(value, &color)) {
+			t->status_filename_fg = color;
+		}
+		else if (strcmp(key, "status_filename_bg") == 0 && color_parse_hex(value, &color)) {
+			t->status_filename_bg = color;
+		}
+		else if (strcmp(key, "status_modified_fg") == 0 && color_parse_hex(value, &color)) {
+			t->status_modified_fg = color;
+		}
+		else if (strcmp(key, "status_modified_bg") == 0 && color_parse_hex(value, &color)) {
+			t->status_modified_bg = color;
+		}
+		else if (strcmp(key, "status_position_fg") == 0 && color_parse_hex(value, &color)) {
+			t->status_position_fg = color;
+		}
+		else if (strcmp(key, "status_position_bg") == 0 && color_parse_hex(value, &color)) {
+			t->status_position_bg = color;
+		}
+		/* Prompt components */
+		else if (strcmp(key, "prompt_label_fg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_label_fg = color;
+		}
+		else if (strcmp(key, "prompt_label_bg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_label_bg = color;
+		}
+		else if (strcmp(key, "prompt_input_fg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_input_fg = color;
+		}
+		else if (strcmp(key, "prompt_input_bg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_input_bg = color;
+		}
+		else if (strcmp(key, "prompt_bracket_fg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_bracket_fg = color;
+		}
+		else if (strcmp(key, "prompt_bracket_bg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_bracket_bg = color;
+		}
+		else if (strcmp(key, "prompt_warning_fg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_warning_fg = color;
+		}
+		else if (strcmp(key, "prompt_warning_bg") == 0 && color_parse_hex(value, &color)) {
+			t->prompt_warning_bg = color;
+		}
+		/* Search feedback */
+		else if (strcmp(key, "search_options_fg") == 0 && color_parse_hex(value, &color)) {
+			t->search_options_fg = color;
+		}
+		else if (strcmp(key, "search_options_bg") == 0 && color_parse_hex(value, &color)) {
+			t->search_options_bg = color;
+		}
+		else if (strcmp(key, "search_nomatch_fg") == 0 && color_parse_hex(value, &color)) {
+			t->search_nomatch_fg = color;
+		}
+		else if (strcmp(key, "search_nomatch_bg") == 0 && color_parse_hex(value, &color)) {
+			t->search_nomatch_bg = color;
+		}
+		else if (strcmp(key, "search_error_fg") == 0 && color_parse_hex(value, &color)) {
+			t->search_error_fg = color;
+		}
+		else if (strcmp(key, "search_error_bg") == 0 && color_parse_hex(value, &color)) {
+			t->search_error_bg = color;
+		}
+		/* Whitespace indicators */
+		else if (strcmp(key, "whitespace_tab_fg") == 0 && color_parse_hex(value, &color)) {
+			t->whitespace_tab_fg = color;
+		}
+		else if (strcmp(key, "whitespace_tab_bg") == 0 && color_parse_hex(value, &color)) {
+			t->whitespace_tab_bg = color;
+		}
+		else if (strcmp(key, "whitespace_space_fg") == 0 && color_parse_hex(value, &color)) {
+			t->whitespace_space_fg = color;
+		}
+		else if (strcmp(key, "whitespace_space_bg") == 0 && color_parse_hex(value, &color)) {
+			t->whitespace_space_bg = color;
+		}
+		/* Multi-cursor */
+		else if (strcmp(key, "multicursor_fg") == 0 && color_parse_hex(value, &color)) {
+			t->multicursor_fg = color;
+		}
+		else if (strcmp(key, "multicursor_bg") == 0 && color_parse_hex(value, &color)) {
+			t->multicursor_bg = color;
+		}
+		/* Bracket match */
+		else if (strcmp(key, "bracket_match_fg") == 0 && color_parse_hex(value, &color)) {
+			t->bracket_match_fg = color;
+		}
+		else if (strcmp(key, "bracket_match_bg") == 0 && color_parse_hex(value, &color)) {
+			t->bracket_match_bg = color;
+		}
 	}
 
 	fclose(file);
@@ -1244,10 +1543,6 @@ static void theme_apply(struct theme *t)
 	/* Main foreground against background */
 	active_theme.foreground = color_ensure_contrast(t->foreground, active_theme.background);
 
-	/* Line numbers against background */
-	active_theme.line_number = color_ensure_contrast(t->line_number, active_theme.background);
-	active_theme.line_number_active = color_ensure_contrast(t->line_number_active, active_theme.background);
-
 	/* Status bar text against status background */
 	active_theme.status_fg = color_ensure_contrast(t->status_fg, active_theme.status_bg);
 
@@ -1265,6 +1560,46 @@ static void theme_apply(struct theme *t)
 	active_theme.dialog_header_fg = color_ensure_contrast(t->dialog_header_fg, active_theme.dialog_header_bg);
 	active_theme.dialog_footer_fg = color_ensure_contrast(t->dialog_footer_fg, active_theme.dialog_footer_bg);
 	active_theme.dialog_highlight_fg = color_ensure_contrast(t->dialog_highlight_fg, active_theme.dialog_highlight_bg);
+	active_theme.dialog_directory_fg = color_ensure_contrast(t->dialog_directory_fg, active_theme.dialog_directory_bg);
+
+	/* Gutter colors */
+	active_theme.line_number = color_ensure_contrast(t->line_number, active_theme.gutter_bg);
+	active_theme.line_number_active = color_ensure_contrast(t->line_number_active, active_theme.gutter_active_bg);
+
+	/* Wrap indicator against its background */
+	active_theme.wrap_indicator_fg = color_ensure_contrast(t->wrap_indicator_fg, active_theme.wrap_indicator_bg);
+
+	/* Welcome text against its background */
+	active_theme.welcome_fg = color_ensure_contrast(t->welcome_fg, active_theme.welcome_bg);
+
+	/* Empty line indicator against its background */
+	active_theme.empty_line_fg = color_ensure_contrast(t->empty_line_fg, active_theme.empty_line_bg);
+
+	/* Status bar components against their backgrounds */
+	active_theme.status_filename_fg = color_ensure_contrast(t->status_filename_fg, active_theme.status_filename_bg);
+	active_theme.status_modified_fg = color_ensure_contrast(t->status_modified_fg, active_theme.status_modified_bg);
+	active_theme.status_position_fg = color_ensure_contrast(t->status_position_fg, active_theme.status_position_bg);
+
+	/* Prompt components against their backgrounds */
+	active_theme.prompt_label_fg = color_ensure_contrast(t->prompt_label_fg, active_theme.prompt_label_bg);
+	active_theme.prompt_input_fg = color_ensure_contrast(t->prompt_input_fg, active_theme.prompt_input_bg);
+	active_theme.prompt_bracket_fg = color_ensure_contrast(t->prompt_bracket_fg, active_theme.prompt_bracket_bg);
+	active_theme.prompt_warning_fg = color_ensure_contrast(t->prompt_warning_fg, active_theme.prompt_warning_bg);
+
+	/* Search feedback against their backgrounds */
+	active_theme.search_options_fg = color_ensure_contrast(t->search_options_fg, active_theme.search_options_bg);
+	active_theme.search_nomatch_fg = color_ensure_contrast(t->search_nomatch_fg, active_theme.search_nomatch_bg);
+	active_theme.search_error_fg = color_ensure_contrast(t->search_error_fg, active_theme.search_error_bg);
+
+	/* Whitespace indicators against their backgrounds */
+	active_theme.whitespace_tab_fg = color_ensure_contrast(t->whitespace_tab_fg, active_theme.whitespace_tab_bg);
+	active_theme.whitespace_space_fg = color_ensure_contrast(t->whitespace_space_fg, active_theme.whitespace_space_bg);
+
+	/* Multi-cursor against its background */
+	active_theme.multicursor_fg = color_ensure_contrast(t->multicursor_fg, active_theme.multicursor_bg);
+
+	/* Bracket match against its background */
+	active_theme.bracket_match_fg = color_ensure_contrast(t->bracket_match_fg, active_theme.bracket_match_bg);
 
 	/* Syntax colors against main background */
 	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {
@@ -8353,12 +8688,16 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
 			/* Render tab with optional visible indicator */
 			if (editor.show_whitespace) {
-				/* Show → in subtle gray followed by spaces */
-				char ws_escape[48];
+				/* Show → with tab colors followed by spaces */
+				char ws_escape[80];
 				snprintf(ws_escape, sizeof(ws_escape),
-				         "\x1b[38;2;%d;%d;%dm",
-				         active_theme.whitespace.red, active_theme.whitespace.green,
-				         active_theme.whitespace.blue);
+				         "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
+				         active_theme.whitespace_tab_fg.red,
+				         active_theme.whitespace_tab_fg.green,
+				         active_theme.whitespace_tab_fg.blue,
+				         active_theme.whitespace_tab_bg.red,
+				         active_theme.whitespace_tab_bg.green,
+				         active_theme.whitespace_tab_bg.blue);
 				output_buffer_append_string(output, ws_escape);
 				output_buffer_append_string(output, "→");
 				rendered_width++;
@@ -8376,12 +8715,16 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				}
 			}
 		} else if (codepoint == ' ' && editor.show_whitespace) {
-			/* Show space as middle dot in subtle gray */
-			char ws_escape[48];
+			/* Show space as middle dot with space colors */
+			char ws_escape[80];
 			snprintf(ws_escape, sizeof(ws_escape),
-			         "\x1b[38;2;%d;%d;%dm",
-			         active_theme.whitespace.red, active_theme.whitespace.green,
-			         active_theme.whitespace.blue);
+			         "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
+			         active_theme.whitespace_space_fg.red,
+			         active_theme.whitespace_space_fg.green,
+			         active_theme.whitespace_space_fg.blue,
+			         active_theme.whitespace_space_bg.red,
+			         active_theme.whitespace_space_bg.green,
+			         active_theme.whitespace_space_bg.blue);
 			output_buffer_append_string(output, ws_escape);
 			output_buffer_append_string(output, "·");
 			render_set_syntax_color(output, current_syntax);
@@ -8461,6 +8804,18 @@ static void render_draw_rows(struct output_buffer *output)
 		if (file_row >= editor.buffer.line_count && !is_empty_buffer_first_line) {
 			/* Empty line past end of file */
 			if (editor.buffer.line_count == 0 && screen_row == welcome_row) {
+				/* Welcome message */
+				char color_escape[64];
+				snprintf(color_escape, sizeof(color_escape),
+				         "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
+				         active_theme.welcome_fg.red,
+				         active_theme.welcome_fg.green,
+				         active_theme.welcome_fg.blue,
+				         active_theme.welcome_bg.red,
+				         active_theme.welcome_bg.green,
+				         active_theme.welcome_bg.blue);
+				output_buffer_append_string(output, color_escape);
+
 				char welcome[64];
 				int welcome_length = snprintf(welcome, sizeof(welcome),
 				                              "edit v%s", EDIT_VERSION);
@@ -8518,20 +8873,20 @@ static void render_draw_rows(struct output_buffer *output)
 
 			/* Draw gutter: line number for segment 0, indicator for continuations */
 			if (editor.show_line_numbers && editor.gutter_width > 0) {
-				struct syntax_color ln_color = is_cursor_line_segment
-					? active_theme.line_number_active : active_theme.line_number;
-				struct syntax_color ln_bg = is_cursor_line_segment
-					? active_theme.cursor_line : active_theme.background;
-
-				char color_escape[48];
-				snprintf(color_escape, sizeof(color_escape),
-				         "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
-				         ln_color.red, ln_color.green, ln_color.blue,
-				         ln_bg.red, ln_bg.green, ln_bg.blue);
-				output_buffer_append_string(output, color_escape);
-
 				if (segment == 0) {
 					/* First segment: show line number */
+					struct syntax_color ln_color = is_cursor_line_segment
+						? active_theme.line_number_active : active_theme.line_number;
+					struct syntax_color ln_bg = is_cursor_line_segment
+						? active_theme.gutter_active_bg : active_theme.gutter_bg;
+
+					char color_escape[48];
+					snprintf(color_escape, sizeof(color_escape),
+					         "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
+					         ln_color.red, ln_color.green, ln_color.blue,
+					         ln_bg.red, ln_bg.green, ln_bg.blue);
+					output_buffer_append_string(output, color_escape);
+
 					char line_number_buffer[16];
 					snprintf(line_number_buffer, sizeof(line_number_buffer),
 					         "%*u ", editor.gutter_width - 1, file_row + 1);
@@ -8539,6 +8894,18 @@ static void render_draw_rows(struct output_buffer *output)
 					                     editor.gutter_width);
 				} else {
 					/* Continuation: show wrap indicator */
+					struct syntax_color wrap_bg = is_cursor_line_segment
+						? active_theme.gutter_active_bg : active_theme.wrap_indicator_bg;
+
+					char color_escape[48];
+					snprintf(color_escape, sizeof(color_escape),
+					         "\x1b[38;2;%d;%d;%dm\x1b[48;2;%d;%d;%dm",
+					         active_theme.wrap_indicator_fg.red,
+					         active_theme.wrap_indicator_fg.green,
+					         active_theme.wrap_indicator_fg.blue,
+					         wrap_bg.red, wrap_bg.green, wrap_bg.blue);
+					output_buffer_append_string(output, color_escape);
+
 					const char *indicator = wrap_indicator_string(editor.wrap_indicator);
 					/* Pad to align indicator same as line numbers (with trailing space) */
 					for (uint32_t i = 0; i < editor.gutter_width - 2; i++) {
@@ -8722,43 +9089,95 @@ static void render_draw_rows(struct output_buffer *output)
  */
 static void render_draw_status_bar(struct output_buffer *output)
 {
-	/* Set status bar colors from theme */
-	char color_escape[64];
+	char color_escape[80];
+
+	/* Status bar base background */
 	snprintf(color_escape, sizeof(color_escape),
-	         "\x1b[0m\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+	         "\x1b[0m\x1b[48;2;%u;%u;%um",
+	         active_theme.status_bg.red, active_theme.status_bg.green, active_theme.status_bg.blue);
+	output_buffer_append_string(output, color_escape);
+
+	/* Filename with its own colors */
+	const char *filename = editor.buffer.filename ? editor.buffer.filename : "[No Name]";
+	char filename_buf[104];
+	int filename_len = snprintf(filename_buf, sizeof(filename_buf), " %.100s", filename);
+
+	snprintf(color_escape, sizeof(color_escape),
+	         "\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+	         active_theme.status_filename_fg.red,
+	         active_theme.status_filename_fg.green,
+	         active_theme.status_filename_fg.blue,
+	         active_theme.status_filename_bg.red,
+	         active_theme.status_filename_bg.green,
+	         active_theme.status_filename_bg.blue);
+	output_buffer_append_string(output, color_escape);
+	output_buffer_append(output, filename_buf, filename_len);
+
+	int current_pos = filename_len;
+
+	/* Modified indicator with its own colors */
+	if (editor.buffer.is_modified) {
+		snprintf(color_escape, sizeof(color_escape),
+		         "\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+		         active_theme.status_modified_fg.red,
+		         active_theme.status_modified_fg.green,
+		         active_theme.status_modified_fg.blue,
+		         active_theme.status_modified_bg.red,
+		         active_theme.status_modified_bg.green,
+		         active_theme.status_modified_bg.blue);
+		output_buffer_append_string(output, color_escape);
+		output_buffer_append_string(output, " [+]");
+		current_pos += 4;
+	}
+
+	/* Right-aligned position with its own colors */
+	char right_status[64];
+	int right_length = snprintf(right_status, sizeof(right_status), "%u/%u ",
+	                            editor.cursor_row + 1, editor.buffer.line_count);
+
+	/* Fill with base status bar colors */
+	snprintf(color_escape, sizeof(color_escape),
+	         "\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
 	         active_theme.status_fg.red, active_theme.status_fg.green, active_theme.status_fg.blue,
 	         active_theme.status_bg.red, active_theme.status_bg.green, active_theme.status_bg.blue);
 	output_buffer_append_string(output, color_escape);
 
-	char left_status[256];
-	char right_status[64];
-
-	const char *filename = editor.buffer.filename ? editor.buffer.filename : "[No Name]";
-	int left_length = snprintf(left_status, sizeof(left_status), " %.100s%s",
-	                           filename, editor.buffer.is_modified ? " [+]" : "");
-
-	int right_length = snprintf(right_status, sizeof(right_status), "%u/%u ",
-	                            editor.cursor_row + 1, editor.buffer.line_count);
-
-	if (left_length > (int)editor.screen_columns) {
-		left_length = editor.screen_columns;
-	}
-
-	output_buffer_append(output, left_status, left_length);
-
-	while (left_length < (int)editor.screen_columns) {
-		if ((int)editor.screen_columns - left_length == right_length) {
+	while (current_pos < (int)editor.screen_columns) {
+		if ((int)editor.screen_columns - current_pos == right_length) {
+			/* Position indicator with its own colors */
+			snprintf(color_escape, sizeof(color_escape),
+			         "\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+			         active_theme.status_position_fg.red,
+			         active_theme.status_position_fg.green,
+			         active_theme.status_position_fg.blue,
+			         active_theme.status_position_bg.red,
+			         active_theme.status_position_bg.green,
+			         active_theme.status_position_bg.blue);
+			output_buffer_append_string(output, color_escape);
 			output_buffer_append(output, right_status, right_length);
 			break;
 		} else {
 			output_buffer_append_string(output, " ");
-			left_length++;
+			current_pos++;
 		}
 	}
 
 	/* Reset attributes */
 	output_buffer_append_string(output, "\x1b[m");
 	output_buffer_append_string(output, "\r\n");
+}
+
+/*
+ * Helper to set message bar colors.
+ */
+static void message_bar_set_colors(struct output_buffer *output,
+                                   struct syntax_color fg, struct syntax_color bg)
+{
+	char color_escape[64];
+	snprintf(color_escape, sizeof(color_escape),
+	         "\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
+	         fg.red, fg.green, fg.blue, bg.red, bg.green, bg.blue);
+	output_buffer_append_string(output, color_escape);
 }
 
 /*
@@ -8769,110 +9188,162 @@ static void render_draw_status_bar(struct output_buffer *output)
 static void render_draw_message_bar(struct output_buffer *output)
 {
 	/* Set message bar colors from theme */
-	char color_escape[64];
-	snprintf(color_escape, sizeof(color_escape),
-	         "\x1b[38;2;%u;%u;%um\x1b[48;2;%u;%u;%um",
-	         active_theme.message_fg.red, active_theme.message_fg.green, active_theme.message_fg.blue,
-	         active_theme.message_bg.red, active_theme.message_bg.green, active_theme.message_bg.blue);
-	output_buffer_append_string(output, color_escape);
+	message_bar_set_colors(output, active_theme.message_fg, active_theme.message_bg);
 
 	/* Clear line with message bar background color */
 	output_buffer_append_string(output, "\x1b[K");
 
 	if (save_as.active) {
-		char prompt[PATH_MAX + 32];
-
 		if (save_as.confirm_overwrite) {
-			snprintf(prompt, sizeof(prompt), "File exists. Overwrite? (y/n)");
+			/* Warning prompt */
+			message_bar_set_colors(output,
+			                       active_theme.prompt_warning_fg,
+			                       active_theme.prompt_warning_bg);
+			output_buffer_append_string(output, "File exists. Overwrite? (y/n)");
 		} else {
-			snprintf(prompt, sizeof(prompt), "Save as: %s", save_as.path);
-		}
+			/* Label */
+			message_bar_set_colors(output,
+			                       active_theme.prompt_label_fg,
+			                       active_theme.prompt_label_bg);
+			output_buffer_append_string(output, "Save as: ");
 
-		int length = strlen(prompt);
-		if (length > (int)editor.screen_columns) {
-			/* Truncate from the left to show end of path */
-			int offset = length - editor.screen_columns + 4;
-			memmove(prompt + 4, prompt + offset, length - offset + 1);
-			memcpy(prompt, "...", 3);
-			length = strlen(prompt);
+			/* Input */
+			message_bar_set_colors(output,
+			                       active_theme.prompt_input_fg,
+			                       active_theme.prompt_input_bg);
+			char path_buf[PATH_MAX];
+			int path_len = strlen(save_as.path);
+			int max_len = (int)editor.screen_columns - 9;
+			if (path_len > max_len && max_len > 4) {
+				/* Truncate from the left */
+				snprintf(path_buf, sizeof(path_buf), "...%s",
+				         save_as.path + path_len - max_len + 3);
+				output_buffer_append_string(output, path_buf);
+			} else {
+				output_buffer_append(output, save_as.path, path_len);
+			}
 		}
-
-		output_buffer_append(output, prompt, length);
 		return;
 	}
 
 	if (search.active) {
-		char prompt[512];
-		int len;
+		bool has_regex_error = search.use_regex && !search.regex_compiled && search.query_length > 0;
 
-		/* Build options indicator string */
-		char options[16] = "";
-		char *opt_ptr = options;
-		if (search.case_sensitive) {
-			*opt_ptr++ = 'C';
-		}
-		if (search.whole_word) {
-			*opt_ptr++ = 'W';
-		}
-		if (search.use_regex) {
-			*opt_ptr++ = 'R';
-			if (!search.regex_compiled && search.query_length > 0) {
-				*opt_ptr++ = '!';
+		/* Label: "Search" or "Find" */
+		message_bar_set_colors(output,
+		                       active_theme.prompt_label_fg,
+		                       active_theme.prompt_label_bg);
+		output_buffer_append_string(output, search.replace_mode ? "Find" : "Search");
+
+		/* Options [CWR!] */
+		if (search.case_sensitive || search.whole_word || search.use_regex) {
+			output_buffer_append_string(output, " ");
+			message_bar_set_colors(output,
+			                       active_theme.search_options_fg,
+			                       active_theme.search_options_bg);
+			output_buffer_append_string(output, "[");
+			if (search.case_sensitive)
+				output_buffer_append_string(output, "C");
+			if (search.whole_word)
+				output_buffer_append_string(output, "W");
+			if (search.use_regex) {
+				output_buffer_append_string(output, "R");
+				if (has_regex_error) {
+					message_bar_set_colors(output,
+					                       active_theme.search_error_fg,
+					                       active_theme.search_error_bg);
+					output_buffer_append_string(output, "!");
+					message_bar_set_colors(output,
+					                       active_theme.search_options_fg,
+					                       active_theme.search_options_bg);
+				}
 			}
+			output_buffer_append_string(output, "]");
 		}
-		*opt_ptr = '\0';
 
-		/* Format the options part */
-		char options_display[24] = "";
-		if (options[0]) {
-			snprintf(options_display, sizeof(options_display), " [%s]", options);
-		}
+		/* Colon separator */
+		message_bar_set_colors(output,
+		                       active_theme.prompt_label_fg,
+		                       active_theme.prompt_label_bg);
+		output_buffer_append_string(output, ": ");
 
 		if (search.replace_mode) {
-			/*
-			 * Replace mode: show both search and replace fields.
-			 * Active field is indicated by brackets.
-			 */
-			const char *match_status = "";
-			if (search.query_length > 0 && !search.has_match) {
-				match_status = " (no match)";
+			/* Replace mode: Find: [query] | Replace: [replace] */
+			if (!search.editing_replace) {
+				message_bar_set_colors(output,
+				                       active_theme.prompt_bracket_fg,
+				                       active_theme.prompt_bracket_bg);
+				output_buffer_append_string(output, "[");
+			}
+			message_bar_set_colors(output,
+			                       active_theme.prompt_input_fg,
+			                       active_theme.prompt_input_bg);
+			output_buffer_append_string(output, search.query);
+			if (!search.editing_replace) {
+				message_bar_set_colors(output,
+				                       active_theme.prompt_bracket_fg,
+				                       active_theme.prompt_bracket_bg);
+				output_buffer_append_string(output, "]");
 			}
 
+			/* No match indicator after search query */
+			if (search.query_length > 0 && !search.has_match) {
+				message_bar_set_colors(output,
+				                       active_theme.search_nomatch_fg,
+				                       active_theme.search_nomatch_bg);
+				output_buffer_append_string(output, " (no match)");
+			}
+
+			message_bar_set_colors(output,
+			                       active_theme.prompt_label_fg,
+			                       active_theme.prompt_label_bg);
+			output_buffer_append_string(output, " | Replace: ");
+
 			if (search.editing_replace) {
-				len = snprintf(prompt, sizeof(prompt),
-				               "Find%s: %s%s | Replace: [%s]",
-				               options_display, search.query, match_status, search.replace_text);
-			} else {
-				len = snprintf(prompt, sizeof(prompt),
-				               "Find%s: [%s]%s | Replace: %s",
-				               options_display, search.query, match_status, search.replace_text);
+				message_bar_set_colors(output,
+				                       active_theme.prompt_bracket_fg,
+				                       active_theme.prompt_bracket_bg);
+				output_buffer_append_string(output, "[");
+			}
+			message_bar_set_colors(output,
+			                       active_theme.prompt_input_fg,
+			                       active_theme.prompt_input_bg);
+			output_buffer_append_string(output, search.replace_text);
+			if (search.editing_replace) {
+				message_bar_set_colors(output,
+				                       active_theme.prompt_bracket_fg,
+				                       active_theme.prompt_bracket_bg);
+				output_buffer_append_string(output, "]");
 			}
 		} else {
 			/* Search-only mode */
-			if (search.has_match) {
-				len = snprintf(prompt, sizeof(prompt), "Search%s: %s", options_display, search.query);
-			} else if (search.query_length > 0) {
-				len = snprintf(prompt, sizeof(prompt), "Search%s: %s (no match)", options_display, search.query);
-			} else {
-				len = snprintf(prompt, sizeof(prompt), "Search%s: ", options_display);
+			message_bar_set_colors(output,
+			                       active_theme.prompt_input_fg,
+			                       active_theme.prompt_input_bg);
+			output_buffer_append_string(output, search.query);
+
+			if (search.query_length > 0 && !search.has_match) {
+				message_bar_set_colors(output,
+				                       active_theme.search_nomatch_fg,
+				                       active_theme.search_nomatch_bg);
+				output_buffer_append_string(output, " (no match)");
 			}
 		}
-
-		if (len > (int)editor.screen_columns) {
-			len = editor.screen_columns;
-		}
-		output_buffer_append(output, prompt, len);
 		return;
 	}
 
 	if (goto_line.active) {
-		/* Draw go-to-line prompt */
-		char prompt[64];
-		int len = snprintf(prompt, sizeof(prompt), "Go to line: %s", goto_line.input);
-		if (len > (int)editor.screen_columns) {
-			len = editor.screen_columns;
-		}
-		output_buffer_append(output, prompt, len);
+		/* Label */
+		message_bar_set_colors(output,
+		                       active_theme.prompt_label_fg,
+		                       active_theme.prompt_label_bg);
+		output_buffer_append_string(output, "Go to line: ");
+
+		/* Input */
+		message_bar_set_colors(output,
+		                       active_theme.prompt_input_fg,
+		                       active_theme.prompt_input_bg);
+		output_buffer_append_string(output, goto_line.input);
 		return;
 	}
 
@@ -9318,7 +9789,8 @@ static void dialog_draw_list_item(struct output_buffer *output,
 				  struct dialog_state *dialog,
 				  int row_index,
 				  const char *text,
-				  bool is_selected)
+				  bool is_selected,
+				  bool is_directory)
 {
 	int screen_row = dialog->panel_top + 2 + row_index;
 	dialog_goto(output, screen_row, dialog->panel_left + 1);
@@ -9326,6 +9798,9 @@ static void dialog_draw_list_item(struct output_buffer *output,
 	if (is_selected) {
 		dialog_set_bg(output, active_theme.dialog_highlight_bg);
 		dialog_set_fg(output, active_theme.dialog_highlight_fg);
+	} else if (is_directory) {
+		dialog_set_bg(output, active_theme.dialog_directory_bg);
+		dialog_set_fg(output, active_theme.dialog_directory_fg);
 	} else {
 		dialog_set_bg(output, active_theme.dialog_bg);
 		dialog_set_fg(output, active_theme.dialog_fg);
@@ -9719,7 +10194,8 @@ static void open_file_draw(void)
 			bool is_selected = (item_index == open_file.dialog.selected_index);
 
 			dialog_draw_list_item(&output, &open_file.dialog, row,
-			                      item->display_name, is_selected);
+			                      item->display_name, is_selected,
+			                      item->is_directory);
 		} else {
 			dialog_draw_empty_row(&output, &open_file.dialog, row);
 		}
