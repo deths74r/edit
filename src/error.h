@@ -153,17 +153,16 @@ extern void terminal_disable_raw_mode(void);
 
 /*
  * WARN_ON_ONCE - Like WARN_ON but only triggers once per call site.
+ * Note: This version doesn't return a value (use WARN_ON if needed).
  */
-#define WARN_ON_ONCE(condition) ({					\
+#define WARN_ON_ONCE(condition) do {					\
 	static int __warned = 0;					\
-	int __warn_cond = !!(condition);				\
-	if (unlikely(__warn_cond) && !__warned) {			\
+	if (unlikely(condition) && !__warned) {				\
 		__warned = 1;						\
 		fprintf(stderr, "WARNING: %s:%d: %s\n",			\
 			__FILE__, __LINE__, #condition);		\
 	}								\
-	__warn_cond;							\
-})
+} while (0)
 
 /*
  * BUG - Unconditional fatal error. Attempts emergency save and aborts.
