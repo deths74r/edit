@@ -12,9 +12,6 @@ TRANSACTION_LOG.md
 *_test.txt
 test_*.txt
 
-# Screenshots and images
-*.png
-
 # Editor backup files
 *.bak
 *~
