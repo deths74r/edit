@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 24A: Thread Infrastructure
+ * Phase 24B: Background Line Warming
  *****************************************************************************/
 
 /*****************************************************************************
@@ -40,7 +40,7 @@
 #include "error.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.24.1"
+#define EDIT_VERSION "0.24.2"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -2336,8 +2336,11 @@ struct line {
 	/* Byte length of line content in mmap (excluding newline). */
 	uint32_t mmap_length;
 
-	/* Temperature indicates whether cells are allocated/edited. */
-	enum line_temperature temperature;
+	/* Temperature - MUST use atomic operations for thread safety. */
+	_Atomic int temperature;
+
+	/* Flag to prevent concurrent warming of the same line. */
+	_Atomic bool warming_in_progress;
 
 	/*
 	 * Wrap cache - computed on demand, invalidated on edit/resize.
@@ -2355,6 +2358,46 @@ struct line {
 	/* Wrap mode when computed. */
 	enum wrap_mode wrap_cache_mode;
 };
+
+/*
+ * Get line temperature (thread-safe).
+ */
+static inline int line_get_temperature(struct line *line)
+{
+	return atomic_load_explicit(&line->temperature, memory_order_acquire);
+}
+
+/*
+ * Set line temperature (thread-safe).
+ */
+static inline void line_set_temperature(struct line *line, int temp)
+{
+	atomic_store_explicit(&line->temperature, temp, memory_order_release);
+}
+
+/*
+ * Try to claim a line for warming.
+ * Returns true if this thread now owns the warming process.
+ */
+static inline bool line_try_claim_warming(struct line *line)
+{
+	bool expected = false;
+	return atomic_compare_exchange_strong_explicit(
+		&line->warming_in_progress,
+		&expected,
+		true,
+		memory_order_acq_rel,
+		memory_order_acquire
+	);
+}
+
+/*
+ * Release warming claim on a line.
+ */
+static inline void line_release_warming(struct line *line)
+{
+	atomic_store_explicit(&line->warming_in_progress, false, memory_order_release);
+}
 
 /*
  * Find the best column to break a line for wrapping.
@@ -2967,15 +3010,178 @@ static inline bool task_is_cancelled(struct task *task)
 	return atomic_load_explicit(&task->cancelled, memory_order_relaxed);
 }
 
+/* Forward declaration - defined later in Neighbor Layer section */
+static void neighbor_compute_line(struct line *line);
+
 /*
- * Placeholder for task processing (implemented in Phase 24B-D).
+ * Warm a line from the worker thread.
+ * This is a thread-safe version that can be called concurrently with rendering.
+ *
+ * Returns 0 on success, negative error code on failure.
+ */
+static int __must_check line_warm_from_worker(struct line *line, struct buffer *buffer)
+{
+	/* Verify preconditions */
+	if (unlikely(line_get_temperature(line) != LINE_TEMPERATURE_COLD)) {
+		return 0;  /* Already warm, nothing to do */
+	}
+
+	if (unlikely(buffer->mmap_base == NULL)) {
+		return -EEDIT_CORRUPT;
+	}
+
+	/* Bounds check */
+	if (unlikely(line->mmap_offset + line->mmap_length > buffer->mmap_size)) {
+		log_err("Line mmap bounds error: offset=%zu len=%u size=%zu",
+		        line->mmap_offset, line->mmap_length, buffer->mmap_size);
+		return -EEDIT_BOUNDS;
+	}
+
+	/* Decode UTF-8 from mmap */
+	const char *text = buffer->mmap_base + line->mmap_offset;
+	size_t length = line->mmap_length;
+
+	/* Allocate cells */
+	uint32_t capacity = length > 0 ? length : 1;
+	struct cell *cells = calloc(capacity, sizeof(struct cell));
+	if (unlikely(cells == NULL)) {
+		log_err("Failed to allocate %u cells", capacity);
+		return -ENOMEM;
+	}
+
+	/* Decode UTF-8 to cells */
+	uint32_t cell_count = 0;
+	size_t byte_index = 0;
+
+	while (byte_index < length) {
+		/* Ensure capacity */
+		if (cell_count >= capacity) {
+			capacity *= 2;
+			struct cell *new_cells = realloc(cells, capacity * sizeof(struct cell));
+			if (unlikely(new_cells == NULL)) {
+				free(cells);
+				return -ENOMEM;
+			}
+			cells = new_cells;
+		}
+
+		/* Decode one codepoint */
+		uint32_t codepoint;
+		int bytes = utflite_decode(text + byte_index, length - byte_index, &codepoint);
+
+		if (bytes <= 0 || byte_index + bytes > length) {
+			/* Invalid UTF-8 - use replacement character */
+			codepoint = 0xFFFD;
+			bytes = 1;
+		}
+
+		cells[cell_count].codepoint = codepoint;
+		cells[cell_count].syntax = SYNTAX_NORMAL;
+		cells[cell_count].neighbor = 0;
+		cells[cell_count].flags = 0;
+		cells[cell_count].context = 0;
+		cell_count++;
+		byte_index += bytes;
+	}
+
+	/*
+	 * Atomic publish: write cells pointer and count, then set temperature.
+	 * The release semantics ensure all writes are visible before temperature change.
+	 */
+	line->cells = cells;
+	line->cell_count = cell_count;
+	line->cell_capacity = capacity;
+
+	/* Initialize wrap cache as invalid */
+	line->wrap_columns = NULL;
+	line->wrap_segment_count = 0;
+	line->wrap_cache_width = 0;
+
+	/* Compute neighbor layer (character classes, token positions) */
+	neighbor_compute_line(line);
+
+	/* Publish as WARM - syntax highlighting still needed */
+	line_set_temperature(line, LINE_TEMPERATURE_WARM);
+
+	return 0;
+}
+
+/*
+ * Worker task: warm a range of lines.
+ * Decodes UTF-8 and computes neighbor layer for each cold line.
  */
 static int worker_process_warm_lines(struct task *task, struct task_result *result)
 {
-	(void)task;
-	result->warm.lines_warmed = 0;
-	result->warm.lines_skipped = 0;
-	log_debug("TASK_WARM_LINES not yet implemented");
+	uint32_t start_row = task->warm.start_row;
+	uint32_t end_row = task->warm.end_row;
+
+	/* Validate range */
+	if (end_row > editor.buffer.line_count) {
+		end_row = editor.buffer.line_count;
+	}
+	if (start_row >= end_row) {
+		result->warm.lines_warmed = 0;
+		result->warm.lines_skipped = 0;
+		return 0;
+	}
+
+	uint32_t warmed = 0;
+	uint32_t skipped = 0;
+
+	for (uint32_t row = start_row; row < end_row; row++) {
+		/* Check cancellation every 100 lines for responsiveness */
+		if ((row - start_row) % 100 == 0) {
+			if (task_is_cancelled(task)) {
+				log_debug("Warm task cancelled at row %u", row);
+				result->warm.lines_warmed = warmed;
+				result->warm.lines_skipped = skipped;
+				return -EEDIT_CANCELLED;
+			}
+		}
+
+		struct line *line = &editor.buffer.lines[row];
+
+		/* Skip if not cold */
+		if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
+			skipped++;
+			continue;
+		}
+
+		/* Try to claim this line */
+		if (!line_try_claim_warming(line)) {
+			/* Another thread is warming this line */
+			skipped++;
+			continue;
+		}
+
+		/* Double-check temperature after claiming */
+		if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
+			line_release_warming(line);
+			skipped++;
+			continue;
+		}
+
+		/* Warm the line */
+		int err = line_warm_from_worker(line, &editor.buffer);
+
+		line_release_warming(line);
+
+		if (unlikely(err)) {
+			if (err != -EEDIT_CANCELLED) {
+				log_warn("Failed to warm line %u: %s", row, edit_strerror(err));
+			}
+			/* Continue with other lines */
+		} else {
+			warmed++;
+		}
+	}
+
+	result->warm.lines_warmed = warmed;
+	result->warm.lines_skipped = skipped;
+
+	log_debug("Warmed %u lines, skipped %u (rows %u-%u)",
+	          warmed, skipped, start_row, end_row);
+
 	return 0;
 }
 
@@ -3220,6 +3426,21 @@ static void worker_shutdown(void)
 }
 
 /*
+ * State for tracking background warming tasks.
+ */
+struct warming_state {
+	uint64_t current_task_id;       /* ID of active warming task */
+	uint32_t last_viewport_start;   /* Last viewport start row */
+	uint32_t last_viewport_end;     /* Last viewport end row */
+	bool task_pending;              /* Is there an active warming task? */
+};
+
+static struct warming_state warming = {0};
+
+/* Forward declaration */
+static void editor_request_background_warming(void);
+
+/*
  * Process any pending results from the worker thread.
  * Called periodically from the main loop (e.g., after input_read_key).
  */
@@ -3238,9 +3459,24 @@ static void worker_process_results(void)
 
 		switch (result.type) {
 		case TASK_WARM_LINES:
-			log_debug("Warm result: %u warmed, %u skipped",
-			          result.warm.lines_warmed, result.warm.lines_skipped);
-			/* Future: trigger redraw if visible lines were warmed */
+			if (result.task_id == warming.current_task_id) {
+				warming.task_pending = false;
+			}
+
+			if (result.error == -EEDIT_CANCELLED) {
+				log_debug("Warming cancelled: %u lines warmed before cancel",
+				          result.warm.lines_warmed);
+			} else if (result.error) {
+				log_warn("Warming failed: %s", edit_strerror(result.error));
+			} else {
+				log_debug("Warming complete: %u warmed, %u skipped",
+				          result.warm.lines_warmed, result.warm.lines_skipped);
+			}
+
+			/* Request more warming if needed (new cold lines may be in view) */
+			if (result.warm.lines_warmed > 0) {
+				editor_request_background_warming();
+			}
 			break;
 
 		case TASK_SEARCH:
@@ -3279,6 +3515,82 @@ static void worker_process_results(void)
 		if (processed >= 10) {
 			break;
 		}
+	}
+}
+
+/*
+ * Request background warming of lines around the viewport.
+ * Call this after scroll or when viewport changes.
+ */
+static void editor_request_background_warming(void)
+{
+	if (!worker.initialized) {
+		return;
+	}
+
+	/* Calculate current viewport */
+	uint32_t viewport_start = editor.row_offset;
+	uint32_t viewport_end = editor.row_offset + editor.screen_rows;
+	if (viewport_end > editor.buffer.line_count) {
+		viewport_end = editor.buffer.line_count;
+	}
+
+	/* Check if viewport changed significantly */
+	bool viewport_changed = (viewport_start != warming.last_viewport_start ||
+	                         viewport_end != warming.last_viewport_end);
+
+	if (!viewport_changed && warming.task_pending) {
+		return;  /* Already have a task running for this viewport */
+	}
+
+	/* Cancel previous warming task if viewport changed */
+	if (viewport_changed && warming.task_pending) {
+		task_cancel(warming.current_task_id);
+		warming.task_pending = false;
+	}
+
+	/* Calculate warming range: viewport + lookahead */
+	uint32_t lookahead = editor.screen_rows * 2;  /* 2 screens ahead/behind */
+
+	uint32_t warm_start = (viewport_start > lookahead) ?
+	                      (viewport_start - lookahead) : 0;
+	uint32_t warm_end = viewport_end + lookahead;
+	if (warm_end > editor.buffer.line_count) {
+		warm_end = editor.buffer.line_count;
+	}
+
+	/* Check if there are cold lines in range */
+	bool has_cold_lines = false;
+	for (uint32_t row = warm_start; row < warm_end && !has_cold_lines; row++) {
+		if (line_get_temperature(&editor.buffer.lines[row]) == LINE_TEMPERATURE_COLD) {
+			has_cold_lines = true;
+		}
+	}
+
+	if (!has_cold_lines) {
+		return;  /* Nothing to warm */
+	}
+
+	/* Submit warming task */
+	struct task task = {
+		.type = TASK_WARM_LINES,
+		.task_id = task_generate_id(),
+		.warm = {
+			.start_row = warm_start,
+			.end_row = warm_end,
+			.priority = 0
+		}
+	};
+
+	int err = task_queue_push(&task);
+	if (err == 0) {
+		warming.current_task_id = task.task_id;
+		warming.task_pending = true;
+		warming.last_viewport_start = viewport_start;
+		warming.last_viewport_end = viewport_end;
+
+		log_debug("Queued warming task %lu for rows %u-%u",
+		          task.task_id, warm_start, warm_end);
 	}
 }
 
@@ -3536,7 +3848,7 @@ static void buffer_compute_pairs(struct buffer *buffer)
 	/* Reset all pair IDs and warm all lines first */
 	for (uint32_t row = 0; row < buffer->line_count; row++) {
 		struct line *line = &buffer->lines[row];
-		if (line->temperature == LINE_TEMPERATURE_COLD) {
+		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
 			line_warm(line, buffer);
 		}
 		for (uint32_t col = 0; col < line->cell_count; col++) {
@@ -3682,7 +3994,7 @@ static bool buffer_find_pair_partner(struct buffer *buffer,
 		/* Search forward for closer */
 		for (uint32_t r = row; r < buffer->line_count; r++) {
 			struct line *search_line = &buffer->lines[r];
-			if (search_line->temperature == LINE_TEMPERATURE_COLD) {
+			if (line_get_temperature(search_line) == LINE_TEMPERATURE_COLD) {
 				line_warm(search_line, buffer);
 			}
 
@@ -3700,7 +4012,7 @@ static bool buffer_find_pair_partner(struct buffer *buffer,
 		/* Search backward for opener */
 		for (int r = row; r >= 0; r--) {
 			struct line *search_line = &buffer->lines[r];
-			if (search_line->temperature == LINE_TEMPERATURE_COLD) {
+			if (line_get_temperature(search_line) == LINE_TEMPERATURE_COLD) {
 				line_warm(search_line, buffer);
 			}
 
@@ -3729,7 +4041,7 @@ static bool syntax_is_in_block_comment(struct buffer *buffer, uint32_t row, uint
 	/* Scan backwards for an unclosed block comment opener */
 	for (int r = row; r >= 0; r--) {
 		struct line *line = &buffer->lines[r];
-		if (line->temperature == LINE_TEMPERATURE_COLD) {
+		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
 			line_warm(line, buffer);
 		}
 
@@ -3914,7 +4226,7 @@ static void syntax_highlight_line(struct line *line, struct buffer *buffer,
 	}
 
 	/* Must be warm/hot to highlight */
-	if (line->temperature == LINE_TEMPERATURE_COLD) {
+	if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
 		return;
 	}
 
@@ -4517,7 +4829,7 @@ static void line_init(struct line *line)
 	line->cell_capacity = 0;
 	line->mmap_offset = 0;
 	line->mmap_length = 0;
-	line->temperature = LINE_TEMPERATURE_HOT;
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	line->wrap_columns = NULL;
 	line->wrap_segment_count = 0;
 	line->wrap_cache_width = 0;
@@ -4533,7 +4845,7 @@ static void line_free(struct line *line)
 	line->cell_capacity = 0;
 	line->mmap_offset = 0;
 	line->mmap_length = 0;
-	line->temperature = LINE_TEMPERATURE_COLD;
+	line_set_temperature(line, LINE_TEMPERATURE_COLD);
 	free(line->wrap_columns);
 	line->wrap_columns = NULL;
 	line->wrap_segment_count = 0;
@@ -4658,7 +4970,7 @@ static void line_append_cells_from_line(struct line *dest, struct line *src)
 
 static int __must_check line_warm_checked(struct line *line, struct buffer *buffer)
 {
-	if (line->temperature != LINE_TEMPERATURE_COLD) {
+	if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
 		return 0;
 	}
 
@@ -4674,7 +4986,7 @@ static int __must_check line_warm_checked(struct line *line, struct buffer *buff
 		offset += bytes;
 	}
 
-	line->temperature = LINE_TEMPERATURE_WARM;
+	line_set_temperature(line, LINE_TEMPERATURE_WARM);
 
 	/* Compute neighbor data for word boundaries */
 	neighbor_compute_line(line);
@@ -4698,7 +5010,7 @@ static void line_warm(struct line *line, struct buffer *buffer)
  */
 static uint32_t line_get_cell_count(struct line *line, struct buffer *buffer)
 {
-	if (line->temperature == LINE_TEMPERATURE_COLD) {
+	if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
 		/* Count codepoints without allocating cells */
 		const char *text = buffer->mmap_base + line->mmap_offset;
 		size_t length = line->mmap_length;
@@ -4928,7 +5240,7 @@ static int __must_check buffer_insert_cell_at_column_checked(struct buffer *buff
 	struct line *line = &buffer->lines[row];
 	PROPAGATE(line_warm_checked(line, buffer));
 	PROPAGATE(line_insert_cell_checked(line, column, codepoint));
-	line->temperature = LINE_TEMPERATURE_HOT;
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	buffer->is_modified = true;
 
 	/* Recompute neighbors for this line */
@@ -4969,7 +5281,7 @@ static int __must_check buffer_delete_grapheme_at_column_checked(struct buffer *
 		for (uint32_t i = end; i > column; i--) {
 			line_delete_cell(line, column);
 		}
-		line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 		buffer->is_modified = true;
 		/* Recompute neighbors and re-highlight */
 		neighbor_compute_line(line);
@@ -4981,7 +5293,7 @@ static int __must_check buffer_delete_grapheme_at_column_checked(struct buffer *
 		struct line *next_line = &buffer->lines[row + 1];
 		PROPAGATE(line_warm_checked(next_line, buffer));
 		PROPAGATE(line_append_cells_from_line_checked(line, next_line));
-		line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 		buffer_delete_line(buffer, row + 1);
 		/* Recompute neighbors and re-highlight */
 		neighbor_compute_line(line);
@@ -5029,7 +5341,7 @@ static int __must_check buffer_insert_newline_checked(struct buffer *buffer,
 
 	/* Truncate original line */
 	line->cell_count = column;
-	line->temperature = LINE_TEMPERATURE_HOT;
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 
 	/* Recompute neighbors and re-highlight both lines */
 	neighbor_compute_line(line);
@@ -5112,7 +5424,7 @@ void emergency_save(void)
 	for (uint32_t row = 0; row < buffer->line_count; row++) {
 		struct line *line = &buffer->lines[row];
 
-		if (line->temperature == LINE_TEMPERATURE_COLD) {
+		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
 			/* Cold line: write directly from mmap */
 			if (buffer->mmap_base && line->mmap_length > 0) {
 				fwrite(buffer->mmap_base + line->mmap_offset,
@@ -5167,7 +5479,7 @@ static void file_build_line_index(struct buffer *buffer)
 			line->cell_capacity = 0;
 			line->mmap_offset = line_start;
 			line->mmap_length = line_end - line_start;
-			line->temperature = LINE_TEMPERATURE_COLD;
+			line_set_temperature(line, LINE_TEMPERATURE_COLD);
 			line->wrap_columns = NULL;
 			line->wrap_segment_count = 0;
 			line->wrap_cache_width = 0;
@@ -5909,7 +6221,7 @@ static void buffer_insert_cell_no_record(struct buffer *buffer, uint32_t row,
 	struct line *line = &buffer->lines[row];
 	line_warm(line, buffer);
 	line_insert_cell(line, column, codepoint);
-	line->temperature = LINE_TEMPERATURE_HOT;
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	buffer->is_modified = true;
 
 	neighbor_compute_line(line);
@@ -5936,7 +6248,7 @@ static void buffer_delete_cell_no_record(struct buffer *buffer, uint32_t row,
 	}
 
 	line_delete_cell(line, column);
-	line->temperature = LINE_TEMPERATURE_HOT;
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	buffer->is_modified = true;
 
 	neighbor_compute_line(line);
@@ -5974,7 +6286,7 @@ static void buffer_insert_newline_no_record(struct buffer *buffer, uint32_t row,
 		}
 
 		line->cell_count = column;
-		line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 
 		neighbor_compute_line(line);
 		neighbor_compute_line(new_line);
@@ -6007,7 +6319,7 @@ static void buffer_join_lines_no_record(struct buffer *buffer, uint32_t row)
 		line_append_cell(line, next_line->cells[i].codepoint);
 	}
 
-	line->temperature = LINE_TEMPERATURE_HOT;
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	buffer_delete_line(buffer, row + 1);
 	buffer->is_modified = true;
 
@@ -6066,7 +6378,7 @@ static void buffer_delete_range_no_record(struct buffer *buffer,
 		for (uint32_t i = end_col; i > start_col; i--) {
 			line_delete_cell(line, start_col);
 		}
-		line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(line);
 		syntax_highlight_line(line, buffer, start_row);
 	} else {
@@ -6090,7 +6402,7 @@ static void buffer_delete_range_no_record(struct buffer *buffer,
 			buffer_delete_line(buffer, i);
 		}
 
-		start_line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(start_line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(start_line);
 		buffer_compute_pairs(buffer);
 
@@ -7351,6 +7663,9 @@ static void editor_scroll(void)
 		/* In wrap mode, no horizontal scrolling needed */
 		editor.column_offset = 0;
 	}
+
+	/* Request background warming for new viewport */
+	editor_request_background_warming();
 }
 
 /*
@@ -7635,7 +7950,7 @@ static void editor_delete_selection(void)
 		for (uint32_t i = end_col; i > start_col; i--) {
 			line_delete_cell(line, start_col);
 		}
-		line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(line);
 		syntax_highlight_line(line, &editor.buffer, start_row);
 	} else {
@@ -7663,7 +7978,7 @@ static void editor_delete_selection(void)
 			buffer_delete_line(&editor.buffer, i);
 		}
 
-		start_line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(start_line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(start_line);
 		buffer_compute_pairs(&editor.buffer);
 
@@ -7812,7 +8127,7 @@ static void editor_paste(void)
 	buffer_compute_pairs(&editor.buffer);
 	for (uint32_t row = start_row; row <= editor.cursor_row; row++) {
 		struct line *line = &editor.buffer.lines[row];
-		if (line->temperature != LINE_TEMPERATURE_COLD) {
+		if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
 			syntax_highlight_line(line, &editor.buffer, row);
 		}
 	}
@@ -8039,7 +8354,7 @@ static void editor_handle_backspace(void)
 			undo_end_group(&editor.buffer);
 			return;
 		}
-		previous_line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(previous_line, LINE_TEMPERATURE_HOT);
 		buffer_delete_line(&editor.buffer, editor.cursor_row);
 		editor.cursor_row--;
 		editor.cursor_column = previous_line_length;
@@ -9633,7 +9948,7 @@ static bool search_replace_current(void)
 	free(final_replacement);
 
 	/* Recompute line metadata */
-	line->temperature = LINE_TEMPERATURE_HOT;
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	neighbor_compute_line(line);
 	syntax_highlight_line(line, &editor.buffer, editor.cursor_row);
 	line_invalidate_wrap_cache(line);
@@ -10006,6 +10321,53 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 }
 
 /*
+ * Ensure a line is at least WARM before rendering.
+ * Called from main thread only. If the line is cold, warms it synchronously.
+ * Then applies syntax highlighting if needed.
+ */
+static void ensure_line_warm_for_render(struct line *line, struct buffer *buffer, uint32_t row)
+{
+	int temp = line_get_temperature(line);
+
+	if (temp == LINE_TEMPERATURE_COLD) {
+		/* Must warm synchronously for render */
+		if (line_try_claim_warming(line)) {
+			/* We claimed it - warm now */
+			if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+				int __attribute__((unused)) err = line_warm_from_worker(line, buffer);
+			}
+			line_release_warming(line);
+		} else {
+			/* Worker is warming it - spin briefly then fall back */
+			for (int i = 0; i < 1000 && line_get_temperature(line) == LINE_TEMPERATURE_COLD; i++) {
+				/* Brief spin */
+			}
+
+			/* If still cold, force warm (worker may have failed) */
+			if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+				/* Wait for worker to release, then warm ourselves */
+				while (!line_try_claim_warming(line)) {
+					/* Spin */
+				}
+				if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+					int __attribute__((unused)) err = line_warm_from_worker(line, buffer);
+				}
+				line_release_warming(line);
+			}
+		}
+	}
+
+	/* At this point line is WARM or HOT */
+
+	/* Compute syntax highlighting if needed (main thread only) */
+	temp = line_get_temperature(line);
+	if (temp == LINE_TEMPERATURE_WARM) {
+		syntax_highlight_line(line, buffer, row);
+		/* syntax_highlight_line sets temperature to HOT */
+	}
+}
+
+/*
  * Render all visible rows of the editor. For each screen row, draws
  * the line number gutter (if enabled) and line content. Handles soft
  * wrap by mapping screen rows to (logical_line, segment) pairs. Empty
@@ -10097,6 +10459,10 @@ static void render_draw_rows(struct output_buffer *output)
 			}
 		} else if (file_row < editor.buffer.line_count) {
 			struct line *line = &editor.buffer.lines[file_row];
+
+			/* Ensure line is warmed before rendering */
+			ensure_line_warm_for_render(line, &editor.buffer, file_row);
+
 			line_ensure_wrap_cache(line, &editor.buffer);
 
 			/*
@@ -11540,6 +11906,10 @@ static bool editor_open_file(const char *path)
 	}
 
 	editor_set_status_message("Opened: %s (%u lines)", path, editor.buffer.line_count);
+
+	/* Start background warming for the new file */
+	editor_request_background_warming();
+
 	return true;
 }
 
@@ -12854,7 +13224,7 @@ static void editor_toggle_comment(void)
 			line->cells[insert_position + 2].neighbor = 0;
 
 			line->cell_count += 3;
-			line->temperature = LINE_TEMPERATURE_HOT;
+			line_set_temperature(line, LINE_TEMPERATURE_HOT);
 
 			/* Record for undo (in reverse order for correct undo sequence) */
 			undo_record_insert_char(&editor.buffer, row, insert_position, '/');
@@ -12892,7 +13262,7 @@ static void editor_toggle_comment(void)
 				(line->cell_count - comment_start - chars_to_remove) * sizeof(struct cell));
 
 			line->cell_count -= chars_to_remove;
-			line->temperature = LINE_TEMPERATURE_HOT;
+			line_set_temperature(line, LINE_TEMPERATURE_HOT);
 
 			/* Adjust cursor if on this line */
 			if (row == editor.cursor_row && editor.cursor_column > comment_start) {
@@ -13038,7 +13408,7 @@ static void editor_indent_lines(void)
 
 		/* Insert tab at position 0 */
 		line_insert_cell(line, 0, '\t');
-		line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 
 		/* Recompute line metadata */
 		neighbor_compute_line(line);
@@ -13125,7 +13495,7 @@ static void editor_outdent_lines(void)
 			line_delete_cell(line, 0);
 		}
 
-		line->temperature = LINE_TEMPERATURE_HOT;
+		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(line);
 		syntax_highlight_line(line, &editor.buffer, row);
 		line_invalidate_wrap_cache(line);
