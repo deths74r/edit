@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 24B: Background Line Warming
+ * Phase 24C: Background Search
  *****************************************************************************/
 
 /*****************************************************************************
@@ -40,7 +40,7 @@
 #include "error.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.24.2"
+#define EDIT_VERSION "0.24.3"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -2631,6 +2631,67 @@ struct search_state {
 };
 static struct search_state search = {0};
 
+/*****************************************************************************
+ * Background Search State
+ *****************************************************************************/
+
+/* Maximum matches to store (prevent memory explosion on huge files) */
+#define MAX_SEARCH_MATCHES 100000
+
+/* Threshold: use async search for files larger than this many lines */
+#define ASYNC_SEARCH_THRESHOLD 5000
+
+/*
+ * A single search match location.
+ */
+struct search_match {
+	uint32_t row;
+	uint32_t start_col;         /* Starting column (cell index) */
+	uint32_t end_col;           /* Ending column (exclusive) */
+};
+
+/*
+ * Search results from background search.
+ * Protected by mutex for thread-safe access.
+ */
+struct search_results {
+	struct search_match *matches;
+	uint32_t match_count;
+	uint32_t match_capacity;
+
+	/* Progress tracking */
+	uint32_t rows_searched;
+	uint32_t total_rows;
+	bool complete;
+
+	/* The pattern these results are for */
+	char pattern[256];
+	bool use_regex;
+	bool case_sensitive;
+	bool whole_word;
+};
+
+/*
+ * Background search state.
+ */
+struct async_search_state {
+	/* Active search task */
+	uint64_t task_id;
+	bool active;
+
+	/* Results (accessed from both threads) */
+	struct search_results results;
+	pthread_mutex_t results_mutex;
+	bool mutex_initialized;
+
+	/* Current match index for navigation */
+	int32_t current_match_index;
+};
+
+static struct async_search_state async_search = {
+	.current_match_index = -1
+};
+
 /* Go-to-line mode state. */
 struct goto_state {
 	bool active;
@@ -3185,13 +3246,292 @@ static int worker_process_warm_lines(struct task *task, struct task_result *resu
 	return 0;
 }
 
+/* Forward declarations for async search functions used by worker */
+static int search_results_add_match(uint32_t row, uint32_t start_col, uint32_t end_col);
+static void search_results_update_progress(uint32_t rows_searched, uint32_t total_rows);
+static void search_results_mark_complete(void);
+
+/*
+ * Search a single line for pattern matches.
+ * Warms the line if needed.
+ * Returns number of matches found, negative on error.
+ */
+static int search_line_for_matches(struct line *line, struct buffer *buffer,
+                                   uint32_t row, const char *pattern,
+                                   bool use_regex, bool case_sensitive,
+                                   bool whole_word, regex_t *compiled_regex)
+{
+	/* Ensure line is warm */
+	int temp = line_get_temperature(line);
+	if (temp == LINE_TEMPERATURE_COLD) {
+		if (line_try_claim_warming(line)) {
+			if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+				int err = line_warm_from_worker(line, buffer);
+				if (err) {
+					line_release_warming(line);
+					return err;
+				}
+			}
+			line_release_warming(line);
+		} else {
+			/* Wait briefly for other thread */
+			for (int i = 0; i < 100 && line_get_temperature(line) == LINE_TEMPERATURE_COLD; i++) {
+				/* Spin */
+			}
+			if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+				return 0;  /* Skip this line */
+			}
+		}
+	}
+
+	/* Convert line to string for searching */
+	if (line->cells == NULL || line->cell_count == 0) {
+		return 0;
+	}
+
+	/* Build UTF-8 string from cells */
+	char *line_str = malloc(line->cell_count * 4 + 1);
+	if (line_str == NULL) {
+		return -ENOMEM;
+	}
+
+	size_t str_len = 0;
+	uint32_t *byte_to_cell = malloc((line->cell_count * 4 + 1) * sizeof(uint32_t));
+	if (byte_to_cell == NULL) {
+		free(line_str);
+		return -ENOMEM;
+	}
+
+	for (uint32_t col = 0; col < line->cell_count; col++) {
+		char utf8[4];
+		int bytes = utflite_encode(line->cells[col].codepoint, utf8);
+		if (bytes > 0) {
+			for (int b = 0; b < bytes; b++) {
+				byte_to_cell[str_len + b] = col;
+			}
+			memcpy(line_str + str_len, utf8, bytes);
+			str_len += bytes;
+		}
+	}
+	line_str[str_len] = '\0';
+	byte_to_cell[str_len] = line->cell_count;
+
+	int matches_found = 0;
+
+	if (use_regex && compiled_regex != NULL) {
+		/* Regex search */
+		regmatch_t match;
+		size_t offset = 0;
+
+		while (offset < str_len) {
+			int regex_result = regexec(compiled_regex, line_str + offset, 1, &match,
+			                     offset > 0 ? REG_NOTBOL : 0);
+			if (regex_result != 0) {
+				break;
+			}
+
+			size_t match_start = offset + match.rm_so;
+			size_t match_end = offset + match.rm_eo;
+
+			uint32_t start_col = byte_to_cell[match_start];
+			uint32_t end_col = match_end < str_len ? byte_to_cell[match_end] : line->cell_count;
+
+			/* Whole word check for regex */
+			bool is_whole_word = true;
+			if (whole_word) {
+				if (match_start > 0 && isalnum((unsigned char)line_str[match_start - 1])) {
+					is_whole_word = false;
+				}
+				if (match_end < str_len && isalnum((unsigned char)line_str[match_end])) {
+					is_whole_word = false;
+				}
+			}
+
+			if (is_whole_word) {
+				if (search_results_add_match(row, start_col, end_col) < 0) {
+					/* At capacity */
+					break;
+				}
+				matches_found++;
+			}
+
+			/* Move past this match */
+			offset = match_end;
+			if (match.rm_so == match.rm_eo) {
+				offset++;  /* Prevent infinite loop on empty match */
+			}
+		}
+	} else {
+		/* Plain text search */
+		size_t pattern_len = strlen(pattern);
+		if (pattern_len == 0) {
+			free(line_str);
+			free(byte_to_cell);
+			return 0;
+		}
+
+		char *search_str = line_str;
+		char *search_pattern = (char *)pattern;
+		char *lower_str = NULL;
+		char *lower_pattern = NULL;
+
+		if (!case_sensitive) {
+			/* Convert to lowercase for case-insensitive search */
+			lower_str = malloc(str_len + 1);
+			lower_pattern = malloc(pattern_len + 1);
+			if (lower_str && lower_pattern) {
+				for (size_t i = 0; i <= str_len; i++) {
+					lower_str[i] = tolower((unsigned char)line_str[i]);
+				}
+				for (size_t i = 0; i <= pattern_len; i++) {
+					lower_pattern[i] = tolower((unsigned char)pattern[i]);
+				}
+				search_str = lower_str;
+				search_pattern = lower_pattern;
+			}
+		}
+
+		char *pos = search_str;
+		while ((pos = strstr(pos, search_pattern)) != NULL) {
+			size_t byte_offset = pos - search_str;
+			size_t match_end_byte = byte_offset + pattern_len;
+
+			/* Whole word check */
+			bool is_whole_word = true;
+			if (whole_word) {
+				if (byte_offset > 0 && isalnum((unsigned char)search_str[byte_offset - 1])) {
+					is_whole_word = false;
+				}
+				if (match_end_byte < str_len && isalnum((unsigned char)search_str[match_end_byte])) {
+					is_whole_word = false;
+				}
+			}
+
+			if (is_whole_word) {
+				uint32_t start_col = byte_to_cell[byte_offset];
+				uint32_t end_col = match_end_byte < str_len ?
+				                   byte_to_cell[match_end_byte] : line->cell_count;
+
+				if (search_results_add_match(row, start_col, end_col) < 0) {
+					break;  /* At capacity */
+				}
+				matches_found++;
+			}
+
+			pos++;
+		}
+
+		free(lower_str);
+		free(lower_pattern);
+	}
+
+	free(line_str);
+	free(byte_to_cell);
+
+	return matches_found;
+}
+
+/*
+ * Worker task: search buffer for pattern.
+ */
 static int worker_process_search(struct task *task, struct task_result *result)
 {
-	(void)task;
-	result->search.match_count = 0;
-	result->search.rows_searched = 0;
+	const char *pattern = task->search.pattern;
+	uint32_t start_row = task->search.start_row;
+	uint32_t end_row = task->search.end_row;
+	bool use_regex = task->search.use_regex;
+	bool case_sensitive = task->search.case_sensitive;
+	bool whole_word = task->search.whole_word;
+
+	/* Validate range */
+	if (end_row == 0 || end_row > editor.buffer.line_count) {
+		end_row = editor.buffer.line_count;
+	}
+	if (start_row >= end_row) {
+		result->search.match_count = 0;
+		result->search.rows_searched = 0;
+		result->search.complete = true;
+		return 0;
+	}
+
+	/* Store pattern in results for validation */
+	pthread_mutex_lock(&async_search.results_mutex);
+	strncpy(async_search.results.pattern, pattern, sizeof(async_search.results.pattern) - 1);
+	async_search.results.pattern[sizeof(async_search.results.pattern) - 1] = '\0';
+	async_search.results.use_regex = use_regex;
+	async_search.results.case_sensitive = case_sensitive;
+	async_search.results.whole_word = whole_word;
+	async_search.results.total_rows = end_row - start_row;
+	pthread_mutex_unlock(&async_search.results_mutex);
+
+	/* Compile regex if needed */
+	regex_t compiled_regex;
+	bool regex_valid = false;
+
+	if (use_regex) {
+		int flags = REG_EXTENDED;
+		if (!case_sensitive) {
+			flags |= REG_ICASE;
+		}
+		if (regcomp(&compiled_regex, pattern, flags) == 0) {
+			regex_valid = true;
+		} else {
+			log_warn("Invalid regex pattern: %s", pattern);
+			result->search.match_count = 0;
+			result->search.complete = true;
+			return -EINVAL;
+		}
+	}
+
+	uint32_t total_matches = 0;
+	uint32_t rows_searched = 0;
+
+	for (uint32_t row = start_row; row < end_row; row++) {
+		/* Check cancellation every 100 rows */
+		if (rows_searched % 100 == 0) {
+			if (task_is_cancelled(task)) {
+				log_debug("Search cancelled at row %u", row);
+				result->search.match_count = total_matches;
+				result->search.rows_searched = rows_searched;
+				result->search.complete = false;
+				if (regex_valid) {
+					regfree(&compiled_regex);
+				}
+				return -EEDIT_CANCELLED;
+			}
+
+			/* Update progress */
+			search_results_update_progress(rows_searched, end_row - start_row);
+		}
+
+		struct line *line = &editor.buffer.lines[row];
+
+		int matches = search_line_for_matches(
+			line, &editor.buffer, row, pattern,
+			use_regex, case_sensitive, whole_word,
+			regex_valid ? &compiled_regex : NULL
+		);
+
+		if (matches > 0) {
+			total_matches += matches;
+		}
+
+		rows_searched++;
+	}
+
+	if (regex_valid) {
+		regfree(&compiled_regex);
+	}
+
+	/* Mark complete */
+	search_results_mark_complete();
+
+	result->search.match_count = total_matches;
+	result->search.rows_searched = rows_searched;
 	result->search.complete = true;
-	log_debug("TASK_SEARCH not yet implemented");
+
+	log_debug("Search complete: %u matches in %u rows", total_matches, rows_searched);
+
 	return 0;
 }
 
@@ -3437,8 +3777,10 @@ struct warming_state {
 
 static struct warming_state warming = {0};
 
-/* Forward declaration */
+/* Forward declarations */
 static void editor_request_background_warming(void);
+static uint32_t async_search_get_progress(bool *complete, uint32_t *rows_searched, uint32_t *total_rows);
+static bool async_search_next_match(void);
 
 /*
  * Process any pending results from the worker thread.
@@ -3480,15 +3822,32 @@ static void worker_process_results(void)
 			break;
 
 		case TASK_SEARCH:
+			if (result.task_id == async_search.task_id) {
+				async_search.active = false;
+			}
+
 			if (result.error == -EEDIT_CANCELLED) {
-				editor_set_status_message("Search cancelled");
+				/* Don't update status on cancel - likely starting new search */
 			} else if (result.error) {
 				editor_set_status_message("Search error: %s",
 				                          edit_strerror(result.error));
 			} else {
-				editor_set_status_message("Found %u match%s",
-				                          result.search.match_count,
-				                          result.search.match_count == 1 ? "" : "es");
+				bool complete;
+				uint32_t count = async_search_get_progress(&complete, NULL, NULL);
+				if (complete) {
+					if (count == 0) {
+						editor_set_status_message("No matches found");
+						search.has_match = false;
+					} else {
+						editor_set_status_message("Found %u match%s",
+						                          count, count == 1 ? "" : "es");
+						search.has_match = true;
+						/* Auto-navigate to first match if not already at one */
+						if (async_search.current_match_index < 0) {
+							async_search_next_match();
+						}
+					}
+				}
 			}
 			break;
 
@@ -3591,6 +3950,361 @@ static void editor_request_background_warming(void)
 
 		log_debug("Queued warming task %lu for rows %u-%u",
 		          task.task_id, warm_start, warm_end);
+	}
+}
+
+/*****************************************************************************
+ * Background Search Management
+ *****************************************************************************/
+
+/*
+ * Initialize the async search system.
+ * Call once at startup after worker_init().
+ */
+static int __must_check async_search_init(void)
+{
+	if (pthread_mutex_init(&async_search.results_mutex, NULL) != 0) {
+		log_err("Failed to initialize search results mutex");
+		return -EEDIT_MUTEX;
+	}
+
+	async_search.mutex_initialized = true;
+	async_search.results.matches = NULL;
+	async_search.results.match_count = 0;
+	async_search.results.match_capacity = 0;
+	async_search.results.complete = false;
+	async_search.active = false;
+	async_search.current_match_index = -1;
+
+	return 0;
+}
+
+/*
+ * Cleanup async search resources.
+ * Call before worker_shutdown().
+ */
+static void async_search_cleanup(void)
+{
+	if (!async_search.mutex_initialized) {
+		return;
+	}
+
+	pthread_mutex_lock(&async_search.results_mutex);
+	free(async_search.results.matches);
+	async_search.results.matches = NULL;
+	async_search.results.match_count = 0;
+	pthread_mutex_unlock(&async_search.results_mutex);
+
+	pthread_mutex_destroy(&async_search.results_mutex);
+	async_search.mutex_initialized = false;
+}
+
+/*
+ * Clear search results (call with mutex held).
+ */
+static void search_results_clear_locked(void)
+{
+	async_search.results.match_count = 0;
+	async_search.results.rows_searched = 0;
+	async_search.results.complete = false;
+	async_search.current_match_index = -1;
+}
+
+/*
+ * Add a match to results (call from worker thread).
+ * Returns 0 on success, -ENOMEM if at capacity.
+ */
+static int search_results_add_match(uint32_t row, uint32_t start_col, uint32_t end_col)
+{
+	pthread_mutex_lock(&async_search.results_mutex);
+
+	/* Check capacity */
+	if (async_search.results.match_count >= MAX_SEARCH_MATCHES) {
+		pthread_mutex_unlock(&async_search.results_mutex);
+		return -ENOMEM;  /* At limit, stop adding */
+	}
+
+	/* Grow array if needed */
+	if (async_search.results.match_count >= async_search.results.match_capacity) {
+		uint32_t new_capacity = async_search.results.match_capacity == 0 ?
+		                        256 : async_search.results.match_capacity * 2;
+		if (new_capacity > MAX_SEARCH_MATCHES) {
+			new_capacity = MAX_SEARCH_MATCHES;
+		}
+
+		struct search_match *new_matches = realloc(
+			async_search.results.matches,
+			new_capacity * sizeof(struct search_match)
+		);
+		if (new_matches == NULL) {
+			pthread_mutex_unlock(&async_search.results_mutex);
+			return -ENOMEM;
+		}
+
+		async_search.results.matches = new_matches;
+		async_search.results.match_capacity = new_capacity;
+	}
+
+	/* Add match */
+	struct search_match *match = &async_search.results.matches[async_search.results.match_count++];
+	match->row = row;
+	match->start_col = start_col;
+	match->end_col = end_col;
+
+	pthread_mutex_unlock(&async_search.results_mutex);
+	return 0;
+}
+
+/*
+ * Update search progress (call from worker thread).
+ */
+static void search_results_update_progress(uint32_t rows_searched, uint32_t total_rows)
+{
+	pthread_mutex_lock(&async_search.results_mutex);
+	async_search.results.rows_searched = rows_searched;
+	async_search.results.total_rows = total_rows;
+	pthread_mutex_unlock(&async_search.results_mutex);
+}
+
+/*
+ * Mark search as complete (call from worker thread).
+ */
+static void search_results_mark_complete(void)
+{
+	pthread_mutex_lock(&async_search.results_mutex);
+	async_search.results.complete = true;
+	pthread_mutex_unlock(&async_search.results_mutex);
+}
+
+/*
+ * Check if async search should be used for current buffer.
+ */
+static bool should_use_async_search(void)
+{
+	return worker.initialized &&
+	       async_search.mutex_initialized &&
+	       editor.buffer.line_count > ASYNC_SEARCH_THRESHOLD;
+}
+
+/*
+ * Check if a cell is within a search match.
+ * Returns: 0 = no match, 1 = match, 2 = current match
+ */
+static int async_search_get_match_state(uint32_t row, uint32_t col)
+{
+	if (!async_search.mutex_initialized) {
+		return 0;
+	}
+
+	if (!async_search.active && async_search.results.match_count == 0) {
+		return 0;
+	}
+
+	pthread_mutex_lock(&async_search.results_mutex);
+
+	int result = 0;
+	for (uint32_t i = 0; i < async_search.results.match_count; i++) {
+		struct search_match *match = &async_search.results.matches[i];
+		if (match->row == row && col >= match->start_col && col < match->end_col) {
+			result = (i == (uint32_t)async_search.current_match_index) ? 2 : 1;
+			break;
+		}
+	}
+
+	pthread_mutex_unlock(&async_search.results_mutex);
+	return result;
+}
+
+/*
+ * Get current search progress for status display.
+ * Returns match count and sets *complete to indicate if search finished.
+ */
+static uint32_t async_search_get_progress(bool *complete, uint32_t *rows_searched,
+                                          uint32_t *total_rows)
+{
+	if (!async_search.mutex_initialized) {
+		if (complete) *complete = true;
+		if (rows_searched) *rows_searched = 0;
+		if (total_rows) *total_rows = 0;
+		return 0;
+	}
+
+	pthread_mutex_lock(&async_search.results_mutex);
+	uint32_t count = async_search.results.match_count;
+	if (complete) *complete = async_search.results.complete;
+	if (rows_searched) *rows_searched = async_search.results.rows_searched;
+	if (total_rows) *total_rows = async_search.results.total_rows;
+	pthread_mutex_unlock(&async_search.results_mutex);
+	return count;
+}
+
+/* Forward declarations for navigation */
+static void editor_scroll(void);
+
+/*
+ * Navigate to the next search match.
+ * Returns true if moved to a match.
+ */
+static bool async_search_next_match(void)
+{
+	if (!async_search.mutex_initialized) {
+		return false;
+	}
+
+	pthread_mutex_lock(&async_search.results_mutex);
+
+	if (async_search.results.match_count == 0) {
+		pthread_mutex_unlock(&async_search.results_mutex);
+		return false;
+	}
+
+	/* Find next match after current cursor position */
+	uint32_t cursor_row = editor.cursor_row;
+	uint32_t cursor_col = editor.cursor_column;
+	int32_t next_index = -1;
+
+	/* First, try to find a match after current position */
+	for (uint32_t i = 0; i < async_search.results.match_count; i++) {
+		struct search_match *match = &async_search.results.matches[i];
+		if (match->row > cursor_row ||
+		    (match->row == cursor_row && match->start_col > cursor_col)) {
+			next_index = i;
+			break;
+		}
+	}
+
+	/* Wrap around to first match if none found after cursor */
+	if (next_index < 0) {
+		next_index = 0;
+	}
+
+	/* Navigate to match */
+	struct search_match *match = &async_search.results.matches[next_index];
+	async_search.current_match_index = next_index;
+
+	uint32_t row = match->row;
+	uint32_t col = match->start_col;
+
+	pthread_mutex_unlock(&async_search.results_mutex);
+
+	/* Update cursor position */
+	editor.cursor_row = row;
+	editor.cursor_column = col;
+	editor_scroll();
+
+	return true;
+}
+
+/*
+ * Navigate to the previous search match.
+ * Returns true if moved to a match.
+ */
+static bool async_search_prev_match(void)
+{
+	if (!async_search.mutex_initialized) {
+		return false;
+	}
+
+	pthread_mutex_lock(&async_search.results_mutex);
+
+	if (async_search.results.match_count == 0) {
+		pthread_mutex_unlock(&async_search.results_mutex);
+		return false;
+	}
+
+	/* Find previous match before current cursor position */
+	uint32_t cursor_row = editor.cursor_row;
+	uint32_t cursor_col = editor.cursor_column;
+	int32_t prev_index = -1;
+
+	/* Search backwards */
+	for (int32_t i = async_search.results.match_count - 1; i >= 0; i--) {
+		struct search_match *match = &async_search.results.matches[i];
+		if (match->row < cursor_row ||
+		    (match->row == cursor_row && match->start_col < cursor_col)) {
+			prev_index = i;
+			break;
+		}
+	}
+
+	/* Wrap around to last match if none found before cursor */
+	if (prev_index < 0) {
+		prev_index = async_search.results.match_count - 1;
+	}
+
+	/* Navigate to match */
+	struct search_match *match = &async_search.results.matches[prev_index];
+	async_search.current_match_index = prev_index;
+
+	uint32_t row = match->row;
+	uint32_t col = match->start_col;
+
+	pthread_mutex_unlock(&async_search.results_mutex);
+
+	/* Update cursor position */
+	editor.cursor_row = row;
+	editor.cursor_column = col;
+	editor_scroll();
+
+	return true;
+}
+
+/*
+ * Cancel current async search.
+ */
+static void async_search_cancel(void)
+{
+	if (async_search.active) {
+		task_cancel(async_search.task_id);
+		async_search.active = false;
+		log_debug("Cancelled async search");
+	}
+}
+
+/*
+ * Start an async search.
+ * Cancels any existing search first.
+ */
+static void async_search_start(const char *pattern, bool use_regex,
+                               bool case_sensitive, bool whole_word)
+{
+	if (!worker.initialized || !async_search.mutex_initialized) {
+		return;  /* Fall back to sync search */
+	}
+
+	/* Cancel existing search */
+	if (async_search.active) {
+		task_cancel(async_search.task_id);
+		async_search.active = false;
+	}
+
+	/* Clear previous results */
+	pthread_mutex_lock(&async_search.results_mutex);
+	search_results_clear_locked();
+	pthread_mutex_unlock(&async_search.results_mutex);
+
+	/* Submit new search task */
+	struct task task = {
+		.type = TASK_SEARCH,
+		.task_id = task_generate_id(),
+		.search = {
+			.start_row = 0,
+			.end_row = 0,  /* 0 = entire buffer */
+			.use_regex = use_regex,
+			.case_sensitive = case_sensitive,
+			.whole_word = whole_word
+		}
+	};
+	strncpy(task.search.pattern, pattern, sizeof(task.search.pattern) - 1);
+	task.search.pattern[sizeof(task.search.pattern) - 1] = '\0';
+
+	int err = task_queue_push(&task);
+	if (err == 0) {
+		async_search.task_id = task.task_id;
+		async_search.active = true;
+		log_debug("Started async search for '%s' (task %lu)", pattern, task.task_id);
+	} else {
+		log_warn("Failed to start async search: %s", edit_strerror(err));
 	}
 }
 
@@ -5671,6 +6385,12 @@ static void editor_init(void)
 	if (err) {
 		log_warn("Worker thread disabled: %s", edit_strerror(err));
 		/* Continue without background processing - not fatal */
+	}
+
+	/* Initialize async search system */
+	err = async_search_init();
+	if (err) {
+		log_warn("Async search disabled: %s", edit_strerror(err));
 	}
 }
 
@@ -9246,6 +9966,14 @@ static void search_exit(bool restore_position)
 		search.regex_compiled = false;
 	}
 
+	/* Cancel async search and clear results */
+	async_search_cancel();
+	if (async_search.mutex_initialized) {
+		pthread_mutex_lock(&async_search.results_mutex);
+		search_results_clear_locked();
+		pthread_mutex_unlock(&async_search.results_mutex);
+	}
+
 	search.active = false;
 	search.replace_mode = false;
 	search.has_match = false;
@@ -9693,12 +10421,26 @@ static void search_update(void)
 	}
 
 	if (search.query_length == 0) {
-		/* No query - restore to saved position */
+		/* No query - restore to saved position and cancel async search */
 		editor.cursor_row = search.saved_cursor_row;
 		editor.cursor_column = search.saved_cursor_column;
 		search.has_match = false;
+		async_search_cancel();
+		pthread_mutex_lock(&async_search.results_mutex);
+		search_results_clear_locked();
+		pthread_mutex_unlock(&async_search.results_mutex);
 		return;
 	}
+
+	/* Use async search for large files */
+	if (should_use_async_search()) {
+		async_search_start(search.query, search.use_regex,
+		                   search.case_sensitive, search.whole_word);
+		/* Results will come via worker_process_results() */
+		return;
+	}
+
+	/* Synchronous search for small files */
 
 	/* Start search from saved position */
 	editor.cursor_row = search.saved_cursor_row;
@@ -12263,8 +13005,14 @@ static bool search_handle_key(int key)
 		case KEY_ARROW_RIGHT:
 			/* Find next match */
 			search.direction = 1;
-			if (!search_find_next(true)) {
-				editor_set_status_message("No more matches");
+			if (should_use_async_search()) {
+				if (!async_search_next_match()) {
+					editor_set_status_message("No more matches");
+				}
+			} else {
+				if (!search_find_next(true)) {
+					editor_set_status_message("No more matches");
+				}
 			}
 			return true;
 
@@ -12273,8 +13021,14 @@ static bool search_handle_key(int key)
 		case KEY_ARROW_LEFT:
 			/* Find previous match */
 			search.direction = -1;
-			if (!search_find_previous(true)) {
-				editor_set_status_message("No more matches");
+			if (should_use_async_search()) {
+				if (!async_search_prev_match()) {
+					editor_set_status_message("No more matches");
+				}
+			} else {
+				if (!search_find_previous(true)) {
+					editor_set_status_message("No more matches");
+				}
 			}
 			return true;
 
@@ -13568,6 +14322,7 @@ static void editor_process_keypress(void)
 				return;
 			}
 			terminal_clear_screen();
+			async_search_cleanup();
 			worker_shutdown();
 			free(internal_clipboard);
 			buffer_free(&editor.buffer);
