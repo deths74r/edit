@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 24C: Background Search
+ * Phase 24D: Background Replace All
  *****************************************************************************/
 
 /*****************************************************************************
@@ -40,7 +40,7 @@
 #include "error.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.24.3"
+#define EDIT_VERSION "0.24.4"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -2692,6 +2692,62 @@ static struct async_search_state async_search = {
 	.current_match_index = -1
 };
 
+/*****************************************************************************
+ * Background Replace All State
+ *****************************************************************************/
+
+/*
+ * A replacement to be applied.
+ * Stores the match location and what to replace it with.
+ */
+struct replacement {
+	uint32_t row;
+	uint32_t start_col;
+	uint32_t end_col;
+	char *replacement_text;         /* Expanded replacement (with backrefs) */
+	uint32_t replacement_len;       /* Length in bytes */
+};
+
+/*
+ * Results from background replace-all search phase.
+ */
+struct replace_results {
+	struct replacement *replacements;
+	uint32_t count;
+	uint32_t capacity;
+
+	/* Progress */
+	uint32_t rows_searched;
+	uint32_t total_rows;
+	bool search_complete;
+
+	/* Apply progress (main thread) */
+	uint32_t applied_count;
+	bool apply_complete;
+};
+
+/*
+ * Background replace-all state.
+ */
+struct async_replace_state {
+	uint64_t task_id;
+	bool active;
+
+	/* Results (worker writes, main reads/applies) */
+	struct replace_results results;
+	pthread_mutex_t results_mutex;
+	bool mutex_initialized;
+
+	/* Original search parameters */
+	char pattern[256];
+	char replacement[256];
+	bool use_regex;
+	bool case_sensitive;
+	bool whole_word;
+};
+
+static struct async_replace_state async_replace = {0};
+
 /* Go-to-line mode state. */
 struct goto_state {
 	bool active;
@@ -3535,12 +3591,283 @@ static int worker_process_search(struct task *task, struct task_result *result)
 	return 0;
 }
 
+/* Forward declarations for async replace functions used by worker */
+static int replace_results_add(uint32_t row, uint32_t start_col, uint32_t end_col,
+                               char *replacement_text, uint32_t replacement_len);
+static void replace_results_update_progress(uint32_t rows_searched, uint32_t total_rows);
+static void replace_results_mark_search_complete(void);
+
+/*
+ * Expand replacement text with backreferences.
+ * Returns newly allocated string, caller must free.
+ */
+static char *expand_replacement_text(const char *replacement_str, const char *line_str,
+                                     regmatch_t *matches, int nmatch)
+{
+	/* Calculate expanded length */
+	size_t expanded_len = 0;
+	const char *p = replacement_str;
+
+	while (*p) {
+		if (*p == '\\' && p[1] >= '0' && p[1] <= '9') {
+			int group = p[1] - '0';
+			if (group < nmatch && matches[group].rm_so >= 0) {
+				expanded_len += matches[group].rm_eo - matches[group].rm_so;
+			}
+			p += 2;
+		} else if (*p == '\\' && p[1] == '\\') {
+			expanded_len++;
+			p += 2;
+		} else {
+			expanded_len++;
+			p++;
+		}
+	}
+
+	/* Allocate and build expanded string */
+	char *result = malloc(expanded_len + 1);
+	if (result == NULL) {
+		return NULL;
+	}
+
+	char *out = result;
+	p = replacement_str;
+
+	while (*p) {
+		if (*p == '\\' && p[1] >= '0' && p[1] <= '9') {
+			int group = p[1] - '0';
+			if (group < nmatch && matches[group].rm_so >= 0) {
+				size_t len = matches[group].rm_eo - matches[group].rm_so;
+				memcpy(out, line_str + matches[group].rm_so, len);
+				out += len;
+			}
+			p += 2;
+		} else if (*p == '\\' && p[1] == '\\') {
+			*out++ = '\\';
+			p += 2;
+		} else {
+			*out++ = *p++;
+		}
+	}
+	*out = '\0';
+
+	return result;
+}
+
+/*
+ * Worker task: find all replacements.
+ * Does NOT modify the buffer - just finds matches and expands replacements.
+ */
 static int worker_process_replace_all(struct task *task, struct task_result *result)
 {
-	(void)task;
-	result->replace.replacements = 0;
+	const char *pattern = task->replace.pattern;
+	const char *replacement_str = task->replace.replacement;
+	bool use_regex = task->replace.use_regex;
+	bool case_sensitive = task->replace.case_sensitive;
+	bool whole_word = task->replace.whole_word;
+
+	uint32_t total_rows = editor.buffer.line_count;
+
+	/* Compile regex if needed */
+	regex_t compiled_regex;
+	bool regex_valid = false;
+
+	if (use_regex) {
+		int flags = REG_EXTENDED;
+		if (!case_sensitive) {
+			flags |= REG_ICASE;
+		}
+		if (regcomp(&compiled_regex, pattern, flags) == 0) {
+			regex_valid = true;
+		} else {
+			result->replace.replacements = 0;
+			result->replace.complete = true;
+			return -EINVAL;
+		}
+	}
+
+	uint32_t total_replacements = 0;
+	uint32_t rows_searched = 0;
+
+	for (uint32_t row = 0; row < total_rows; row++) {
+		/* Check cancellation */
+		if (rows_searched % 100 == 0) {
+			if (task_is_cancelled(task)) {
+				log_debug("Replace search cancelled at row %u", row);
+				result->replace.replacements = total_replacements;
+				result->replace.complete = false;
+				if (regex_valid) {
+					regfree(&compiled_regex);
+				}
+				return -EEDIT_CANCELLED;
+			}
+			replace_results_update_progress(rows_searched, total_rows);
+		}
+
+		struct line *line = &editor.buffer.lines[row];
+
+		/* Ensure line is warm */
+		int temp = line_get_temperature(line);
+		if (temp == LINE_TEMPERATURE_COLD) {
+			if (line_try_claim_warming(line)) {
+				if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+					int __attribute__((unused)) err = line_warm_from_worker(line, &editor.buffer);
+				}
+				line_release_warming(line);
+			}
+		}
+
+		if (line->cells == NULL || line->cell_count == 0) {
+			rows_searched++;
+			continue;
+		}
+
+		/* Build UTF-8 string from cells */
+		char *line_str = malloc(line->cell_count * 4 + 1);
+		if (line_str == NULL) {
+			rows_searched++;
+			continue;
+		}
+
+		size_t str_len = 0;
+		uint32_t *byte_to_cell = malloc((line->cell_count * 4 + 1) * sizeof(uint32_t));
+		if (byte_to_cell == NULL) {
+			free(line_str);
+			rows_searched++;
+			continue;
+		}
+
+		for (uint32_t col = 0; col < line->cell_count; col++) {
+			char utf8[4];
+			int bytes = utflite_encode(line->cells[col].codepoint, utf8);
+			if (bytes > 0) {
+				for (int b = 0; b < bytes; b++) {
+					byte_to_cell[str_len + b] = col;
+				}
+				memcpy(line_str + str_len, utf8, bytes);
+				str_len += bytes;
+			}
+		}
+		line_str[str_len] = '\0';
+		byte_to_cell[str_len] = line->cell_count;
+
+		/* Find matches in this line */
+		if (use_regex && regex_valid) {
+			regmatch_t matches[10];
+			size_t offset = 0;
+
+			while (offset < str_len) {
+				int res = regexec(&compiled_regex, line_str + offset, 10, matches,
+				                  offset > 0 ? REG_NOTBOL : 0);
+				if (res != 0) {
+					break;
+				}
+
+				/* Adjust match positions for offset */
+				for (int mi = 0; mi < 10 && matches[mi].rm_so >= 0; mi++) {
+					matches[mi].rm_so += offset;
+					matches[mi].rm_eo += offset;
+				}
+
+				size_t match_start = matches[0].rm_so;
+				size_t match_end = matches[0].rm_eo;
+
+				uint32_t start_col = byte_to_cell[match_start];
+				uint32_t end_col = match_end < str_len ?
+				                   byte_to_cell[match_end] : line->cell_count;
+
+				/* Expand replacement with backreferences */
+				char *expanded = expand_replacement_text(replacement_str, line_str, matches, 10);
+				if (expanded) {
+					replace_results_add(row, start_col, end_col,
+					                    expanded, strlen(expanded));
+					total_replacements++;
+				}
+
+				offset = match_end;
+				if (matches[0].rm_so == matches[0].rm_eo) {
+					offset++;
+				}
+			}
+		} else {
+			/* Plain text search */
+			size_t pattern_len = strlen(pattern);
+			if (pattern_len > 0) {
+				char *search_str = line_str;
+				char *lower_str = NULL;
+				char *lower_pattern = NULL;
+				const char *search_pattern = pattern;
+
+				if (!case_sensitive) {
+					lower_str = malloc(str_len + 1);
+					lower_pattern = malloc(pattern_len + 1);
+					if (lower_str && lower_pattern) {
+						for (size_t si = 0; si <= str_len; si++) {
+							lower_str[si] = tolower((unsigned char)line_str[si]);
+						}
+						for (size_t si = 0; si <= pattern_len; si++) {
+							lower_pattern[si] = tolower((unsigned char)pattern[si]);
+						}
+						search_str = lower_str;
+						search_pattern = lower_pattern;
+					}
+				}
+
+				char *pos = search_str;
+				while ((pos = strstr(pos, search_pattern)) != NULL) {
+					size_t byte_offset = pos - search_str;
+					size_t match_end_byte = byte_offset + pattern_len;
+
+					bool is_whole_word = true;
+					if (whole_word) {
+						if (byte_offset > 0 &&
+						    isalnum((unsigned char)search_str[byte_offset - 1])) {
+							is_whole_word = false;
+						}
+						if (match_end_byte < str_len &&
+						    isalnum((unsigned char)search_str[match_end_byte])) {
+							is_whole_word = false;
+						}
+					}
+
+					if (is_whole_word) {
+						uint32_t start_col = byte_to_cell[byte_offset];
+						uint32_t end_col = match_end_byte < str_len ?
+						                   byte_to_cell[match_end_byte] : line->cell_count;
+
+						/* Plain text replacement (no backrefs) */
+						char *repl_copy = strdup(replacement_str);
+						if (repl_copy) {
+							replace_results_add(row, start_col, end_col,
+							                    repl_copy, strlen(repl_copy));
+							total_replacements++;
+						}
+					}
+
+					pos++;
+				}
+
+				free(lower_str);
+				free(lower_pattern);
+			}
+		}
+
+		free(line_str);
+		free(byte_to_cell);
+		rows_searched++;
+	}
+
+	if (regex_valid) {
+		regfree(&compiled_regex);
+	}
+
+	replace_results_mark_search_complete();
+
+	result->replace.replacements = total_replacements;
 	result->replace.complete = true;
-	log_debug("TASK_REPLACE_ALL not yet implemented");
+
+	log_debug("Replace search complete: %u replacements found", total_replacements);
+
 	return 0;
 }
 
@@ -3781,6 +4108,7 @@ static struct warming_state warming = {0};
 static void editor_request_background_warming(void);
 static uint32_t async_search_get_progress(bool *complete, uint32_t *rows_searched, uint32_t *total_rows);
 static bool async_search_next_match(void);
+static void async_replace_apply_pending(void);
 
 /*
  * Process any pending results from the worker thread.
@@ -3852,16 +4180,20 @@ static void worker_process_results(void)
 			break;
 
 		case TASK_REPLACE_ALL:
-			if (result.error == -EEDIT_CANCELLED) {
-				editor_set_status_message("Replace cancelled (%u replaced)",
-				                          result.replace.replacements);
-			} else if (result.error) {
-				editor_set_status_message("Replace error: %s",
-				                          edit_strerror(result.error));
-			} else {
-				editor_set_status_message("Replaced %u occurrence%s",
-				                          result.replace.replacements,
-				                          result.replace.replacements == 1 ? "" : "s");
+			if (result.task_id == async_replace.task_id) {
+				if (result.error == -EEDIT_CANCELLED) {
+					async_replace.active = false;
+					editor_set_status_message("Replace cancelled");
+				} else if (result.error) {
+					async_replace.active = false;
+					editor_set_status_message("Replace error: %s",
+					                          edit_strerror(result.error));
+				} else {
+					/* Search phase complete - apply replacements */
+					editor_set_status_message("Found %u matches, applying...",
+					                          result.replace.replacements);
+					async_replace_apply_pending();
+				}
 			}
 			break;
 
@@ -4305,6 +4637,353 @@ static void async_search_start(const char *pattern, bool use_regex,
 		log_debug("Started async search for '%s' (task %lu)", pattern, task.task_id);
 	} else {
 		log_warn("Failed to start async search: %s", edit_strerror(err));
+	}
+}
+
+/*****************************************************************************
+ * Background Replace All Management
+ *****************************************************************************/
+
+/*
+ * Initialize async replace system.
+ */
+static int __must_check async_replace_init(void)
+{
+	if (pthread_mutex_init(&async_replace.results_mutex, NULL) != 0) {
+		log_err("Failed to initialize replace results mutex");
+		return -EEDIT_MUTEX;
+	}
+
+	async_replace.mutex_initialized = true;
+	async_replace.results.replacements = NULL;
+	async_replace.results.count = 0;
+	async_replace.results.capacity = 0;
+	async_replace.active = false;
+
+	return 0;
+}
+
+/*
+ * Cleanup async replace resources.
+ */
+static void async_replace_cleanup(void)
+{
+	if (!async_replace.mutex_initialized) {
+		return;
+	}
+
+	pthread_mutex_lock(&async_replace.results_mutex);
+
+	/* Free all replacement texts */
+	for (uint32_t i = 0; i < async_replace.results.count; i++) {
+		free(async_replace.results.replacements[i].replacement_text);
+	}
+	free(async_replace.results.replacements);
+	async_replace.results.replacements = NULL;
+	async_replace.results.count = 0;
+
+	pthread_mutex_unlock(&async_replace.results_mutex);
+	pthread_mutex_destroy(&async_replace.results_mutex);
+	async_replace.mutex_initialized = false;
+}
+
+/*
+ * Clear replace results (call with mutex held or when single-threaded).
+ */
+static void replace_results_clear_locked(void)
+{
+	for (uint32_t i = 0; i < async_replace.results.count; i++) {
+		free(async_replace.results.replacements[i].replacement_text);
+	}
+	async_replace.results.count = 0;
+	async_replace.results.rows_searched = 0;
+	async_replace.results.search_complete = false;
+	async_replace.results.applied_count = 0;
+	async_replace.results.apply_complete = false;
+}
+
+/*
+ * Add a replacement to results (call from worker thread).
+ * Takes ownership of replacement_text.
+ */
+static int replace_results_add(uint32_t row, uint32_t start_col, uint32_t end_col,
+                               char *replacement_text, uint32_t replacement_len)
+{
+	pthread_mutex_lock(&async_replace.results_mutex);
+
+	/* Grow array if needed */
+	if (async_replace.results.count >= async_replace.results.capacity) {
+		uint32_t new_capacity = async_replace.results.capacity == 0 ?
+		                        256 : async_replace.results.capacity * 2;
+
+		struct replacement *new_array = realloc(
+			async_replace.results.replacements,
+			new_capacity * sizeof(struct replacement)
+		);
+		if (new_array == NULL) {
+			pthread_mutex_unlock(&async_replace.results_mutex);
+			free(replacement_text);
+			return -ENOMEM;
+		}
+
+		async_replace.results.replacements = new_array;
+		async_replace.results.capacity = new_capacity;
+	}
+
+	/* Add replacement */
+	struct replacement *r = &async_replace.results.replacements[async_replace.results.count++];
+	r->row = row;
+	r->start_col = start_col;
+	r->end_col = end_col;
+	r->replacement_text = replacement_text;
+	r->replacement_len = replacement_len;
+
+	pthread_mutex_unlock(&async_replace.results_mutex);
+	return 0;
+}
+
+/*
+ * Update replace search progress.
+ */
+static void replace_results_update_progress(uint32_t rows_searched, uint32_t total_rows)
+{
+	pthread_mutex_lock(&async_replace.results_mutex);
+	async_replace.results.rows_searched = rows_searched;
+	async_replace.results.total_rows = total_rows;
+	pthread_mutex_unlock(&async_replace.results_mutex);
+}
+
+/*
+ * Mark search phase as complete.
+ */
+static void replace_results_mark_search_complete(void)
+{
+	pthread_mutex_lock(&async_replace.results_mutex);
+	async_replace.results.search_complete = true;
+	pthread_mutex_unlock(&async_replace.results_mutex);
+}
+
+/*
+ * Check if async replace should be used.
+ */
+static bool should_use_async_replace(void)
+{
+	return worker.initialized &&
+	       async_replace.mutex_initialized &&
+	       editor.buffer.line_count > ASYNC_SEARCH_THRESHOLD;
+}
+
+/*
+ * Get replace operation progress.
+ */
+static uint32_t async_replace_get_progress(bool *search_complete, bool *apply_complete,
+                                           uint32_t *rows_searched, uint32_t *total_rows)
+{
+	if (!async_replace.mutex_initialized) {
+		if (search_complete) *search_complete = true;
+		if (apply_complete) *apply_complete = true;
+		if (rows_searched) *rows_searched = 0;
+		if (total_rows) *total_rows = 0;
+		return 0;
+	}
+
+	pthread_mutex_lock(&async_replace.results_mutex);
+	uint32_t count = async_replace.results.count;
+	if (search_complete) *search_complete = async_replace.results.search_complete;
+	if (apply_complete) *apply_complete = async_replace.results.apply_complete;
+	if (rows_searched) *rows_searched = async_replace.results.rows_searched;
+	if (total_rows) *total_rows = async_replace.results.total_rows;
+	pthread_mutex_unlock(&async_replace.results_mutex);
+	return count;
+}
+
+/*
+ * Cancel async replace.
+ */
+static void async_replace_cancel(void)
+{
+	if (async_replace.active) {
+		task_cancel(async_replace.task_id);
+		async_replace.active = false;
+		log_debug("Cancelled async replace");
+	}
+}
+
+/* Forward declarations for apply function */
+static void line_warm(struct line *line, struct buffer *buffer);
+static void buffer_delete_range_no_record(struct buffer *buffer,
+                                          uint32_t start_row, uint32_t start_col,
+                                          uint32_t end_row, uint32_t end_col);
+static void buffer_insert_cell_at_column(struct buffer *buffer, uint32_t row,
+                                         uint32_t column, uint32_t codepoint);
+static void undo_begin_group(struct buffer *buffer);
+static void undo_end_group(struct buffer *buffer);
+
+/*
+ * Apply pending replacements from background search.
+ * Called from main thread after search completes.
+ * Processes replacements in reverse order to preserve positions.
+ */
+static void async_replace_apply_pending(void)
+{
+	pthread_mutex_lock(&async_replace.results_mutex);
+
+	if (!async_replace.results.search_complete ||
+	    async_replace.results.apply_complete ||
+	    async_replace.results.count == 0) {
+		pthread_mutex_unlock(&async_replace.results_mutex);
+		return;
+	}
+
+	uint32_t count = async_replace.results.count;
+
+	/* Copy replacements to local array so we can release mutex */
+	struct replacement *local_replacements = malloc(count * sizeof(struct replacement));
+	if (local_replacements == NULL) {
+		pthread_mutex_unlock(&async_replace.results_mutex);
+		editor_set_status_message("Out of memory applying replacements");
+		return;
+	}
+	memcpy(local_replacements, async_replace.results.replacements,
+	       count * sizeof(struct replacement));
+
+	/* Clear the results (we've taken ownership of replacement_text pointers) */
+	async_replace.results.count = 0;
+	async_replace.results.apply_complete = true;
+
+	pthread_mutex_unlock(&async_replace.results_mutex);
+
+	/* Start undo group for all replacements */
+	undo_begin_group(&editor.buffer);
+
+	/* Apply in reverse order to preserve positions */
+	uint32_t applied = 0;
+	for (int32_t i = count - 1; i >= 0; i--) {
+		struct replacement *r = &local_replacements[i];
+
+		/* Validate row is still in range */
+		if (r->row >= editor.buffer.line_count) {
+			free(r->replacement_text);
+			continue;
+		}
+
+		struct line *line = &editor.buffer.lines[r->row];
+
+		/* Ensure line is warm */
+		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+			line_warm(line, &editor.buffer);
+		}
+
+		/* Validate columns are still in range */
+		if (r->start_col > line->cell_count || r->end_col > line->cell_count) {
+			free(r->replacement_text);
+			continue;
+		}
+
+		/* Delete the matched text */
+		if (r->end_col > r->start_col) {
+			buffer_delete_range_no_record(&editor.buffer, r->row,
+			                              r->start_col, r->row, r->end_col);
+		}
+
+		/* Insert replacement text */
+		if (r->replacement_len > 0) {
+			/* Convert replacement text to codepoints and insert */
+			size_t byte_idx = 0;
+			uint32_t col = r->start_col;
+			while (byte_idx < r->replacement_len) {
+				uint32_t codepoint;
+				int bytes = utflite_decode(r->replacement_text + byte_idx,
+				                           r->replacement_len - byte_idx,
+				                           &codepoint);
+				if (bytes <= 0) {
+					codepoint = 0xFFFD;
+					bytes = 1;
+				}
+				buffer_insert_cell_at_column(&editor.buffer, r->row, col, codepoint);
+				col++;
+				byte_idx += bytes;
+			}
+		}
+
+		applied++;
+		free(r->replacement_text);
+
+		/* Update status periodically */
+		if (applied % 100 == 0) {
+			editor_set_status_message("Applying... %u/%u", applied, count);
+		}
+	}
+
+	/* End undo group */
+	undo_end_group(&editor.buffer);
+
+	free(local_replacements);
+
+	editor_set_status_message("Replaced %u occurrence%s", applied, applied == 1 ? "" : "s");
+
+	/* Mark buffer as modified */
+	if (applied > 0) {
+		editor.buffer.is_modified = true;
+	}
+
+	async_replace.active = false;
+}
+
+/*
+ * Start async replace-all operation.
+ */
+static void async_replace_start(const char *pattern, const char *replacement_text,
+                                bool use_regex, bool case_sensitive, bool whole_word)
+{
+	if (!worker.initialized || !async_replace.mutex_initialized) {
+		return;
+	}
+
+	/* Cancel any existing replace operation */
+	if (async_replace.active) {
+		task_cancel(async_replace.task_id);
+	}
+
+	/* Clear previous results */
+	pthread_mutex_lock(&async_replace.results_mutex);
+	replace_results_clear_locked();
+	pthread_mutex_unlock(&async_replace.results_mutex);
+
+	/* Store parameters */
+	strncpy(async_replace.pattern, pattern, sizeof(async_replace.pattern) - 1);
+	async_replace.pattern[sizeof(async_replace.pattern) - 1] = '\0';
+	strncpy(async_replace.replacement, replacement_text, sizeof(async_replace.replacement) - 1);
+	async_replace.replacement[sizeof(async_replace.replacement) - 1] = '\0';
+	async_replace.use_regex = use_regex;
+	async_replace.case_sensitive = case_sensitive;
+	async_replace.whole_word = whole_word;
+
+	/* Submit task */
+	struct task task = {
+		.type = TASK_REPLACE_ALL,
+		.task_id = task_generate_id(),
+		.replace = {
+			.use_regex = use_regex,
+			.case_sensitive = case_sensitive,
+			.whole_word = whole_word
+		}
+	};
+	strncpy(task.replace.pattern, pattern, sizeof(task.replace.pattern) - 1);
+	task.replace.pattern[sizeof(task.replace.pattern) - 1] = '\0';
+	strncpy(task.replace.replacement, replacement_text, sizeof(task.replace.replacement) - 1);
+	task.replace.replacement[sizeof(task.replace.replacement) - 1] = '\0';
+
+	int err = task_queue_push(&task);
+	if (err == 0) {
+		async_replace.task_id = task.task_id;
+		async_replace.active = true;
+		editor_set_status_message("Replacing all...");
+		log_debug("Started async replace for '%s' -> '%s' (task %lu)",
+		          pattern, replacement_text, task.task_id);
+	} else {
+		log_warn("Failed to start async replace: %s", edit_strerror(err));
+		editor_set_status_message("Failed to start replace: %s", edit_strerror(err));
 	}
 }
 
@@ -6391,6 +7070,12 @@ static void editor_init(void)
 	err = async_search_init();
 	if (err) {
 		log_warn("Async search disabled: %s", edit_strerror(err));
+	}
+
+	/* Initialize async replace system */
+	err = async_replace_init();
+	if (err) {
+		log_warn("Async replace disabled: %s", edit_strerror(err));
 	}
 }
 
@@ -12970,7 +13655,13 @@ static bool search_handle_key(int key)
 		case KEY_ALT_A:
 			/* Replace all (only in replace mode) */
 			if (search.replace_mode) {
-				search_replace_all();
+				if (should_use_async_replace()) {
+					async_replace_start(search.query, search.replace_text,
+					                    search.use_regex, search.case_sensitive,
+					                    search.whole_word);
+				} else {
+					search_replace_all();
+				}
 			}
 			return true;
 
@@ -14322,6 +15013,7 @@ static void editor_process_keypress(void)
 				return;
 			}
 			terminal_clear_screen();
+			async_replace_cleanup();
 			async_search_cleanup();
 			worker_shutdown();
 			free(internal_clipboard);
