@@ -45,9 +45,6 @@
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
 
-/* How many times Ctrl-Q must be pressed to quit with unsaved changes. */
-#define QUIT_CONFIRM_COUNT 3
-
 /* Seconds before status bar message disappears. */
 #define STATUS_MESSAGE_TIMEOUT 5
 
@@ -2534,9 +2531,6 @@ struct editor_state {
 	/* When the status message was set (for timeout). */
 	time_t status_message_time;
 
-	/* Remaining Ctrl-Q presses needed to quit with unsaved changes. */
-	int quit_confirm_counter;
-
 	/* Selection anchor position (fixed point when extending selection). */
 	uint32_t selection_anchor_row;
 	uint32_t selection_anchor_column;
@@ -2809,6 +2803,12 @@ struct save_as_state {
 	bool confirm_overwrite;     /* Waiting for overwrite confirmation */
 };
 static struct save_as_state save_as = {0};
+
+/* Quit prompt state - shown when quitting with unsaved changes. */
+struct quit_prompt_state {
+	bool active;
+};
+static struct quit_prompt_state quit_prompt = {0};
 
 /* Forward declarations for functions used in input_read_key. */
 static struct mouse_input input_parse_sgr_mouse(void);
@@ -7625,7 +7625,6 @@ static void editor_init(void)
 	editor.show_line_numbers = true;
 	editor.status_message[0] = '\0';
 	editor.status_message_time = 0;
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 	editor.selection_anchor_row = 0;
 	editor.selection_anchor_column = 0;
 	editor.selection_active = false;
@@ -9985,7 +9984,6 @@ static void editor_delete_selection(void)
 
 	editor.buffer.is_modified = true;
 	selection_clear();
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 }
 
 /*
@@ -10123,7 +10121,6 @@ static void editor_paste(void)
 
 	free(text);
 	editor.buffer.is_modified = true;
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 	if (!ret)
 		editor_set_status_message("Pasted %u characters", chars_inserted);
 }
@@ -10151,7 +10148,6 @@ static void editor_insert_character(uint32_t codepoint)
 		return;
 	}
 	editor.cursor_column++;
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
 	undo_end_group(&editor.buffer);
 }
@@ -10241,7 +10237,6 @@ static void editor_insert_newline(void)
 		editor.cursor_column++;
 	}
 
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
 	undo_end_group(&editor.buffer);
 }
@@ -10286,7 +10281,6 @@ static void editor_delete_character(void)
 		undo_end_group(&editor.buffer);
 		return;
 	}
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
 	undo_end_group(&editor.buffer);
 }
@@ -10351,7 +10345,6 @@ static void editor_handle_backspace(void)
 
 	undo_end_group(&editor.buffer);
 
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 }
 
 /*****************************************************************************
@@ -10401,7 +10394,6 @@ static void multicursor_insert_character(uint32_t codepoint)
 	}
 
 	editor.buffer.is_modified = true;
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 	undo_end_group(&editor.buffer);
 
 	/* Update primary cursor in legacy fields for rendering */
@@ -10471,7 +10463,6 @@ static void multicursor_backspace(void)
 	}
 
 	editor.buffer.is_modified = true;
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 	undo_end_group(&editor.buffer);
 
 	multicursor_normalize();
@@ -10504,7 +10495,6 @@ static void editor_save(void)
 	if (ret) {
 		editor_set_status_message("Save failed: %s", edit_strerror(ret));
 	} else {
-		editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 		/* Success message is set by file_save */
 	}
 }
@@ -14510,6 +14500,91 @@ static bool goto_handle_key(int key)
 }
 
 /*****************************************************************************
+ * Quit Prompt
+ *****************************************************************************/
+
+/*
+ * Perform the actual exit - cleanup and terminate.
+ * Called when quitting normally or after user confirms quit.
+ */
+static void editor_perform_exit(void)
+{
+	terminal_clear_screen();
+	/* Remove swap file on clean exit (no unsaved changes) */
+	if (!editor.buffer.is_modified) {
+		autosave_remove_swap();
+	}
+	async_replace_cleanup();
+	async_search_cleanup();
+	worker_shutdown();
+	free(internal_clipboard);
+	buffer_free(&editor.buffer);
+	themes_free();
+	free(active_theme.name);
+	exit(0);
+}
+
+/*
+ * Enter quit prompt mode - ask user what to do with unsaved changes.
+ */
+static void quit_prompt_enter(void)
+{
+	quit_prompt.active = true;
+	editor_set_status_message("Unsaved changes! Save before quitting? [y]es [n]o [c]ancel: ");
+}
+
+/*
+ * Handle a keypress in quit prompt mode.
+ * Returns true if the key was consumed.
+ */
+static bool quit_prompt_handle_key(int key)
+{
+	if (!quit_prompt.active) {
+		return false;
+	}
+
+	switch (key) {
+		case 'y':
+		case 'Y':
+			/* Save and quit */
+			quit_prompt.active = false;
+			if (editor.buffer.filename == NULL) {
+				/* No filename - need to do Save As first */
+				editor_set_status_message("No filename. Use Ctrl-Shift-S to Save As, then quit.");
+				return true;
+			}
+			editor_save();
+			if (!editor.buffer.is_modified) {
+				/* Save succeeded */
+				editor_perform_exit();
+			}
+			/* Save failed - message already set by editor_save */
+			return true;
+
+		case 'n':
+		case 'N':
+			/* Quit without saving */
+			quit_prompt.active = false;
+			editor_perform_exit();
+			return true;
+
+		case 'c':
+		case 'C':
+		case '\x1b':  /* Escape */
+		case CONTROL_KEY('q'):  /* Ctrl+Q again cancels */
+			/* Cancel - return to editing */
+			quit_prompt.active = false;
+			editor_set_status_message("Quit cancelled");
+			return true;
+
+		default:
+			/* Invalid key - remind user of options */
+			editor_set_status_message("Unsaved changes! Save before quitting? [y]es [n]o [c]ancel: ");
+			return true;
+	}
+}
+
+/*****************************************************************************
  * Save As
  *****************************************************************************/
 
@@ -14605,7 +14680,6 @@ static bool save_as_execute(void)
 		editor_set_status_message("Save failed: %s", edit_strerror(ret));
 		return false;
 	}
-	editor.quit_confirm_counter = QUIT_CONFIRM_COUNT;
 
 	/* Exit save as mode */
 	save_as_exit();
@@ -15588,27 +15662,20 @@ static void editor_process_keypress(void)
 		return;
 	}
 
+	/* Handle quit prompt input */
+	if (quit_prompt_handle_key(key)) {
+		return;
+	}
+
 	switch (key) {
 		case CONTROL_KEY('q'):
-			if (editor.buffer.is_modified && editor.quit_confirm_counter > 1) {
-				editor_set_status_message("WARNING: File has unsaved changes. "
-				                          "Press Ctrl-Q %d more times to quit.", editor.quit_confirm_counter - 1);
-				editor.quit_confirm_counter--;
+			if (editor.buffer.is_modified) {
+				/* Unsaved changes - show prompt */
+				quit_prompt_enter();
 				return;
 			}
-			terminal_clear_screen();
-			/* Remove swap file on clean exit (no unsaved changes) */
-			if (!editor.buffer.is_modified) {
-				autosave_remove_swap();
-			}
-			async_replace_cleanup();
-			async_search_cleanup();
-			worker_shutdown();
-			free(internal_clipboard);
-			buffer_free(&editor.buffer);
-			themes_free();
-			free(active_theme.name);
-			exit(0);
+			/* No unsaved changes - exit immediately */
+			editor_perform_exit();
 			break;
 
 		case CONTROL_KEY('s'):
