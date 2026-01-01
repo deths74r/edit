@@ -2132,6 +2132,17 @@ static void theme_apply(struct theme *t)
 	active_theme = *t;
 	active_theme.name = t->name ? strdup(t->name) : NULL;
 
+	/*
+	 * For syntax styles where background wasn't explicitly set,
+	 * use the main theme background. This ensures light themes
+	 * don't inherit dark syntax backgrounds from defaults.
+	 */
+	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {
+		if (!t->syntax_bg_set[i]) {
+			active_theme.syntax[i].bg = t->background;
+		}
+	}
+
 	/* Apply WCAG contrast adjustments for foreground colors against backgrounds */
 
 	/* Main foreground against background */
