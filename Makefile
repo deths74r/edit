@@ -1,6 +1,6 @@
 CC = cc
 CFLAGS = -Wall -Wextra -pedantic -std=c17 -O2
-LDFLAGS = -lm
+LDFLAGS = -lm -pthread
 
 PREFIX = $(HOME)/.local
 BINDIR = $(PREFIX)/bin

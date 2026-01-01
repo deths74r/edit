@@ -44,8 +44,12 @@
 #define EEDIT_NOUNDO		(EEDIT_BASE + 11)  /* Nothing to undo */
 #define EEDIT_NOREDO		(EEDIT_BASE + 12)  /* Nothing to redo */
 #define EEDIT_NOCLIP		(EEDIT_BASE + 13)  /* Clipboard empty */
+#define EEDIT_THREAD		(EEDIT_BASE + 14)  /* Thread creation failed */
+#define EEDIT_MUTEX		(EEDIT_BASE + 15)  /* Mutex operation failed */
+#define EEDIT_CANCELLED		(EEDIT_BASE + 16)  /* Task was cancelled */
+#define EEDIT_QUEUEFULL		(EEDIT_BASE + 17)  /* Task queue is full */
 
-#define EEDIT_MAX		(EEDIT_BASE + 13)
+#define EEDIT_MAX		(EEDIT_BASE + 17)
 
 /*****************************************************************************
  * ERR_PTR System

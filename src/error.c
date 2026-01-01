@@ -61,6 +61,14 @@ const char *edit_strerror(int err)
 		return "Nothing to redo";
 	case EEDIT_NOCLIP:
 		return "Clipboard is empty";
+	case EEDIT_THREAD:
+		return "Thread creation failed";
+	case EEDIT_MUTEX:
+		return "Mutex operation failed";
+	case EEDIT_CANCELLED:
+		return "Operation cancelled";
+	case EEDIT_QUEUEFULL:
+		return "Task queue is full";
 	}
 
 	/* Handle standard errno values */
