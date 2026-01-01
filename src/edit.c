@@ -1,6 +1,6 @@
 /*****************************************************************************
  * edit - A minimal terminal text editor
- * Phase 24D: Background Replace All
+ * Phase 24E: Auto-Save and Crash Recovery
  *****************************************************************************/
 
 /*****************************************************************************
@@ -40,7 +40,7 @@
 #include "error.h"
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.24.4"
+#define EDIT_VERSION "0.25.0"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -2748,6 +2748,47 @@ struct async_replace_state {
 
 static struct async_replace_state async_replace = {0};
 
+/*****************************************************************************
+ * Auto-Save and Crash Recovery
+ *****************************************************************************/
+
+/* Auto-save interval in seconds */
+#define AUTOSAVE_INTERVAL 30
+
+/* Maximum swap file size (skip auto-save for huge files) */
+#define AUTOSAVE_MAX_SIZE (50 * 1024 * 1024)  /* 50 MB */
+
+/*
+ * Auto-save state.
+ */
+struct autosave_state {
+	char swap_path[PATH_MAX];       /* Path to swap file */
+	bool swap_exists;               /* Is there an active swap file? */
+	time_t last_save_time;          /* When we last auto-saved */
+	time_t last_modify_time;        /* When buffer was last modified */
+	uint64_t task_id;               /* Current auto-save task ID */
+	bool save_pending;              /* Is a save in progress? */
+	bool enabled;                   /* Is auto-save enabled? */
+};
+
+static struct autosave_state autosave = {
+	.enabled = true
+};
+
+/*
+ * A snapshot of buffer content for background saving.
+ * Created by main thread, consumed by worker thread.
+ */
+struct buffer_snapshot {
+	char **lines;           /* Array of UTF-8 line strings */
+	uint32_t line_count;    /* Number of lines */
+	char swap_path[PATH_MAX];
+};
+
+/* Global snapshot pointer for worker thread access */
+static struct buffer_snapshot *pending_snapshot = NULL;
+static pthread_mutex_t snapshot_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 /* Go-to-line mode state. */
 struct goto_state {
 	bool active;
@@ -2796,6 +2837,7 @@ enum task_type {
 	TASK_WARM_LINES,      /* Warm a range of lines (decode + syntax) */
 	TASK_SEARCH,          /* Search for pattern in buffer */
 	TASK_REPLACE_ALL,     /* Replace all occurrences */
+	TASK_AUTOSAVE,        /* Write buffer to swap file */
 	TASK_SHUTDOWN         /* Signal worker to exit */
 };
 
@@ -2833,6 +2875,12 @@ struct task {
 			bool case_sensitive;
 			bool whole_word;
 		} replace;
+
+		/* TASK_AUTOSAVE */
+		struct {
+			char swap_path[PATH_MAX];
+			/* Buffer snapshot is accessed via pending_snapshot */
+		} autosave;
 	};
 };
 
@@ -2863,6 +2911,12 @@ struct task_result {
 			uint32_t replacements;
 			bool complete;
 		} replace;
+
+		/* TASK_AUTOSAVE result */
+		struct {
+			bool success;
+			size_t bytes_written;
+		} autosave;
 	};
 };
 
@@ -3871,6 +3925,9 @@ static int worker_process_replace_all(struct task *task, struct task_result *res
 	return 0;
 }
 
+/* Forward declaration for autosave task handler */
+static int worker_process_autosave(struct task *task, struct task_result *result);
+
 /*
  * Worker thread main function.
  */
@@ -3943,6 +4000,10 @@ static void *worker_thread_main(void *arg)
 
 		case TASK_REPLACE_ALL:
 			result.error = worker_process_replace_all(&task, &result);
+			break;
+
+		case TASK_AUTOSAVE:
+			result.error = worker_process_autosave(&task, &result);
 			break;
 
 		default:
@@ -4193,6 +4254,22 @@ static void worker_process_results(void)
 					editor_set_status_message("Found %u matches, applying...",
 					                          result.replace.replacements);
 					async_replace_apply_pending();
+				}
+			}
+			break;
+
+		case TASK_AUTOSAVE:
+			if (result.task_id == autosave.task_id) {
+				autosave.save_pending = false;
+
+				if (result.error == -EEDIT_CANCELLED) {
+					log_debug("Autosave cancelled");
+				} else if (result.error) {
+					log_warn("Autosave failed: %s", edit_strerror(result.error));
+				} else {
+					autosave.swap_exists = true;
+					log_debug("Autosave successful: %zu bytes",
+					          result.autosave.bytes_written);
 				}
 			}
 			break;
@@ -4984,6 +5061,509 @@ static void async_replace_start(const char *pattern, const char *replacement_tex
 	} else {
 		log_warn("Failed to start async replace: %s", edit_strerror(err));
 		editor_set_status_message("Failed to start replace: %s", edit_strerror(err));
+	}
+}
+
+/*****************************************************************************
+ * Auto-Save Functions
+ *****************************************************************************/
+
+/*
+ * Generate swap file path for a given file.
+ * Format: .filename.swp (in same directory as file)
+ * For unnamed files: ~/.edit/.unnamed.swp
+ */
+static void autosave_generate_swap_path(const char *filename, char *swap_path, size_t size)
+{
+	if (filename == NULL || filename[0] == '\0') {
+		/* Unnamed file - use home directory */
+		const char *home = getenv("HOME");
+		if (home) {
+			snprintf(swap_path, size, "%s/.edit/.unnamed.swp", home);
+		} else {
+			snprintf(swap_path, size, "/tmp/.edit-unnamed.swp");
+		}
+		return;
+	}
+
+	/* Find directory and basename */
+	const char *slash = strrchr(filename, '/');
+
+	if (slash) {
+		/* Has directory component */
+		size_t dir_len = slash - filename + 1;
+		if (dir_len >= size - 1) {
+			dir_len = size - 2;
+		}
+		memcpy(swap_path, filename, dir_len);
+		snprintf(swap_path + dir_len, size - dir_len, ".%s.swp", slash + 1);
+	} else {
+		/* Just filename, use current directory */
+		snprintf(swap_path, size, ".%s.swp", filename);
+	}
+}
+
+/*
+ * Update swap path when filename changes.
+ */
+static void autosave_update_path(void)
+{
+	autosave_generate_swap_path(editor.buffer.filename,
+	                            autosave.swap_path,
+	                            sizeof(autosave.swap_path));
+}
+
+/* Forward declarations for line functions used in snapshot */
+static int line_get_temperature(struct line *line);
+static void line_warm(struct line *line, struct buffer *buffer);
+
+/*
+ * Create a snapshot of the current buffer for background saving.
+ * Returns NULL on allocation failure.
+ * Caller must free with buffer_snapshot_free().
+ */
+static struct buffer_snapshot *buffer_snapshot_create(void)
+{
+	struct buffer_snapshot *snapshot = calloc(1, sizeof(struct buffer_snapshot));
+	if (snapshot == NULL) {
+		return NULL;
+	}
+
+	uint32_t line_count = editor.buffer.line_count;
+	snapshot->line_count = line_count;
+	strncpy(snapshot->swap_path, autosave.swap_path, PATH_MAX - 1);
+
+	if (line_count == 0) {
+		snapshot->lines = NULL;
+		return snapshot;
+	}
+
+	snapshot->lines = calloc(line_count, sizeof(char *));
+	if (snapshot->lines == NULL) {
+		free(snapshot);
+		return NULL;
+	}
+
+	/* Convert each line to UTF-8 string */
+	for (uint32_t row = 0; row < line_count; row++) {
+		struct line *line = &editor.buffer.lines[row];
+
+		/* Ensure line is warm */
+		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+			/* Use mmap content directly for cold lines */
+			if (editor.buffer.mmap_base != NULL &&
+			    line->mmap_offset + line->mmap_length <= editor.buffer.mmap_size) {
+				snapshot->lines[row] = malloc(line->mmap_length + 1);
+				if (snapshot->lines[row]) {
+					memcpy(snapshot->lines[row],
+					       editor.buffer.mmap_base + line->mmap_offset,
+					       line->mmap_length);
+					snapshot->lines[row][line->mmap_length] = '\0';
+				}
+			} else {
+				snapshot->lines[row] = strdup("");
+			}
+		} else if (line->cells != NULL) {
+			/* Convert cells to UTF-8 */
+			size_t max_bytes = line->cell_count * 4 + 1;
+			char *str = malloc(max_bytes);
+			if (str) {
+				size_t offset = 0;
+				for (uint32_t col = 0; col < line->cell_count; col++) {
+					char utf8[4];
+					int bytes = utflite_encode(line->cells[col].codepoint, utf8);
+					if (bytes > 0 && offset + bytes < max_bytes) {
+						memcpy(str + offset, utf8, bytes);
+						offset += bytes;
+					}
+				}
+				str[offset] = '\0';
+				snapshot->lines[row] = str;
+			}
+		} else {
+			snapshot->lines[row] = strdup("");
+		}
+
+		/* Check for allocation failure */
+		if (snapshot->lines[row] == NULL) {
+			/* Cleanup and fail */
+			for (uint32_t i = 0; i < row; i++) {
+				free(snapshot->lines[i]);
+			}
+			free(snapshot->lines);
+			free(snapshot);
+			return NULL;
+		}
+	}
+
+	return snapshot;
+}
+
+/*
+ * Free a buffer snapshot.
+ */
+static void buffer_snapshot_free(struct buffer_snapshot *snapshot)
+{
+	if (snapshot == NULL) {
+		return;
+	}
+
+	if (snapshot->lines) {
+		for (uint32_t i = 0; i < snapshot->line_count; i++) {
+			free(snapshot->lines[i]);
+		}
+		free(snapshot->lines);
+	}
+	free(snapshot);
+}
+
+/*
+ * Worker task: write buffer snapshot to swap file.
+ */
+static int worker_process_autosave(struct task *task, struct task_result *result)
+{
+	result->autosave.success = false;
+	result->autosave.bytes_written = 0;
+
+	/* Get the snapshot */
+	pthread_mutex_lock(&snapshot_mutex);
+	struct buffer_snapshot *snapshot = pending_snapshot;
+	pending_snapshot = NULL;
+	pthread_mutex_unlock(&snapshot_mutex);
+
+	if (snapshot == NULL) {
+		log_warn("Autosave task with no snapshot");
+		return -EINVAL;
+	}
+
+	/* Check cancellation before expensive I/O */
+	if (task_is_cancelled(task)) {
+		buffer_snapshot_free(snapshot);
+		return -EEDIT_CANCELLED;
+	}
+
+	/* Ensure directory exists for unnamed files */
+	if (strstr(snapshot->swap_path, "/.edit/") != NULL) {
+		char dir[PATH_MAX];
+		const char *home = getenv("HOME");
+		if (home) {
+			snprintf(dir, sizeof(dir), "%s/.edit", home);
+			mkdir(dir, 0700);  /* Ignore error if exists */
+		}
+	}
+
+	/* Write to temporary file first, then rename (atomic) */
+	char tmp_path[PATH_MAX];
+	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", snapshot->swap_path);
+
+	FILE *fp = fopen(tmp_path, "w");
+	if (fp == NULL) {
+		log_warn("Cannot create swap file: %s (%s)", tmp_path, strerror(errno));
+		buffer_snapshot_free(snapshot);
+		return -errno;
+	}
+
+	size_t bytes_written = 0;
+
+	for (uint32_t row = 0; row < snapshot->line_count; row++) {
+		/* Check cancellation periodically */
+		if (row % 1000 == 0 && task_is_cancelled(task)) {
+			fclose(fp);
+			unlink(tmp_path);
+			buffer_snapshot_free(snapshot);
+			return -EEDIT_CANCELLED;
+		}
+
+		if (snapshot->lines[row]) {
+			size_t len = strlen(snapshot->lines[row]);
+			if (fwrite(snapshot->lines[row], 1, len, fp) != len) {
+				log_warn("Write error in autosave");
+				fclose(fp);
+				unlink(tmp_path);
+				buffer_snapshot_free(snapshot);
+				return -EIO;
+			}
+			bytes_written += len;
+		}
+
+		/* Write newline (except for last line) */
+		if (row < snapshot->line_count - 1) {
+			if (fputc('\n', fp) == EOF) {
+				log_warn("Write error in autosave");
+				fclose(fp);
+				unlink(tmp_path);
+				buffer_snapshot_free(snapshot);
+				return -EIO;
+			}
+			bytes_written++;
+		}
+	}
+
+	/* Flush and close */
+	if (fflush(fp) != 0 || fclose(fp) != 0) {
+		log_warn("Flush error in autosave");
+		unlink(tmp_path);
+		buffer_snapshot_free(snapshot);
+		return -EIO;
+	}
+
+	/* Atomic rename */
+	if (rename(tmp_path, snapshot->swap_path) != 0) {
+		log_warn("Cannot rename swap file: %s", strerror(errno));
+		unlink(tmp_path);
+		buffer_snapshot_free(snapshot);
+		return -errno;
+	}
+
+	buffer_snapshot_free(snapshot);
+
+	result->autosave.success = true;
+	result->autosave.bytes_written = bytes_written;
+
+	log_debug("Autosave complete: %zu bytes to %s", bytes_written, task->autosave.swap_path);
+
+	return 0;
+}
+
+/*
+ * Mark buffer as modified (for auto-save tracking).
+ * Call this whenever buffer content changes.
+ */
+static void autosave_mark_modified(void)
+{
+	autosave.last_modify_time = time(NULL);
+}
+
+/*
+ * Check if auto-save should run and trigger if needed.
+ * Call this periodically from the main loop.
+ */
+static void autosave_check(void)
+{
+	if (!autosave.enabled || !worker.initialized) {
+		return;
+	}
+
+	/* Don't auto-save if save is already pending */
+	if (autosave.save_pending) {
+		return;
+	}
+
+	/* Don't auto-save unmodified buffers */
+	if (!editor.buffer.is_modified) {
+		/* Reset modify time when buffer becomes unmodified (after save) */
+		autosave.last_modify_time = 0;
+		return;
+	}
+
+	/* Don't auto-save empty buffers */
+	if (editor.buffer.line_count == 0) {
+		return;
+	}
+
+	/* Track when buffer became modified */
+	time_t now = time(NULL);
+	if (autosave.last_modify_time == 0) {
+		autosave.last_modify_time = now;
+	}
+
+	/* Check time since last save */
+	if (now - autosave.last_save_time < AUTOSAVE_INTERVAL) {
+		return;
+	}
+
+	/* Check if buffer was modified since last auto-save */
+	if (autosave.last_modify_time <= autosave.last_save_time) {
+		return;
+	}
+
+	/* Estimate buffer size - skip huge files */
+	size_t estimated_size = 0;
+	uint32_t sample_count = editor.buffer.line_count < 1000 ? editor.buffer.line_count : 1000;
+	for (uint32_t row = 0; row < sample_count; row++) {
+		struct line *line = &editor.buffer.lines[row];
+		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+			estimated_size += line->mmap_length;
+		} else {
+			estimated_size += line->cell_count * 2;  /* Rough estimate */
+		}
+	}
+	estimated_size = (estimated_size * editor.buffer.line_count) / sample_count;
+
+	if (estimated_size > AUTOSAVE_MAX_SIZE) {
+		log_debug("Skipping autosave: file too large (~%zu bytes)", estimated_size);
+		return;
+	}
+
+	/* Update swap path if needed */
+	autosave_update_path();
+
+	/* Create snapshot */
+	struct buffer_snapshot *snapshot = buffer_snapshot_create();
+	if (snapshot == NULL) {
+		log_warn("Failed to create buffer snapshot for autosave");
+		return;
+	}
+
+	/* Store snapshot for worker */
+	pthread_mutex_lock(&snapshot_mutex);
+	if (pending_snapshot != NULL) {
+		buffer_snapshot_free(pending_snapshot);
+	}
+	pending_snapshot = snapshot;
+	pthread_mutex_unlock(&snapshot_mutex);
+
+	/* Submit task */
+	struct task task = {
+		.type = TASK_AUTOSAVE,
+		.task_id = task_generate_id()
+	};
+	strncpy(task.autosave.swap_path, autosave.swap_path, PATH_MAX - 1);
+
+	int err = task_queue_push(&task);
+	if (err == 0) {
+		autosave.task_id = task.task_id;
+		autosave.save_pending = true;
+		autosave.last_save_time = now;
+		log_debug("Triggered autosave to %s", autosave.swap_path);
+	} else {
+		/* Failed to queue - free snapshot */
+		pthread_mutex_lock(&snapshot_mutex);
+		buffer_snapshot_free(pending_snapshot);
+		pending_snapshot = NULL;
+		pthread_mutex_unlock(&snapshot_mutex);
+		log_warn("Failed to queue autosave: %s", edit_strerror(err));
+	}
+}
+
+/*
+ * Remove the swap file (called on clean save or exit).
+ */
+static void autosave_remove_swap(void)
+{
+	if (autosave.swap_path[0] != '\0') {
+		if (unlink(autosave.swap_path) == 0) {
+			log_debug("Removed swap file: %s", autosave.swap_path);
+		}
+		autosave.swap_exists = false;
+	}
+}
+
+/*
+ * Check if a swap file exists for the given filename.
+ * Returns the swap file path if found, NULL otherwise.
+ */
+static const char *autosave_check_recovery(const char *filename)
+{
+	static char swap_path[PATH_MAX];
+
+	autosave_generate_swap_path(filename, swap_path, sizeof(swap_path));
+
+	struct stat st;
+	if (stat(swap_path, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
+		return swap_path;
+	}
+
+	return NULL;
+}
+
+/*
+ * Get modification time of swap file.
+ */
+static time_t autosave_get_swap_mtime(const char *swap_path)
+{
+	struct stat st;
+	if (stat(swap_path, &st) == 0) {
+		return st.st_mtime;
+	}
+	return 0;
+}
+
+/*
+ * Format a time for display.
+ */
+static void autosave_format_time(time_t t, char *buf, size_t size)
+{
+	struct tm *tm = localtime(&t);
+	if (tm) {
+		strftime(buf, size, "%Y-%m-%d %H:%M:%S", tm);
+	} else {
+		strncpy(buf, "unknown time", size);
+	}
+}
+
+/* Forward declarations for recovery prompt */
+static int input_read_key(void);
+/* Note: terminal_disable_raw_mode is declared extern in error.h */
+
+/*
+ * Show recovery prompt and handle user response.
+ * Returns true if user chose to recover, false to ignore.
+ */
+static bool autosave_prompt_recovery(const char *filename, const char *swap_path)
+{
+	/* Get swap file modification time */
+	time_t swap_mtime = autosave_get_swap_mtime(swap_path);
+	char time_str[64];
+	autosave_format_time(swap_mtime, time_str, sizeof(time_str));
+
+	/* Get swap file size */
+	struct stat st;
+	size_t swap_size = 0;
+	if (stat(swap_path, &st) == 0) {
+		swap_size = st.st_size;
+	}
+
+	/* Clear screen and show prompt */
+	write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);  /* Clear screen, home cursor */
+
+	printf("\n");
+	printf("  ╔══════════════════════════════════════════════════════════════╗\n");
+	printf("  ║                    SWAP FILE FOUND                           ║\n");
+	printf("  ╠══════════════════════════════════════════════════════════════╣\n");
+	printf("  ║                                                              ║\n");
+	printf("  ║  A swap file was found for:                                  ║\n");
+	printf("  ║  %-60.60s║\n", filename ? filename : "(unnamed)");
+	printf("  ║                                                              ║\n");
+	printf("  ║  Swap file: %-49.49s║\n", swap_path);
+	printf("  ║  Modified:  %-49.49s║\n", time_str);
+	printf("  ║  Size:      %-49zu║\n", swap_size);
+	printf("  ║                                                              ║\n");
+	printf("  ║  This may be from a previous session that crashed or was    ║\n");
+	printf("  ║  interrupted.                                                ║\n");
+	printf("  ║                                                              ║\n");
+	printf("  ╠══════════════════════════════════════════════════════════════╣\n");
+	printf("  ║                                                              ║\n");
+	printf("  ║  [R] Recover - Open the swap file                            ║\n");
+	printf("  ║  [D] Delete  - Delete swap file and open original            ║\n");
+	printf("  ║  [Q] Quit    - Exit without opening anything                 ║\n");
+	printf("  ║                                                              ║\n");
+	printf("  ╚══════════════════════════════════════════════════════════════╝\n");
+	printf("\n");
+	printf("  Your choice: ");
+	fflush(stdout);
+
+	/* Read response (we're still in raw mode) */
+	while (1) {
+		int c = input_read_key();
+
+		if (c == 'r' || c == 'R') {
+			printf("Recover\n");
+			return true;
+		} else if (c == 'd' || c == 'D') {
+			printf("Delete\n");
+			/* Delete the swap file */
+			if (unlink(swap_path) == 0) {
+				log_debug("Deleted swap file: %s", swap_path);
+			}
+			return false;
+		} else if (c == 'q' || c == 'Q' || c == CONTROL_KEY('q')) {
+			printf("Quit\n");
+			/* Exit the editor */
+			terminal_disable_raw_mode();
+			exit(0);
+		}
+		/* Ignore other keys */
 	}
 }
 
@@ -7015,6 +7595,10 @@ static int __must_check file_save(struct buffer *buffer)
 
 	buffer->is_modified = false;
 	editor_set_status_message("%zu bytes written to disk", total_bytes);
+
+	/* Remove swap file after successful save */
+	autosave_remove_swap();
+	autosave.last_save_time = time(NULL);
 
 	return 0;
 }
@@ -15013,6 +15597,10 @@ static void editor_process_keypress(void)
 				return;
 			}
 			terminal_clear_screen();
+			/* Remove swap file on clean exit (no unsaved changes) */
+			if (!editor.buffer.is_modified) {
+				autosave_remove_swap();
+			}
 			async_replace_cleanup();
 			async_search_cleanup();
 			worker_shutdown();
@@ -15258,22 +15846,59 @@ int main(int argument_count, char *argument_values[])
 	editor_update_screen_size();
 
 	if (argument_count >= 2) {
-		int ret = file_open(&editor.buffer, argument_values[1]);
-		if (ret) {
-			if (ret == -ENOENT) {
-				/* File doesn't exist yet - that's OK, new file */
-				editor.buffer.filename = strdup(argument_values[1]);
-				editor.buffer.is_modified = false;
+		const char *filename = argument_values[1];
+
+		/* Check for swap file (crash recovery) */
+		const char *swap_path = autosave_check_recovery(filename);
+		if (swap_path != NULL) {
+			bool recover = autosave_prompt_recovery(filename, swap_path);
+			if (recover) {
+				/* Load from swap file */
+				int ret = file_open(&editor.buffer, swap_path);
+				if (ret == 0) {
+					/* Set original filename */
+					free(editor.buffer.filename);
+					editor.buffer.filename = strdup(filename);
+					editor.buffer.is_modified = true;
+					autosave_update_path();
+					autosave.swap_exists = true;
+					editor_set_status_message("Recovered from swap - save to keep changes");
+				} else {
+					editor_set_status_message("Recovery failed: %s", edit_strerror(ret));
+					/* Fall through to normal open */
+					swap_path = NULL;
+				}
 			} else {
-				/* Real error - show message but continue with empty buffer */
-				editor_set_status_message("Cannot open file: %s",
-				                          edit_strerror(ret));
+				swap_path = NULL;  /* User chose not to recover */
 			}
 		}
+
+		if (swap_path == NULL) {
+			/* Normal file open */
+			int ret = file_open(&editor.buffer, filename);
+			if (ret) {
+				if (ret == -ENOENT) {
+					/* File doesn't exist yet - that's OK, new file */
+					editor.buffer.filename = strdup(filename);
+					editor.buffer.is_modified = false;
+				} else {
+					/* Real error - show message but continue with empty buffer */
+					editor_set_status_message("Cannot open file: %s",
+					                          edit_strerror(ret));
+				}
+			}
+			autosave_update_path();
+		}
+	} else {
+		/* No file specified - also update swap path for unnamed */
+		autosave_update_path();
 	}
 
 	editor_update_gutter_width();
 	editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | F2 = toggle line numbers");
+
+	/* Track last autosave check time */
+	static time_t last_autosave_check = 0;
 
 	while (1) {
 		int ret = render_refresh_screen();
@@ -15285,6 +15910,13 @@ int main(int argument_count, char *argument_values[])
 		}
 		editor_process_keypress();
 		worker_process_results();
+
+		/* Check auto-save periodically */
+		time_t now = time(NULL);
+		if (now - last_autosave_check >= 5) {
+			autosave_check();
+			last_autosave_check = now;
+		}
 	}
 
 	return 0;
