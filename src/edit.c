@@ -5494,7 +5494,111 @@ static void autosave_format_time(time_t t, char *buf, size_t size)
 
 /* Forward declarations for recovery prompt */
 static int input_read_key(void);
+static void output_buffer_append_string(struct output_buffer *output, const char *text);
+static void output_buffer_append_char(struct output_buffer *output, char character);
+static void output_buffer_flush(struct output_buffer *output);
+static void output_buffer_free(struct output_buffer *output);
+static void dialog_goto(struct output_buffer *output, int row, int column);
+static void dialog_set_style(struct output_buffer *output, const struct style *style);
+static void dialog_draw_header(struct output_buffer *output,
+			       struct dialog_state *dialog,
+			       const char *title);
+static void dialog_draw_footer(struct output_buffer *output,
+			       struct dialog_state *dialog,
+			       const char *hint);
 /* Note: terminal_disable_raw_mode is declared extern in error.h */
+
+/*
+ * Draw a single text row in the swap recovery dialog.
+ * text can be NULL for an empty row.
+ */
+static void swap_dialog_draw_row(struct output_buffer *output,
+				 struct dialog_state *dialog,
+				 int row_index,
+				 const char *text)
+{
+	int screen_row = dialog->panel_top + 2 + row_index;
+	dialog_goto(output, screen_row, dialog->panel_left + 1);
+	dialog_set_style(output, &active_theme.dialog);
+
+	int chars_written = 0;
+	output_buffer_append_char(output, ' ');
+	chars_written++;
+
+	if (text != NULL) {
+		int text_len = strlen(text);
+		for (int i = 0; i < text_len && chars_written < dialog->panel_width - 1; i++) {
+			output_buffer_append_char(output, text[i]);
+			chars_written++;
+		}
+	}
+
+	/* Fill rest with spaces */
+	while (chars_written < dialog->panel_width) {
+		output_buffer_append_char(output, ' ');
+		chars_written++;
+	}
+}
+
+/*
+ * Draw the swap file recovery dialog.
+ */
+static void swap_recovery_draw(struct output_buffer *output,
+			       struct dialog_state *dialog,
+			       const char *filename,
+			       const char *swap_path,
+			       const char *time_str,
+			       size_t swap_size)
+{
+	dialog_draw_header(output, dialog, "SWAP FILE FOUND");
+
+	/* Content rows */
+	int row = 0;
+	swap_dialog_draw_row(output, dialog, row++, "A swap file was found for:");
+
+	/* Filename (truncated if needed) */
+	char filename_line[256];
+	snprintf(filename_line, sizeof(filename_line), "  %s",
+		 filename ? filename : "(unnamed)");
+	swap_dialog_draw_row(output, dialog, row++, filename_line);
+
+	swap_dialog_draw_row(output, dialog, row++, NULL);  /* blank */
+
+	/* Swap file details */
+	char detail_line[256];
+	snprintf(detail_line, sizeof(detail_line), "Swap file: %s", swap_path);
+	swap_dialog_draw_row(output, dialog, row++, detail_line);
+
+	snprintf(detail_line, sizeof(detail_line), "Modified:  %s", time_str);
+	swap_dialog_draw_row(output, dialog, row++, detail_line);
+
+	snprintf(detail_line, sizeof(detail_line), "Size:      %zu bytes", swap_size);
+	swap_dialog_draw_row(output, dialog, row++, detail_line);
+
+	swap_dialog_draw_row(output, dialog, row++, NULL);  /* blank */
+
+	swap_dialog_draw_row(output, dialog, row++,
+			     "This may be from a previous session that");
+	swap_dialog_draw_row(output, dialog, row++,
+			     "crashed or was interrupted.");
+
+	swap_dialog_draw_row(output, dialog, row++, NULL);  /* blank */
+
+	/* Options */
+	swap_dialog_draw_row(output, dialog, row++,
+			     "[R] Recover - Open the swap file");
+	swap_dialog_draw_row(output, dialog, row++,
+			     "[D] Delete  - Delete swap file and open original");
+	swap_dialog_draw_row(output, dialog, row++,
+			     "[Q] Quit    - Exit without opening anything");
+
+	/* Fill remaining rows */
+	while (row < dialog->visible_rows) {
+		swap_dialog_draw_row(output, dialog, row++, NULL);
+	}
+
+	dialog_draw_footer(output, dialog, "Press R, D, or Q");
+}
 
 /*
  * Show recovery prompt and handle user response.
@@ -5514,51 +5618,48 @@ static bool autosave_prompt_recovery(const char *filename, const char *swap_path
 		swap_size = st.st_size;
 	}
 
-	/* Clear screen and show prompt */
-	write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);  /* Clear screen, home cursor */
+	/* Set up dialog dimensions */
+	struct dialog_state dialog = {0};
+	const int content_rows = 13;  /* Number of content lines we need */
+	const int dialog_width = 60;
+	const int dialog_height = content_rows + 2;  /* +2 for header and footer */
 
-	printf("\n");
-	printf("  ╔══════════════════════════════════════════════════════════════╗\n");
-	printf("  ║                    SWAP FILE FOUND                           ║\n");
-	printf("  ╠══════════════════════════════════════════════════════════════╣\n");
-	printf("  ║                                                              ║\n");
-	printf("  ║  A swap file was found for:                                  ║\n");
-	printf("  ║  %-60.60s║\n", filename ? filename : "(unnamed)");
-	printf("  ║                                                              ║\n");
-	printf("  ║  Swap file: %-49.49s║\n", swap_path);
-	printf("  ║  Modified:  %-49.49s║\n", time_str);
-	printf("  ║  Size:      %-49zu║\n", swap_size);
-	printf("  ║                                                              ║\n");
-	printf("  ║  This may be from a previous session that crashed or was    ║\n");
-	printf("  ║  interrupted.                                                ║\n");
-	printf("  ║                                                              ║\n");
-	printf("  ╠══════════════════════════════════════════════════════════════╣\n");
-	printf("  ║                                                              ║\n");
-	printf("  ║  [R] Recover - Open the swap file                            ║\n");
-	printf("  ║  [D] Delete  - Delete swap file and open original            ║\n");
-	printf("  ║  [Q] Quit    - Exit without opening anything                 ║\n");
-	printf("  ║                                                              ║\n");
-	printf("  ╚══════════════════════════════════════════════════════════════╝\n");
-	printf("\n");
-	printf("  Your choice: ");
-	fflush(stdout);
+	dialog.panel_width = dialog_width;
+	if (dialog.panel_width > (int)editor.screen_columns - 4) {
+		dialog.panel_width = (int)editor.screen_columns - 4;
+	}
+	dialog.panel_height = dialog_height;
+	if (dialog.panel_height > (int)editor.screen_rows - 2) {
+		dialog.panel_height = (int)editor.screen_rows - 2;
+	}
+	dialog.panel_left = (editor.screen_columns - dialog.panel_width) / 2;
+	dialog.panel_top = (editor.screen_rows - dialog.panel_height) / 2;
+	dialog.visible_rows = dialog.panel_height - 2;
+
+	/* Clear screen and draw dialog */
+	struct output_buffer output = {0};
+	output_buffer_append_string(&output, "\x1b[2J\x1b[H");  /* Clear screen, home cursor */
+	output_buffer_append_string(&output, "\x1b[?25l");     /* Hide cursor */
+
+	swap_recovery_draw(&output, &dialog, filename, swap_path, time_str, swap_size);
+
+	output_buffer_append_string(&output, "\x1b[0m");       /* Reset attributes */
+	output_buffer_flush(&output);
+	output_buffer_free(&output);
 
 	/* Read response (we're still in raw mode) */
 	while (1) {
 		int c = input_read_key();
 
 		if (c == 'r' || c == 'R') {
-			printf("Recover\n");
 			return true;
 		} else if (c == 'd' || c == 'D') {
-			printf("Delete\n");
 			/* Delete the swap file */
 			if (unlink(swap_path) == 0) {
 				log_debug("Deleted swap file: %s", swap_path);
 			}
 			return false;
 		} else if (c == 'q' || c == 'Q' || c == CONTROL_KEY('q')) {
-			printf("Quit\n");
 			/* Exit the editor */
 			terminal_disable_raw_mode();
 			exit(0);
