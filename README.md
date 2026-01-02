@@ -1,437 +1,413 @@
-# edit
+# Edit
 
-A terminal text editor written in C.
-
-## Contents
-
-- [Philosophy](#philosophy)
-- [Features](#features)
-- [Installation](#installation)
-- [Key Bindings](#key-bindings)
-- [Architecture](#architecture)
-  - [Module Structure](#module-structure)
-  - [The Three-Temperature Model](#the-three-temperature-model)
-  - [The Cell](#the-cell)
-  - [Word Boundaries](#word-boundaries)
-  - [Bracket Matching](#bracket-matching)
-  - [Syntax Highlighting](#syntax-highlighting)
-  - [Line Wrapping](#line-wrapping)
-  - [Undo System](#undo-system)
-  - [Multiple Cursors](#multiple-cursors)
-  - [Background Processing](#background-processing)
-  - [Crash Recovery](#crash-recovery)
-  - [Rendering](#rendering)
-  - [Error Handling](#error-handling)
-  - [Themes](#themes)
-- [Extending](#extending)
-- [Building](#building)
+*A terminal text editor for people who know what they want to type*
 
 ---
 
-## Philosophy
+Terminal text editors exist on a spectrum. At one end sits nano: friendly, obvious, and about as capable as a butter knife. At the other end sits vim: powerful, arcane, and requiring a years-long apprenticeship before you stop accidentally deleting your files. Between them lies a wasteland of editors that either aspire to vim's complexity without its coherence, or add features to nano until it collapses under its own weight.
 
-Every text editor makes a bet about what matters most.
+Edit occupies a different position. It assumes you want to edit text, not learn a new religion. The keybindings are what you'd expect from any modern application—Ctrl+S saves, Ctrl+C copies, Ctrl+Z undoes—yet underneath runs machinery sophisticated enough to handle large files, Unicode edge cases, and the kind of structural navigation that usually requires a modal editor.
 
-Vim bets on efficiency. It treats editing as a language—verbs act on nouns, modifiers adjust scope—and rewards users who internalize its grammar. The learning curve is steep, but fluent Vim users edit text with remarkable economy of motion.
+This is not a vim replacement. If you've invested years in vim, you've probably recouped that investment by now. This is for everyone else: the developer who SSH'd into a server and discovered nano can't handle their file, the new programmer who doesn't want to memorize a command vocabulary, the experienced developer who just wants to make a quick edit without launching an Electron application that consumes half a gigabyte of RAM.
 
-Emacs bets on extensibility. At its core sits a Lisp interpreter that happens to manipulate text buffers. Given enough configuration, Emacs becomes email client, news reader, IDE, operating system. The editor disappears into whatever you build on top of it.
-
-VS Code bets on the ecosystem. A minimal core hosts thousands of extensions. Language servers provide intelligence. The editor is a platform, and the platform attracts contributors who make it better at everything.
-
-This editor makes a different bet: that simplicity has its own value.
-
-The entire implementation is 19,000 lines of C across 16 modules. No extension API to maintain. No protocol handlers. No embedded scripting language. One person can read and understand the complete source—not abstractly, but actually trace through every function, examine every data structure, comprehend every state transition.
-
-This constraint eliminates features that other editors handle well. Need IntelliSense? Use VS Code. Want org-mode? Use Emacs. Prefer modal editing? Use Vim. This editor won't replace them for those use cases.
-
-What remains is a capable editor for the tasks that don't require an ecosystem: config files, quick scripts, prose, commit messages, code in languages without tooling. It opens instantly, handles Unicode correctly, highlights C syntax, and stays out of your way.
-
-The codebase serves a secondary purpose: it's readable. The architecture demonstrates practical solutions to problems every text editor faces—efficient memory use, responsive UI, correct cursor movement through Unicode text. If you've ever wondered how editors work, this one shows you.
-
----
-
-## Features
-
-**Unicode done right.** The cursor moves through text the way humans perceive it. A family emoji (👨‍👩‍👧‍👦) is one cursor position, not seven codepoints. Korean syllables stay intact. Combining marks attach to their bases. The implementation handles grapheme clusters per UAX #29, using the bundled utflite library.
-
-**Syntax highlighting.** C and C-like languages: keywords, types, strings (with escape sequences), comments, preprocessor directives, numbers in all bases, function calls, operators, brackets. Highlighting runs once when you edit a line, then caches—scrolling through a thousand lines of unmodified code does zero highlighting work.
-
-**Soft line wrapping.** Three modes: off (horizontal scroll), word wrap (break at boundaries), character wrap (break anywhere). Eight indicator styles show where lines continue. Wrap points are cached and recomputed lazily.
-
-**Incremental search.** Matches highlight as you type—current match in gold, others in blue. Toggle case sensitivity, whole-word matching, and POSIX regex independently. Replace supports backreferences. Search runs on a background thread, so the UI stays responsive even in large files.
-
-**Multiple cursors.** Press Ctrl+D to select the word under the cursor; press again to add a cursor at the next occurrence. All cursors receive keystrokes simultaneously. The implementation processes cursors in reverse document order so insertions don't invalidate positions.
-
-**Bracket matching.** Parentheses, brackets, braces, quotes, and block comments are paired when the file loads. Each pair shares a unique ID stored in the characters themselves. Jump-to-bracket is a lookup, not a search.
-
-**Smart undo.** Records operations, not snapshots, so memory scales with edit count rather than file size. Rapid keystrokes group together; pauses start new groups. Undo feels like rewinding your actions, not stepping through individual characters.
-
-**Mouse support.** Click to position, drag to select, double-click for words, triple-click for lines. Scroll wheel adapts to velocity—slow scrolling for precision, fast for navigation.
-
-**Crash recovery.** A swap file saves your work every 30 seconds when there are unsaved changes. If the editor crashes, the next launch offers to recover. Fatal signals attempt emergency save before terminating. Your work survives.
-
-**Two built-in themes.** Dark and Light, designed for readability. Custom themes load from `~/.edit/themes/`. All colors auto-adjust for WCAG 2.1 AA contrast (4.5:1 ratio).
-
-**Visual aids.** Optional column marker at 80 or 120 characters. Trailing whitespace highlighting. Visible whitespace mode. Cursor line highlighting.
-
----
-
-## Installation
+## Quick Start
 
 ```bash
 git clone https://github.com/yourusername/edit.git
 cd edit
 make
-make install    # installs to ~/.local/bin
+./edit yourfile.txt
 ```
 
-To uninstall:
+That's it. No configuration required. No plugins to install. No tutorial to complete before you can type characters into a file.
 
+### Essential Keybindings
+
+| Action | Key |
+|--------|-----|
+| Save | Ctrl+S |
+| Open file | Ctrl+O |
+| Quit | Ctrl+Q |
+| Undo / Redo | Ctrl+Z / Ctrl+Y |
+| Copy / Cut / Paste | Ctrl+C / Ctrl+X / Ctrl+V |
+| Find | Ctrl+F |
+| Find & Replace | Ctrl+R |
+| Go to line | Ctrl+G |
+| Select all | Ctrl+A |
+
+If you've used any text editor in the last thirty years, you already know how to use edit.
+
+## Features
+
+### File Operations
+
+**Ctrl+S** saves the current file. **Ctrl+O** opens a file browser dialog—arrow keys to navigate, Enter to select, Escape to cancel. **Ctrl+Q** quits; if you have unsaved changes, you'll be asked to confirm.
+
+Edit can read from stdin:
 ```bash
-make uninstall
+cat somefile.txt | ./edit
 ```
 
----
-
-## Key Bindings
-
-### Files
-
-| Key | Action |
-|-----|--------|
-| Ctrl+S | Save |
-| Ctrl+O | Open file browser |
-| F12 | Save As |
-| Ctrl+Q | Quit |
+If edit crashes (or your SSH connection drops, or your laptop dies), it maintains a swap file. On restart, you'll be offered the chance to recover your work.
 
 ### Navigation
 
-| Key | Action |
-|-----|--------|
-| Arrows | Move cursor |
-| Ctrl+Arrow | Move by word |
-| Home / End | Line start / end |
-| Page Up / Down | Scroll by screen |
-| Ctrl+G | Go to line |
-| Ctrl+] | Jump to matching bracket |
+Arrow keys move the cursor. Unlike simpler editors, edit moves by *grapheme cluster*—the thing humans think of as "one character"—not by byte or codepoint. This means emoji, combining accents, and complex scripts work correctly.
+
+**Ctrl+Arrow** jumps by word. The definition of "word" is context-aware: `hello_world` contains two words, `foo->bar` contains three, and punctuation sequences like `!=` are treated as single tokens.
+
+**Ctrl+G** prompts for a line number and jumps there.
+
+**Ctrl+]** jumps to the matching bracket. If you're on a `{`, it finds the corresponding `}`. This works across lines and handles nested brackets correctly—not by scanning the file, but by looking up precomputed metadata.
+
+**Home/End** go to line boundaries. In wrap mode, they go to the wrap segment boundaries; press again to reach the actual line start/end.
+
+**Page Up/Down** scroll by screenful, keeping the cursor visible.
 
 ### Selection
 
-| Key | Action |
-|-----|--------|
-| Shift+Arrow | Extend selection |
-| Ctrl+Shift+Arrow | Extend by word |
-| Ctrl+A | Select all |
-| Ctrl+D | Select word / add cursor at next |
-| Double-click | Select word |
-| Triple-click | Select line |
+**Shift+Arrow** extends the selection character by character. **Ctrl+Shift+Arrow** extends by word.
+
+**Ctrl+D** selects the word under the cursor. Press it again to select the next occurrence of that word—useful for renaming variables without opening find-and-replace.
+
+**Ctrl+A** selects all text.
+
+**Mouse** support includes click to position cursor, drag to select, double-click to select word, and triple-click to select line. The scroll wheel uses adaptive velocity: slow scrolling moves one line at a time, fast scrolling accelerates up to twenty lines per tick.
 
 ### Editing
 
-| Key | Action |
-|-----|--------|
-| Ctrl+Z | Undo |
-| Ctrl+Y | Redo |
-| Ctrl+C / X / V | Copy / Cut / Paste |
-| Alt+K | Delete line |
-| Alt+D | Duplicate line |
-| Alt+Up / Down | Move line |
-| Tab / Shift+Tab | Indent / Outdent |
-| Ctrl+/ | Toggle comment |
+**Ctrl+Z** undoes, **Ctrl+Y** redoes. Undo groups rapid keystrokes together—typing "hello" and pressing undo removes the whole word, not individual letters.
 
-### Search
+**Ctrl+C/X/V** use the system clipboard when available (via xclip, xsel, or wl-copy), falling back to an internal buffer when not.
 
-| Key | Action |
-|-----|--------|
-| Ctrl+F | Find |
-| Ctrl+R | Find and replace |
-| Alt+N / P | Next / Previous match |
-| Alt+C | Toggle case sensitivity |
-| Alt+W | Toggle whole word |
-| Alt+R | Toggle regex |
-| Alt+A | Replace all |
-| Escape | Cancel |
+**Tab** indents; with text selected, it indents all selected lines. **Shift+Tab** outdents.
 
-### Display
+**Ctrl+/** toggles comment on the current line (or all selected lines). Currently uses `//` style comments.
 
-| Key | Action |
-|-----|--------|
-| F2 | Toggle line numbers |
-| F3 | Toggle whitespace visibility |
-| F4 | Cycle column marker |
-| F5 | Theme picker |
-| Alt+Z | Cycle wrap mode |
+**Alt+K** deletes the entire current line. **Alt+D** duplicates it. **Alt+Up/Down** moves the line up or down.
+
+**Enter** inserts a newline and preserves indentation from the previous line.
+
+### Search & Replace
+
+**Ctrl+F** enters search mode. Type your query; matches highlight in real-time as you type. **Alt+N** jumps to the next match, **Alt+P** to the previous.
+
+**Alt+C** toggles case sensitivity. **Alt+W** toggles whole-word matching. **Alt+R** toggles regex mode (POSIX extended regular expressions).
+
+**Ctrl+R** enters find-and-replace mode. **Tab** switches between the search and replace fields. **Enter** replaces the current match and jumps to the next. **Alt+A** replaces all matches.
+
+For files larger than 5,000 lines, search runs in a background thread so the UI stays responsive.
+
+**Escape** exits search mode.
+
+### View Settings
+
+**Alt+Z** cycles through wrap modes: no wrapping (horizontal scroll), word-boundary wrapping, and character wrapping.
+
+**Alt+Shift+Z** cycles through wrap indicators—the symbol shown at line continuation points. Options include blank, arrows, corners, and various Unicode glyphs.
+
+**F3** toggles whitespace visibility. Tabs appear as `→`, trailing spaces as `·`.
+
+**F4** cycles the color column: off, 80 characters, 120 characters. A subtle vertical line helps you keep lines within bounds.
+
+**F5** (or **Ctrl+T**) opens the theme picker.
+
+## Themes
+
+Edit ships with 49 built-in themes, ranging from dark themes with syntax colors to minimal monochrome schemes. All themes meet WCAG 2.1 AA contrast requirements—a 4.5:1 minimum ratio between text and background.
+
+Themes include tritanopia-friendly options that use the red-cyan axis visible to those with blue-yellow color blindness.
+
+The theme picker shows a live preview as you navigate. Press Enter to select, Escape to cancel.
+
+### Custom Themes
+
+Place `.ini` files in `~/.edit/themes/`. Format:
+
+```ini
+[theme]
+name = My Theme
+background = #1a1a1a
+foreground = #d4d4d4
+
+[syntax]
+keyword = #569cd6
+string = #ce9178
+comment = #6a9955
+```
+
+### Configuration
+
+Edit stores preferences in `~/.editrc`:
+
+```
+theme: Tritanopia Dark
+wrap_mode: word
+wrap_indicator: return
+show_whitespace: false
+color_column: 80
+```
 
 ---
 
 ## Architecture
 
-The architecture optimizes for two things: opening large files without delay, and keeping the UI responsive during edits. These goals drive every significant design decision.
+The rest of this document explains how edit works internally. If you just want to edit text, you can stop reading here. If you're curious why edit handles large files efficiently, or how bracket matching can be instantaneous, read on.
 
-### Module Structure
+### The Three-Temperature System
 
-The codebase is organized into 16 modules, each owning a specific responsibility:
+Most editors read files into memory. Open a 100MB file in nano and you'll wait several seconds while it allocates and copies. Vim is cleverer—it uses swap files and loads incrementally—but there's still measurable latency. VS Code loads everything into a rope data structure optimized for edits, which works well but consumes memory proportional to file size.
 
-| Module | Purpose |
-|--------|---------|
-| `types.h` | All shared structures, enums, constants |
-| `edit.h` | Master header that includes everything |
-| `main.c` | Entry point and main loop |
-| `edit.c` | Core editing operations |
-| `editor.c` | Global state, status messages, mode handling |
-| `buffer.c` | Line storage and manipulation |
-| `syntax.c` | Highlighting and character classification |
-| `undo.c` | Operation recording and replay |
-| `input.c` | Keyboard and mouse input parsing |
-| `render.c` | Screen drawing and output buffering |
-| `terminal.c` | Raw mode, resize handling |
-| `theme.c` | Color management and contrast enforcement |
-| `search.c` | Find and replace |
-| `worker.c` | Background thread infrastructure |
-| `autosave.c` | Swap files and crash recovery |
-| `dialog.c` | Theme picker and file browser |
-| `clipboard.c` | System clipboard integration |
-| `error.c` | Error codes and emergency save |
+Edit uses memory-mapped I/O. When you open a file, edit calls `mmap()` to map it into virtual address space. No copying occurs. The operating system pages in data on demand, which means opening a 100MB file takes the same time as opening a 1KB file: essentially zero.
 
-The total is about 19,000 lines. Dependencies flow from specific to general: `main.c` sits at the top, `types.h` at the bottom. Modules communicate through well-defined interfaces, not shared globals.
+But memory mapping creates a problem: you can't edit a memory-mapped region directly (modifications would affect the file immediately). Edit solves this with a three-temperature system for lines:
 
-### The Three-Temperature Model
+**Cold** lines are backed entirely by mmap. They consume no heap memory. The line structure stores only an offset and length into the mapped file.
 
-Loading a file by reading it entirely into memory works fine for small files. But a 10MB log with 200,000 lines would require decoding every UTF-8 byte and allocating structures for every line—even if you only want to see the last page.
+**Warm** lines have been decoded from UTF-8 into edit's internal cell format, but haven't been modified. The mmap content remains authoritative. Warming a line allocates memory for cells and computes syntax highlighting and structural metadata.
 
-The editor borrows an idea from database buffer management. Files are memory-mapped with `mmap()`. The operating system handles paging; file contents load only when accessed. Each line stores just a pointer into the mapped region and a byte count. These lines are *cold*—they exist, but consume almost no memory.
+**Hot** lines have been edited. Their cell arrays are authoritative; the mmap content is stale. These lines must be written to disk on save.
 
-When you scroll to a line and it needs to render, it *warms up*. The UTF-8 bytes decode into a cell array. Syntax highlighting runs. Word boundaries are computed. Now the line is ready.
+When you scroll through a file, only the visible lines need to be warm. The background worker thread warms lines ahead of the viewport so scrolling stays smooth. When you edit a line, it becomes hot. On save, only hot lines are written.
 
-When you edit a line, it becomes *hot*. The mmap content is stale; the cell array is authoritative. Before saving, cold lines must warm up so their content can be captured.
+**Trade-offs:**
 
-```
-COLD  →  pointer into mmap, ~24 bytes
-WARM  →  decoded cells, ready to display
-HOT   →  edited cells, mmap content stale
-```
+| Aspect | Benefit | Cost |
+|--------|---------|------|
+| Instant load | Files open immediately regardless of size | Architecture complexity |
+| Low memory | Memory ∝ viewport + edited lines | Atomic operations for thread safety |
+| Deferred work | Syntax highlighting computed lazily | Cannot edit cold lines without warming |
 
-Opening a 100,000-line file allocates only line metadata—about 2.4MB. Scroll to line 50,000 and only the visible lines warm up. Lines you never visit never decode.
+### The Cell Structure
 
-### The Cell
-
-A character could be stored as just its codepoint—four bytes. But every operation that cares about syntax, word boundaries, or bracket matching would then recompute that information. The question is where to pay: once during editing, or repeatedly during display and navigation.
-
-The editor pays once:
+Each character in a warm or hot line is represented by a `struct cell`:
 
 ```c
 struct cell {
-    uint32_t codepoint;    // Unicode scalar value
-    uint16_t syntax;       // Token type for highlighting
-    uint8_t  neighbor;     // Character class and word position
-    uint8_t  flags;        // Reserved
-    uint32_t context;      // Bracket pair ID and type
+    uint32_t codepoint;     // Unicode codepoint
+    uint16_t syntax;        // Syntax token type
+    uint8_t neighbor;       // Character class + position
+    uint8_t flags;          // Reserved
+    uint32_t context;       // Pair ID + type + role
 };
 ```
 
-Twelve bytes per character. Three times the minimum, but it eliminates repeated work. Scrolling doesn't rehighlight. Word movement doesn't rescan. Bracket jumping doesn't search. The cost is paid when a line warms up or is edited; after that, the information is instant.
+Twelve bytes per character. This is larger than storing raw UTF-8 (1-4 bytes per codepoint), but the metadata enables features that would otherwise require expensive scans:
 
-### Word Boundaries
+- **syntax** stores the highlighting category (keyword, string, comment, etc.) so rendering doesn't recompute it
+- **neighbor** encodes character class and token position for word navigation
+- **context** stores bracket matching information
 
-Ctrl+Arrow should move by words. The obvious implementation scans characters looking for transitions between word and non-word characters. This is O(n) in distance traveled—fine for short jumps, sluggish when holding the key through a long line.
+A 10,000-line file averaging 80 characters per line requires about 9.6MB in cell form. For most editing sessions, this is acceptable. For truly enormous files, the three-temperature system ensures only visible and edited content incurs this cost.
 
-The `neighbor` byte precomputes word structure:
+### The Neighbor Layer
 
-```
-Bits 0-2:  Character class (letter, digit, whitespace, punctuation, etc.)
-Bits 3-4:  Position in token (start, middle, end, solo)
-```
+When you press Ctrl+Arrow to jump by word, what happens? Most editors scan backward or forward, classifying characters until they find a boundary. This is O(n) in the distance traveled.
 
-A character marked "start" begins a word. Marked "end" concludes one. "Solo" means a single-character token. Word movement becomes: if at end or solo, advance one cell. If now at start or solo, stop. No scanning, no loops—just a few comparisons.
+Edit precomputes character classifications when warming a line. Each cell's `neighbor` byte encodes:
 
-This matters because keyboard repeat is fast. Users holding Ctrl+Arrow expect smooth, consistent motion, not a cursor that stutters through long identifiers.
+- **Character class** (3 bits): whitespace, letter, digit, underscore, punctuation, bracket, quote, or other
+- **Token position** (2 bits): solo, start, middle, or end
 
-### Bracket Matching
-
-Jump-to-bracket typically searches for the matching delimiter while counting nesting. This is O(n) in the distance between brackets—tolerable for adjacent parens, slow for block comments spanning thousands of lines.
-
-The editor inverts the approach. When a file loads, one pass matches all delimiters and assigns each pair a unique ID:
+For the string `hello_world`:
 
 ```
-Bits 0-23:   Pair ID (unique, supports 16 million pairs)
-Bits 24-26:  Pair type (paren, bracket, brace, quote, comment)
-Bits 27-28:  Role (opener or closer)
+h    e    l    l    o    _    w    o    r    l    d
+S    M    M    M    E    SOLO S    M    M    M    E
 ```
 
-Jump-to-bracket reads the current cell's pair ID, then scans for the cell with the same ID and opposite role. The scan is still O(n) worst case, but typically fast because you're matching a specific ID, not counting nesting.
+Ctrl+Arrow walks the cells and stops when the position field changes from END to START or vice versa. The character class handles transitions between different token types (letters to punctuation, etc.).
 
-More importantly, this enables correct block comment highlighting. A `/*` on line 100 and `*/` on line 500 share a pair ID. Rendering line 300 can check whether it's inside a comment without scanning backward.
+This makes word navigation effectively O(1) per character touched—the classification is already done.
+
+### Pair Entanglement
+
+Finding the matching bracket for a `{` traditionally requires scanning: count opening braces, decrement for closing braces, stop when the count reaches zero. This is O(n) in the worst case and must be done on demand.
+
+Edit computes bracket pairing in a single pass when loading or editing a file. Each delimiter receives a unique 24-bit pair ID:
+
+```
+{  →  pair_id=1, role=opener
+   (  →  pair_id=2, role=opener
+   )  →  pair_id=2, role=closer
+}  →  pair_id=1, role=closer
+```
+
+The `context` field in each cell stores this information. When you press Ctrl+] on a bracket, edit looks up the pair ID and searches for the cell with the same ID and opposite role. In practice, this search can use the pair ID as a key, making the lookup nearly instantaneous.
+
+**Trade-off:** Pair matching must be recomputed after edits. For small files, this is imperceptible. For large files, edit batches recalculation and runs it in the background.
+
+### UTF-8 and Grapheme Clusters
+
+Edit uses the utflite library (embedded in `third_party/`) for Unicode handling. Three capabilities matter:
+
+1. **UTF-8 encoding/decoding**: Converting between byte sequences and codepoints
+2. **Grapheme cluster segmentation**: Determining what humans perceive as "one character"
+3. **Character width calculation**: Knowing how many terminal columns a character occupies
+
+The distinction between codepoints and graphemes is subtle but important. The letter "é" can be represented as a single codepoint (U+00E9, "Latin Small Letter E with Acute") or as two codepoints (U+0065 "Latin Small Letter E" followed by U+0301 "Combining Acute Accent"). Both render identically. A user pressing the right arrow should move past the entire grapheme, not land in the middle.
+
+More dramatic examples include emoji: 🏴󠁧󠁢󠁳󠁣󠁴󠁿 (the Scottish flag) is 7 codepoints but one grapheme. Edit handles this correctly; many editors don't.
+
+Cursor movement in edit operates on grapheme boundaries. The arrow key finds the next grapheme boundary, not the next byte or codepoint.
 
 ### Syntax Highlighting
 
-Most editors highlight on every render. For small files and localized changes, this works fine. But it means scrolling costs O(lines × line_length), paid on every frame.
+Edit performs syntax highlighting in a single pass per line. The highlighter recognizes:
 
-This editor highlights once per edit. Each cell's `syntax` field stores the token type. Rendering reads the field and looks up the color—O(1) per character.
+- Keywords and type names
+- String and character literals
+- Numeric constants
+- Comments (line and block)
+- Preprocessor directives
+- Function names (identifiers followed by `(`)
+- Operators and brackets
 
-The highlighter is a lexer, not a parser:
+Currently only C/C++ syntax is implemented. The architecture supports additional languages—each is a separate highlighting function keyed by file extension.
 
-1. Lines starting with `#` are preprocessor directives
-2. Quoted regions are strings (with escape sequence detection)
-3. `/*` to `*/` are block comments (using pair data)
-4. `//` to end-of-line are line comments
-5. Reserved words are keywords or types
-6. Identifiers followed by `(` are function calls
-7. Numeric literals in all bases (decimal, hex, octal, binary, float)
-8. Everything else is operators or punctuation
-
-This handles C and C-like languages. It doesn't understand context—`int` in a variable name still highlights as a type. But lexer-level accuracy covers 99% of cases, and the implementation stays simple.
-
-### Line Wrapping
-
-Wrapping interacts with everything: cursor movement, selection, mouse clicks, line numbers. The tempting shortcut—split long lines into real line breaks—would destroy the correspondence between file lines and display lines, break numbering, and complicate saving.
-
-Instead, each line caches its wrap points:
-
-```c
-uint32_t *wrap_columns;      // Segment start columns
-uint16_t wrap_segment_count; // Number of visual lines
-uint16_t wrap_cache_width;   // Terminal width when computed
-```
-
-A 200-character line on an 80-column screen becomes three segments. Cursor movement checks which segment it's in. Mouse clicks map screen coordinates to segments, then to cell positions. Selection knows to highlight across segment breaks.
-
-The cache invalidates on edit, resize, or mode change. Recomputation is lazy—triggered when a stale line is about to render.
+**Trade-off vs tree-sitter:** Tree-sitter provides semantic understanding: it knows that `foo` is a function, not just an identifier before a parenthesis. This enables features like "go to definition" and intelligent refactoring. Edit's approach is simpler—about 1,000 lines of code versus tree-sitter's substantial complexity—but limited to syntactic coloring. For a minimal editor, this is sufficient. For an IDE, it's not.
 
 ### Undo System
 
-Undo can snapshot the entire buffer at each edit. Simple, but memory scales with file size times edit count. A 10MB file with a thousand edits means 10GB of undo history.
+Most editors implement undo in one of two ways:
 
-The editor records operations instead:
+1. **Snapshot-based**: Store the entire buffer state at each undo point. Simple but memory-expensive: typing 100 characters means storing 100 copies of the buffer.
 
-```c
-struct edit_operation {
-    enum type type;        // INSERT_CHAR, DELETE_CHAR, INSERT_LINE, etc.
-    uint32_t row, column;  // Position
-    uint32_t codepoint;    // For character operations
-    char *text;            // For multi-character operations
-};
-```
+2. **Operation-based**: Store the operations (insert, delete) that transform one state to another. Compact but requires careful replay logic.
 
-Undo reverses operations: inserts become deletes, deletes become inserts. Memory scales with edit count, not file size.
+Edit uses operation-based undo. Each edit records what changed, where, and the cursor position before and after. Operations are grouped by timing: keystrokes within one second of each other form a single undo group. Typing "hello" quickly and pressing undo removes all five characters; typing slowly creates five separate undo points.
 
-Grouping makes undo feel natural. Typing "hello" quickly should undo as "hello", not five separate characters. Operations within one second group together. Pauses start new groups. This matches how typing feels—bursts of activity separated by thought.
+Memory usage for 100 insertions: roughly 8KB (80 bytes per operation) versus potentially megabytes for snapshot-based approaches.
 
-### Multiple Cursors
+### Soft Line Wrapping
 
-Multi-cursor editing seems to require threading cursor awareness through every operation. In practice, it's simpler: apply the same operation to each cursor in turn.
+Edit supports three wrap modes:
 
-The trick is ordering. Inserting at column 10 shifts everything after it, including the cursor at column 20. Solution: process cursors in reverse document order—bottom to top, right to left. Later cursors don't shift because earlier ones haven't been processed.
+- **None**: Long lines scroll horizontally
+- **Word**: Lines wrap at word boundaries
+- **Character**: Lines wrap at any character
 
-Some operations are disabled with multiple cursors (newline insertion, backspace at line start) to keep the implementation tractable. The common case—inserting or deleting the same text at multiple positions—works perfectly.
+The complexity lies in cursor movement. When a long line wraps to three screen rows, pressing Down should move to the next screen row, not the next file line. Home and End should go to wrap segment boundaries, with a second press reaching the actual line boundaries.
 
-### Background Processing
+Edit maintains a wrap cache for each line: an array of column positions where wraps occur. This cache is invalidated when the line content changes, the terminal resizes, or the wrap mode changes.
 
-Search in a large file would freeze the UI if run synchronously. The worker module provides a background thread:
+### Background Worker
 
-```c
-struct worker_task {
-    enum task_type type;  // TASK_SEARCH, TASK_REPLACE, TASK_AUTOSAVE
-    union { ... } data;
-};
-```
+Some operations shouldn't block the UI:
 
-The main thread pushes tasks to a queue. The worker processes them and pushes results back. The main loop polls for results between renders, updating the display as matches arrive.
+- **Line warming**: Decoding UTF-8 and computing metadata for lines about to scroll into view
+- **Large file search**: Finding matches in files over 5,000 lines
+- **Autosave**: Writing to the swap file every 30 seconds
 
-Search results stream in incrementally. Replace-all previews the count before committing. Autosave writes without blocking typing.
-
-### Crash Recovery
-
-Losing unsaved work is unacceptable. The autosave module defends against it:
-
-1. Every 30 seconds (when modified), write buffer contents to `~/.edit/swap/<filename>.swp`
-2. On clean exit, delete the swap file
-3. On next launch, if a swap file exists, offer recovery
-
-The swap file writes atomically: create a temp file, write contents, rename over the target. This prevents corruption if the system crashes mid-write.
-
-Fatal signal handlers (SIGSEGV, SIGBUS, etc.) attempt emergency save before terminating. The buffer might be corrupted, but something is better than nothing.
-
-### Rendering
-
-Terminal updates flicker when they show intermediate states—background drawn, then text, then cursor positioned. The solution is batching: build the entire frame in memory, emit it as a single write.
-
-```
-1. Hide cursor
-2. Move to home position
-3. For each row: clear to end, draw line number, draw content
-4. Draw status bar
-5. Draw message bar
-6. Position cursor
-7. Show cursor
-8. Single write() to terminal
-```
-
-The output buffer accumulates escape sequences and text. Only step 8 touches the terminal, which receives a complete frame atomically.
-
-### Error Handling
-
-The editor borrows from the Linux kernel. Functions returning pointers can encode errors in the pointer itself—the top 4095 values of address space are reserved:
-
-```c
-void *result = some_operation();
-if (IS_ERR(result))
-    return PTR_ERR(result);
-```
-
-Assertions come in two severities. `WARN_ON()` logs and continues—something unexpected happened, but we can proceed. `BUG_ON()` triggers emergency save and abort—the invariant violation is unrecoverable.
-
-### Themes
-
-Two themes are built in: Dark and Light. Custom themes live in `~/.edit/themes/` as INI files:
-
-```ini
-[theme]
-name = My Theme
-background = 1a1a2e
-foreground = eaeaea
-keyword = ff79c6
-string = f1fa8c
-comment = 6272a4
-```
-
-Contrast enforcement is automatic. When a foreground color would be illegible against its background (in selections, search highlights, etc.), the editor adjusts it—lightening or darkening until the WCAG 2.1 AA ratio of 4.5:1 is met. Theme authors don't need to understand color theory.
-
-The theme picker shows live preview. Selecting a theme applies it immediately so you can see your code before confirming.
+Edit runs a worker thread that processes a task queue. The main thread submits tasks and polls for results. Communication uses mutex-protected queues. The worker never directly modifies editor state visible to the main thread; instead, it produces results that the main thread applies.
 
 ---
 
-## Extending
+## Comparisons
 
-The modular structure makes extension straightforward:
+### Edit vs Vim
 
-**New key binding:** Define the key code in `types.h`, detect it in `input.c`, handle it in `edit.c`.
+| Aspect | edit | vim |
+|--------|------|-----|
+| Learning curve | Minutes | Months to years |
+| Editing model | Modeless | Modal |
+| Startup time | <10ms | ~50ms |
+| Plugin ecosystem | None | Thousands |
+| Configuration | 10-line ~/.editrc | Potentially hundreds of lines |
+| Customization | Themes only | Infinitely scriptable |
 
-**New syntax token:** Add to `enum syntax_token` in `types.h`, detect it in `syntax.c`, assign colors in theme files.
+**When to use vim:** You've already learned it, or you need macros, plugins, advanced text objects, or the ability to customize every behavior.
 
-**New editing mode:** Create a state struct in `types.h`, add enter/exit functions and a key handler that returns true when it consumes a key. Follow the pattern of search mode or goto-line mode.
+**When to use edit:** You want to edit a file without ceremony. You're on a new system. You're teaching someone who's never used a terminal. You need to make a quick change and move on.
 
-**New background task:** Define the task type in `worker.h`, handle it in the worker thread's switch statement, process results in the main loop.
+### Edit vs Nano
 
-The codebase follows Linux kernel style: tabs for indentation, `snake_case` naming, explicit `struct` keywords, functions named `module_verb_object()`. See CODING_STANDARDS.md for complete guidelines.
+| Aspect | edit | nano |
+|--------|------|------|
+| Unicode | Full grapheme support | Basic |
+| Large files | Instant load via mmap | Loads entire file |
+| Bracket matching | O(1), across lines | Line-local only |
+| Multi-cursor | Ctrl+D for next occurrence | No |
+| Soft wrapping | Word-aware | Character only |
+| Syntax highlighting | Extensible | Built-in for many languages |
+
+**When to use nano:** It's already installed. You're editing a format nano highlights well.
+
+**When to use edit:** Large files, correct Unicode handling, bracket navigation, multi-occurrence selection.
+
+### Edit vs VS Code
+
+| Aspect | edit | VS Code |
+|--------|------|---------|
+| Memory | ~10MB | ~500MB |
+| Startup | <10ms | 2-5 seconds |
+| Language support | Syntax highlighting | Full LSP |
+| Extensions | None | 50,000+ |
+| Git integration | None | Built-in |
+| Debugging | None | Integrated |
+
+**When to use VS Code:** You need an IDE. Language server features, debugging, integrated terminals, extension ecosystem—these matter for serious development work.
+
+**When to use edit:** SSH sessions where you can't run VS Code. Quick edits that don't justify launching an Electron app. Resource-constrained systems. When VS Code is overkill.
+
+### Edit vs Micro
+
+Both are modern terminal editors aiming for usability:
+
+| Aspect | edit | micro |
+|--------|------|-------|
+| Language | C | Go |
+| Plugins | No | Yes |
+| Configuration | ~/.editrc | JSON files |
+| Syntax themes | INI-based | JSON-based |
+
+**Key difference:** Micro prioritizes extensibility with its plugin system. Edit prioritizes simplicity and speed. Neither is wrong—they serve different preferences.
 
 ---
 
 ## Building
 
-Requirements: C17 compiler, make, pthreads. Tested on Linux, macOS, and BSD. The UTF-8 library (utflite) is bundled—no external dependencies.
-
 ```bash
-make              # build
-make test         # run tests
-make clean        # remove artifacts
-make install      # install to ~/.local/bin
-make uninstall    # remove
+make              # Build the editor
+make test         # Run UTF-8 validation tests
+make clean        # Remove build artifacts
+make install      # Install to ~/.local/bin
+make uninstall    # Remove installed binary
 ```
 
-The build uses `-Wall -Wextra -pedantic -O2`. A few warnings are expected and documented in CLAUDE.md.
+**Compiler requirements:** C17 with `-Wall -Wextra -pedantic`. Tested with GCC and Clang.
 
----
+**Dependencies:** None beyond libc and POSIX APIs. The utflite Unicode library is embedded.
+
+**Expected warnings:** One unused function (`cell_is_word_end`) is reserved for future double-click selection improvements.
+
+## Source Organization
+
+```
+src/
+├── edit.c          # Main logic, event loop
+├── types.h         # Shared type definitions
+├── buffer.c        # Line and buffer operations
+├── syntax.c        # Highlighting and neighbor layer
+├── theme.c         # Color system, WCAG compliance
+├── undo.c          # Operation-based history
+├── search.c        # Find and replace
+├── worker.c        # Background thread
+├── input.c         # Keyboard and mouse handling
+├── render.c        # Screen drawing
+├── dialog.c        # File browser, theme picker
+├── clipboard.c     # System clipboard integration
+├── autosave.c      # Swap file management
+└── terminal.c      # Raw mode, window size
+
+third_party/
+└── utflite/        # Unicode library
+```
 
 ## License
 
-GPL-2.0-only
+GPL-2.0-only. See LICENSE file.
+
+---
+
+*Edit is what happens when someone gets tired of explaining vim to new developers and tired of launching VS Code to change one line.*
