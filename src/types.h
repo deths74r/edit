@@ -203,7 +203,7 @@
  * These map to ANSI SGR (Select Graphic Rendition) codes.
  *****************************************************************************/
 
-typedef uint8_t text_attr_t;
+typedef uint8_t text_attr;
 
 #define ATTR_NONE       0
 #define ATTR_BOLD       (1 << 0)   /* SGR 1  - Bold/increased intensity */
@@ -465,7 +465,7 @@ struct syntax_color {
 struct style {
 	struct syntax_color fg;       /* Foreground color */
 	struct syntax_color bg;       /* Background color */
-	text_attr_t attr;             /* Text attributes (ATTR_* flags) */
+	text_attr attr;             /* Text attributes (ATTR_* flags) */
 };
 
 /*

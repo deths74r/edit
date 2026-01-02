@@ -200,9 +200,9 @@ bool color_parse_hex(const char *hex, struct syntax_color *out)
  * Valid attribute names:
  *   bold, dim, italic, underline, reverse, strike, curly, overline
  */
-static text_attr_t attr_parse(const char *str)
+static text_attr attr_parse(const char *str)
 {
-	text_attr_t attr = ATTR_NONE;
+	text_attr attr = ATTR_NONE;
 	char buf[64];
 	char *token, *saveptr;
 
@@ -257,7 +257,7 @@ static text_attr_t attr_parse(const char *str)
  * Build escape sequence for text attributes.
  * Returns the number of characters written to buf.
  */
-int attr_to_escape(text_attr_t attr, char *buffer, size_t buffer_size)
+int attr_to_escape(text_attr attr, char *buffer, size_t buffer_size)
 {
 	if (attr == ATTR_NONE) {
 		return 0;

@@ -116,7 +116,7 @@ double color_contrast_ratio(struct syntax_color c1, struct syntax_color c2);
  * Build escape sequence for text attributes only.
  * Returns the number of characters written to buf.
  */
-int attr_to_escape(text_attr_t attr, char *buffer, size_t buffer_size);
+int attr_to_escape(text_attr attr, char *buffer, size_t buffer_size);
 
 /*
  * Build complete escape sequence for a style (fg, bg, and attributes).
