@@ -4521,7 +4521,21 @@ static void ensure_line_warm_for_render(struct line *line, struct buffer *buffer
  */
 static void render_draw_rows(struct output_buffer *output)
 {
-	uint32_t welcome_row = editor.screen_rows / 2;
+	/* ASCII art welcome banner - 8 lines total (6 art + 1 blank + 1 tagline) */
+	static const char *welcome_art[] = {
+		"███████╗██████╗ ██╗████████╗",
+		"██╔════╝██╔══██╗██║╚══██╔══╝",
+		"█████╗  ██║  ██║██║   ██║   ",
+		"██╔══╝  ██║  ██║██║   ██║   ",
+		"███████╗██████╔╝██║   ██║   ",
+		"╚══════╝╚═════╝ ╚═╝   ╚═╝   ",
+		"",
+		"Enter. Delete. Insert. Type."
+	};
+	static const int welcome_art_lines = 8;
+	static const int welcome_art_width = 28;  /* Display width of ASCII art */
+	uint32_t welcome_start = (editor.screen_rows > (uint32_t)welcome_art_lines)
+	                         ? (editor.screen_rows - welcome_art_lines) / 2 : 0;
 	int text_area_width = editor.screen_columns - editor.gutter_width;
 
 	/*
@@ -4553,17 +4567,17 @@ static void render_draw_rows(struct output_buffer *output)
 
 		if (file_row >= editor.buffer.line_count && !is_empty_buffer_first_line) {
 			/* Empty line past end of file */
-			if (is_empty_buffer && screen_row == welcome_row) {
-				/* Welcome message */
+			int welcome_line = (int)screen_row - (int)welcome_start;
+			if (is_empty_buffer && welcome_line >= 0 && welcome_line < welcome_art_lines) {
+				/* Welcome ASCII art */
 				char color_escape[128];
 				int escape_len = style_to_escape(&active_theme.welcome,
 				                                 color_escape, sizeof(color_escape));
 				output_buffer_append(output, color_escape, escape_len);
 
-				char welcome[64];
-				int welcome_length = snprintf(welcome, sizeof(welcome),
-				                              "edit v%s", EDIT_VERSION);
-				int padding = (text_area_width - welcome_length) / 2;
+				const char *line = welcome_art[welcome_line];
+				int line_width = (welcome_line == 7) ? 28 : welcome_art_width;  /* Tagline is 28 chars */
+				int padding = (text_area_width - line_width) / 2;
 				if (padding < 0) padding = 0;
 
 				for (uint32_t i = 0; i < editor.gutter_width; i++) {
@@ -4572,7 +4586,7 @@ static void render_draw_rows(struct output_buffer *output)
 				for (int i = 0; i < padding; i++) {
 					output_buffer_append_string(output, " ");
 				}
-				output_buffer_append(output, welcome, welcome_length);
+				output_buffer_append_string(output, line);
 			} else if (editor.color_column > 0) {
 				/* Draw color column marker on empty lines */
 				uint32_t col_pos = editor.color_column - 1;
