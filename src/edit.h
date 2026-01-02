@@ -38,11 +38,12 @@
 
 #include "terminal.h"
 #include "theme.h"
+#include "buffer.h"
 
 /*
  * Module headers will be added as modules are extracted:
  * (theme.h already included above)
- * #include "buffer.h"
+ * (buffer.h already included above)
  * #include "syntax.h"
  * #include "undo.h"
  * #include "input.h"

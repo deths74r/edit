@@ -6,7 +6,7 @@ PREFIX = $(HOME)/.local
 BINDIR = $(PREFIX)/bin
 THEMEDIR = $(HOME)/.edit/themes
 
-SRC = src/edit.c src/error.c src/terminal.c src/theme.c
+SRC = src/edit.c src/error.c src/terminal.c src/theme.c src/buffer.c
 TARGET = edit
 TEST_SRC = test_utf8.c
 TEST_TARGET = test_utf8
