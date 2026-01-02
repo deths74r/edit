@@ -967,7 +967,7 @@ static void editor_request_background_warming(void)
  * terminal to a sane state and attempts emergency save, then re-raises
  * the signal with default handler to get proper exit status.
  */
-static void fatal_signal_handler(int sig)
+void fatal_signal_handler(int sig)
 {
 	/* Restore terminal first so error output is visible */
 	terminal_disable_raw_mode();
@@ -1117,7 +1117,7 @@ static void file_build_line_index(struct buffer *buffer)
  *   -errno from fstat() or mmap()
  *   -ENOMEM from allocation failure
  */
-static int __must_check file_open(struct buffer *buffer, const char *filename)
+int __must_check file_open(struct buffer *buffer, const char *filename)
 {
 	int fd = open(filename, O_RDONLY);
 	if (fd < 0)
@@ -3020,7 +3020,7 @@ static uint32_t calculate_adaptive_scroll(int direction)
  * Handle a mouse event by updating cursor position and selection state.
  * Handles click, drag, scroll, and multi-click for word/line selection.
  */
-static void editor_handle_mouse(struct mouse_input *mouse)
+void editor_handle_mouse(struct mouse_input *mouse)
 {
 	switch (mouse->event) {
 		case MOUSE_LEFT_PRESS: {
@@ -6031,7 +6031,7 @@ static void editor_outdent_lines(void)
 	                          lines_modified != 1 ? "s" : "");
 }
 
-static void editor_process_keypress(void)
+void editor_process_keypress(void)
 {
 	int key = input_read_key();
 
@@ -6274,116 +6274,4 @@ static void editor_process_keypress(void)
 			}
 			break;
 	}
-}
-
-/*
- * Program entry point. Initializes the terminal in raw mode, sets up
- * the window resize signal handler, and opens the file specified on
- * the command line (or starts with an empty buffer). Enters the main
- * loop which alternates between refreshing the screen and processing
- * keypresses.
- */
-int main(int argument_count, char *argument_values[])
-{
-	int ret = terminal_enable_raw_mode();
-	if (ret) {
-		fprintf(stderr, "edit: %s\n", edit_strerror(ret));
-		return 1;
-	}
-
-	terminal_enable_mouse();
-	input_set_mouse_handler(editor_handle_mouse);
-
-	/* Set up signal handler for window resize */
-	struct sigaction signal_action;
-	signal_action.sa_handler = terminal_handle_resize;
-	sigemptyset(&signal_action.sa_mask);
-	signal_action.sa_flags = SA_RESTART;
-	sigaction(SIGWINCH, &signal_action, NULL);
-
-	/* Set up fatal signal handlers for crash recovery */
-	signal(SIGSEGV, fatal_signal_handler);
-	signal(SIGABRT, fatal_signal_handler);
-	signal(SIGBUS, fatal_signal_handler);
-	signal(SIGFPE, fatal_signal_handler);
-	signal(SIGILL, fatal_signal_handler);
-
-	editor_init();
-	editor_update_screen_size();
-
-	if (argument_count >= 2) {
-		const char *filename = argument_values[1];
-
-		/* Check for swap file (crash recovery) */
-		const char *swap_path = autosave_check_recovery(filename);
-		if (swap_path != NULL) {
-			bool recover = autosave_prompt_recovery(filename, swap_path);
-			if (recover) {
-				/* Load from swap file */
-				int ret = file_open(&editor.buffer, swap_path);
-				if (ret == 0) {
-					/* Set original filename */
-					free(editor.buffer.filename);
-					editor.buffer.filename = strdup(filename);
-					editor.buffer.is_modified = true;
-					autosave_update_path();
-					autosave_set_swap_exists(true);
-					editor_set_status_message("Recovered from swap - save to keep changes");
-				} else {
-					editor_set_status_message("Recovery failed: %s", edit_strerror(ret));
-					/* Fall through to normal open */
-					swap_path = NULL;
-				}
-			} else {
-				swap_path = NULL;  /* User chose not to recover */
-			}
-		}
-
-		if (swap_path == NULL) {
-			/* Normal file open */
-			int ret = file_open(&editor.buffer, filename);
-			if (ret) {
-				if (ret == -ENOENT) {
-					/* File doesn't exist yet - that's OK, new file */
-					editor.buffer.filename = strdup(filename);
-					editor.buffer.is_modified = false;
-				} else {
-					/* Real error - show message but continue with empty buffer */
-					editor_set_status_message("Cannot open file: %s",
-					                          edit_strerror(ret));
-				}
-			}
-			autosave_update_path();
-		}
-	} else {
-		/* No file specified - also update swap path for unnamed */
-		autosave_update_path();
-	}
-
-	editor_update_gutter_width();
-	editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | F2 = toggle line numbers");
-
-	/* Track last autosave check time */
-	static time_t last_autosave_check = 0;
-
-	while (1) {
-		int ret = render_refresh_screen();
-		if (ret) {
-			/* Minimal recovery on render failure */
-			write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
-			fprintf(stderr, "Render error: %s\n", edit_strerror(ret));
-			usleep(100000);
-		}
-		editor_process_keypress();
-		worker_process_results();
-
-		/* Check auto-save periodically */
-		time_t now = time(NULL);
-		if (now - last_autosave_check >= 5) {
-			autosave_check();
-			last_autosave_check = now;
-		}
-	}
-
-	return 0;
 }
