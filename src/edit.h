@@ -36,9 +36,10 @@
 #include "types.h"
 #include "error.h"
 
+#include "terminal.h"
+
 /*
  * Module headers will be added as modules are extracted:
- * #include "terminal.h"
  * #include "theme.h"
  * #include "buffer.h"
  * #include "syntax.h"

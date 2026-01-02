@@ -1840,14 +1840,8 @@ static void buffer_invalidate_all_wrap_caches(struct buffer *buffer);
  * Global State
  *****************************************************************************/
 
-/* Saved terminal settings, restored when the editor exits. */
-static struct termios original_terminal_settings;
-
 /* The global editor state instance. */
 static struct editor_state editor;
-
-/* Flag set by SIGWINCH handler to indicate terminal was resized. */
-static volatile sig_atomic_t terminal_resized = 0;
 
 /* Mouse click tracking for double/triple-click detection. */
 static time_t last_click_time = 0;
@@ -5422,63 +5416,8 @@ static void syntax_highlight_line(struct line *line, struct buffer *buffer,
 }
 
 /*****************************************************************************
- * Terminal Handling
+ * Signal Handlers
  *****************************************************************************/
-
-/* Forward declaration for mouse cleanup. */
-static void terminal_disable_mouse(void);
-
-/* Restores the terminal to its original settings. Called automatically
- * at exit via atexit() to ensure the terminal is usable after the editor.
- * Also called by fatal signal handler and BUG macros. */
-void terminal_disable_raw_mode(void)
-{
-	terminal_disable_mouse();
-	tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_terminal_settings);
-}
-
-/* Puts the terminal into raw mode for character-by-character input.
- * Disables echo, canonical mode, and signal processing. Registers
- * terminal_disable_raw_mode() to run at exit.
- *
- * Returns 0 on success, negative error code on failure:
- *   -EEDIT_NOTTY   if stdin is not a terminal
- *   -EEDIT_TERMRAW if terminal configuration fails
- */
-static int __must_check terminal_enable_raw_mode(void)
-{
-	/* Verify stdin is a terminal */
-	if (!isatty(STDIN_FILENO))
-		return -EEDIT_NOTTY;
-
-	/* Save original settings for restoration at exit */
-	if (tcgetattr(STDIN_FILENO, &original_terminal_settings) < 0)
-		return -EEDIT_TERMRAW;
-
-	/* Register cleanup only after we have valid settings to restore */
-	atexit(terminal_disable_raw_mode);
-
-	struct termios raw = original_terminal_settings;
-	raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
-	raw.c_oflag &= ~(OPOST);
-	raw.c_cflag |= (CS8);
-	raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
-	raw.c_cc[VMIN] = 0;
-	raw.c_cc[VTIME] = 1;
-
-	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0)
-		return -EEDIT_TERMRAW;
-
-	return 0;
-}
-
-/* Signal handler for SIGWINCH (terminal resize). Sets a flag that the
- * main loop checks to update screen dimensions. */
-static void terminal_handle_resize(int signal)
-{
-	(void)signal;
-	terminal_resized = 1;
-}
 
 /*
  * Fatal signal handler - attempts to save user data before dying.
@@ -5498,55 +5437,6 @@ static void fatal_signal_handler(int sig)
 	/* Re-raise with default handler to get proper exit status */
 	signal(sig, SIG_DFL);
 	raise(sig);
-}
-
-/* Queries the terminal for its current size in rows and columns.
- *
- * Returns 0 on success, -EEDIT_TERMSIZE on failure (ioctl failed or
- * dimensions too small). Minimum usable size is 10x10.
- */
-static int __must_check terminal_get_size(uint32_t *rows, uint32_t *columns)
-{
-	struct winsize window_size;
-
-	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window_size) == -1)
-		return -EEDIT_TERMSIZE;
-
-	/*
-	 * Sanity check: reject unreasonably small dimensions.
-	 * When stdout is a pipe (not a TTY), ioctl may succeed but
-	 * return garbage values. Minimum usable size is 10x10.
-	 */
-	if (window_size.ws_col < 10 || window_size.ws_row < 10)
-		return -EEDIT_TERMSIZE;
-
-	*columns = window_size.ws_col;
-	*rows = window_size.ws_row;
-	return 0;
-}
-
-/* Clears the entire screen and moves the cursor to the home position. */
-static void terminal_clear_screen(void)
-{
-	write(STDOUT_FILENO, "\x1b[2J", 4);
-	write(STDOUT_FILENO, "\x1b[H", 3);
-}
-
-/* Enables mouse tracking using SGR extended mode. This allows us to receive
- * click, drag, and scroll events with coordinates that work beyond column 223. */
-static void terminal_enable_mouse(void)
-{
-	write(STDOUT_FILENO, "\x1b[?1000h", 8);  /* Enable button events */
-	write(STDOUT_FILENO, "\x1b[?1002h", 8);  /* Enable button + drag events */
-	write(STDOUT_FILENO, "\x1b[?1006h", 8);  /* Enable SGR extended mode */
-}
-
-/* Disables mouse tracking. Called at cleanup to restore terminal state. */
-static void terminal_disable_mouse(void)
-{
-	write(STDOUT_FILENO, "\x1b[?1006l", 8);
-	write(STDOUT_FILENO, "\x1b[?1002l", 8);
-	write(STDOUT_FILENO, "\x1b[?1000l", 8);
 }
 
 /*****************************************************************************
@@ -5659,8 +5549,7 @@ static int input_read_key(void)
 		if (read_count == -1 && errno != EAGAIN) {
 			return -1;
 		}
-		if (terminal_resized) {
-			terminal_resized = 0;
+		if (terminal_check_resize()) {
 			return -2;
 		}
 	}
@@ -7903,7 +7792,7 @@ static void editor_update_gutter_width(void)
  */
 static void editor_update_screen_size(void)
 {
-	int ret = terminal_get_size(&editor.screen_rows, &editor.screen_columns);
+	int ret = terminal_get_window_size(&editor.screen_rows, &editor.screen_columns);
 	if (ret) {
 		/* Fall back to standard 80x24 */
 		editor.screen_rows = 24;
@@ -12922,7 +12811,7 @@ static char *open_file_dialog(void)
 
 		/* Handle resize */
 		if (key == -2) {
-			if (terminal_get_size(&editor.screen_rows, &editor.screen_columns)) {
+			if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns)) {
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
 			}
@@ -13216,7 +13105,7 @@ static int theme_picker_dialog(void)
 
 		/* Handle resize */
 		if (key == -2) {
-			if (terminal_get_size(&editor.screen_rows, &editor.screen_columns)) {
+			if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns)) {
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
 			}
