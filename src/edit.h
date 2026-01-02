@@ -37,10 +37,11 @@
 #include "error.h"
 
 #include "terminal.h"
+#include "theme.h"
 
 /*
  * Module headers will be added as modules are extracted:
- * #include "theme.h"
+ * (theme.h already included above)
  * #include "buffer.h"
  * #include "syntax.h"
  * #include "undo.h"
