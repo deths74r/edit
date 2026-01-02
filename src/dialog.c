@@ -52,12 +52,13 @@ static const char *theme_indicator_char(enum theme_indicator ind)
 {
 	switch (ind) {
 		case THEME_INDICATOR_ASTERISK: return "*";
-		case THEME_INDICATOR_BULLET:   return "\xe2\x97\x8f";  /* U+25CF */
-		case THEME_INDICATOR_DIAMOND:  return "\xe2\x97\x86";  /* U+25C6 */
-		case THEME_INDICATOR_TRIANGLE: return "\xe2\x96\xb6";  /* U+25B6 */
-		case THEME_INDICATOR_CHECK:    return "\xe2\x9c\x93";  /* U+2713 */
-		case THEME_INDICATOR_ARROW:    return "\xe2\x86\x92";  /* U+2192 */
-		case THEME_INDICATOR_DOT:      return "\xe2\x80\xa2";  /* U+2022 */
+		case THEME_INDICATOR_BULLET:   return "\xe2\x97\x8f";  /* U+25CF ● */
+		case THEME_INDICATOR_DIAMOND:  return "\xe2\x97\x86";  /* U+25C6 ◆ */
+		case THEME_INDICATOR_TRIANGLE: return "\xe2\x96\xb6";  /* U+25B6 ▶ */
+		case THEME_INDICATOR_CHECK:    return "\xe2\x9c\x93";  /* U+2713 ✓ */
+		case THEME_INDICATOR_ARROW:    return "\xe2\x86\x92";  /* U+2192 → */
+		case THEME_INDICATOR_DOT:      return "\xe2\x80\xa2";  /* U+2022 • */
+		case THEME_INDICATOR_CHEVRON:  return "\xe2\x9d\xaf";  /* U+276F ❯ */
 		default: return "*";
 	}
 }
@@ -87,6 +88,9 @@ static void editor_cycle_theme_indicator(void)
 			editor.theme_indicator = THEME_INDICATOR_DOT;
 			break;
 		case THEME_INDICATOR_DOT:
+			editor.theme_indicator = THEME_INDICATOR_CHEVRON;
+			break;
+		case THEME_INDICATOR_CHEVRON:
 			editor.theme_indicator = THEME_INDICATOR_ASTERISK;
 			break;
 	}

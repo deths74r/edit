@@ -444,12 +444,13 @@ enum color_column_style {
 /* Theme selector indicator styles for the theme picker. */
 enum theme_indicator {
 	THEME_INDICATOR_ASTERISK = 0, /* * */
-	THEME_INDICATOR_BULLET,       /* */
-	THEME_INDICATOR_DIAMOND,      /* */
-	THEME_INDICATOR_TRIANGLE,     /* */
-	THEME_INDICATOR_CHECK,        /* */
-	THEME_INDICATOR_ARROW,        /* */
-	THEME_INDICATOR_DOT           /* */
+	THEME_INDICATOR_BULLET,       /* ● */
+	THEME_INDICATOR_DIAMOND,      /* ◆ */
+	THEME_INDICATOR_TRIANGLE,     /* ▶ */
+	THEME_INDICATOR_CHECK,        /* ✓ */
+	THEME_INDICATOR_ARROW,        /* → */
+	THEME_INDICATOR_DOT,          /* • */
+	THEME_INDICATOR_CHEVRON       /* ❯ */
 };
 
 /*****************************************************************************
