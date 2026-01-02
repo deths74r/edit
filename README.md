@@ -271,15 +271,14 @@ Unspecified keys inherit from the built-in default theme.
 
 ### Configuration
 
-Edit stores preferences in `~/.editrc`:
+Edit stores your theme preference in `~/.editrc`:
 
 ```
-theme: Tritanopia Dark
-wrap_mode: word
-wrap_indicator: return
-show_whitespace: false
-color_column: 80
+# edit configuration
+theme=Tritanopia Dark
 ```
+
+Other settings (wrap mode, whitespace visibility, color column) are not persisted and reset to defaults each session.
 
 ---
 
@@ -477,7 +476,7 @@ Edit runs a worker thread that processes a task queue. The main thread submits t
 | Editing model | Modeless | Modal |
 | Startup time | <10ms | ~50ms |
 | Plugin ecosystem | None | Thousands |
-| Configuration | 10-line ~/.editrc | Potentially hundreds of lines |
+| Configuration | ~/.editrc (theme only) | Potentially hundreds of lines |
 | Customization | Themes only | Infinitely scriptable |
 
 **When to use vim:** You've already learned it, or you need macros, plugins, advanced text objects, or the ability to customize every behavior.
