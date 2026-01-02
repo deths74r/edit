@@ -1349,12 +1349,12 @@ static void help_draw(void)
 	/* Draw header */
 	dialog_draw_header(&output, &help_state.dialog, "Help");
 
-	/* Draw content rows */
+	/* Draw content rows (start at panel_top + 2, after header) */
 	for (int row = 0; row < content_rows; row++) {
-		int screen_row = panel_top + 1 + row;
+		int screen_row = panel_top + 2 + row;
 		const struct help_item *item = &help_items[row];
 
-		dialog_goto(&output, screen_row, panel_left);
+		dialog_goto(&output, screen_row, panel_left + 1);
 		dialog_set_style(&output, &active_theme.dialog);
 
 		/* Build the line content */
