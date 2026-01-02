@@ -223,6 +223,14 @@ int input_read_key(void)
 						case '7': return KEY_HOME;
 						case '8': return KEY_END;
 					}
+				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
+					/* Two-digit sequences like \x1b[13~ for F3, \x1b[25~ for Shift+F3 */
+					char digit3;
+					if (read(STDIN_FILENO, &digit3, 1) == 1 && digit3 == '~') {
+						int code = (sequence[1] - '0') * 10 + (sequence[2] - '0');
+						if (code == 13) return KEY_F3;       /* F3 */
+						if (code == 25) return KEY_SHIFT_F3; /* Shift+F3 */
+					}
 				} else if (sequence[2] == ';') {
 					/* Modified key sequences */
 					char modifier, final;
