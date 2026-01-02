@@ -34,13 +34,6 @@ static struct timespec last_scroll_time = {0, 0};
 static double scroll_velocity = 0.0;
 static int last_scroll_direction = 0;  /* -1 = up, 1 = down, 0 = none */
 
-/* Internal clipboard buffer (fallback when system clipboard unavailable). */
-static char *internal_clipboard = NULL;
-static size_t internal_clipboard_length = 0;
-
-/* Clipboard tool detection (cached on first use). */
-static enum clipboard_tool detected_clipboard_tool = CLIPBOARD_UNKNOWN;
-
 /* Incremental search state (non-static for module access). */
 struct search_state search = {0};
 
@@ -1332,7 +1325,7 @@ static void selection_start(void)
 }
 
 /* Clear the current selection. After this, no text is selected. */
-static void selection_clear(void)
+void selection_clear(void)
 {
 	editor.selection_active = false;
 }
@@ -1586,7 +1579,7 @@ static bool selection_contains(uint32_t row, uint32_t column)
 }
 
 /* Check if the current selection is empty (anchor equals cursor). */
-static bool selection_is_empty(void)
+bool selection_is_empty(void)
 {
 	if (!editor.selection_active) {
 		return true;
@@ -1637,189 +1630,12 @@ static void editor_redo(void)
 	}
 }
 
-/*****************************************************************************
- * Clipboard Integration
- *****************************************************************************/
-
-/*
- * Detect which clipboard tool is available on the system.
- * Checks for wl-copy (Wayland), xclip, and xsel in order of preference.
- * Result is cached after first call.
- */
-static enum clipboard_tool clipboard_detect_tool(void)
-{
-	if (detected_clipboard_tool != CLIPBOARD_UNKNOWN) {
-		return detected_clipboard_tool;
-	}
-
-	/* Check for Wayland first if WAYLAND_DISPLAY is set */
-	if (getenv("WAYLAND_DISPLAY") != NULL) {
-		if (system("command -v wl-copy >/dev/null 2>&1") == 0) {
-			detected_clipboard_tool = CLIPBOARD_WL;
-			return detected_clipboard_tool;
-		}
-	}
-
-	/* Check for X11 tools */
-	if (system("command -v xclip >/dev/null 2>&1") == 0) {
-		detected_clipboard_tool = CLIPBOARD_XCLIP;
-		return detected_clipboard_tool;
-	}
-
-	if (system("command -v xsel >/dev/null 2>&1") == 0) {
-		detected_clipboard_tool = CLIPBOARD_XSEL;
-		return detected_clipboard_tool;
-	}
-
-	detected_clipboard_tool = CLIPBOARD_INTERNAL;
-	return detected_clipboard_tool;
-}
-
-/*
- * Copy the given text to the system clipboard. Falls back to internal
- * buffer if no clipboard tool is available. Returns true on success.
- */
-static bool clipboard_copy(const char *text, size_t length)
-{
-	if (text == NULL || length == 0) {
-		return false;
-	}
-
-	enum clipboard_tool tool = clipboard_detect_tool();
-
-	if (tool == CLIPBOARD_INTERNAL) {
-		/* Use internal buffer */
-		free(internal_clipboard);
-		internal_clipboard = malloc(length + 1);
-		if (internal_clipboard == NULL) {
-			return false;
-		}
-		memcpy(internal_clipboard, text, length);
-		internal_clipboard[length] = '\0';
-		internal_clipboard_length = length;
-		return true;
-	}
-
-	/* Use system clipboard */
-	const char *command = NULL;
-	switch (tool) {
-		case CLIPBOARD_XCLIP:
-			command = "xclip -selection clipboard";
-			break;
-		case CLIPBOARD_XSEL:
-			command = "xsel --clipboard --input";
-			break;
-		case CLIPBOARD_WL:
-			command = "wl-copy";
-			break;
-		default:
-			return false;
-	}
-
-	FILE *pipe = popen(command, "w");
-	if (pipe == NULL) {
-		return false;
-	}
-
-	size_t written = fwrite(text, 1, length, pipe);
-	int status = pclose(pipe);
-
-	return written == length && status == 0;
-}
-
-/*
- * Paste from the system clipboard. Returns a newly allocated string
- * that the caller must free, or NULL on failure. Sets *out_length
- * to the length of the returned string (excluding null terminator).
- */
-static char *clipboard_paste(size_t *out_length)
-{
-	enum clipboard_tool tool = clipboard_detect_tool();
-
-	if (tool == CLIPBOARD_INTERNAL) {
-		/* Use internal buffer */
-		if (internal_clipboard == NULL || internal_clipboard_length == 0) {
-			*out_length = 0;
-			return NULL;
-		}
-		char *copy = malloc(internal_clipboard_length + 1);
-		if (copy == NULL) {
-			*out_length = 0;
-			return NULL;
-		}
-		memcpy(copy, internal_clipboard, internal_clipboard_length);
-		copy[internal_clipboard_length] = '\0';
-		*out_length = internal_clipboard_length;
-		return copy;
-	}
-
-	/* Use system clipboard */
-	const char *command = NULL;
-	switch (tool) {
-		case CLIPBOARD_XCLIP:
-			command = "xclip -selection clipboard -o";
-			break;
-		case CLIPBOARD_XSEL:
-			command = "xsel --clipboard --output";
-			break;
-		case CLIPBOARD_WL:
-			command = "wl-paste -n";  /* -n: no trailing newline */
-			break;
-		default:
-			*out_length = 0;
-			return NULL;
-	}
-
-	FILE *pipe = popen(command, "r");
-	if (pipe == NULL) {
-		*out_length = 0;
-		return NULL;
-	}
-
-	/* Read clipboard contents dynamically */
-	size_t capacity = 4096;
-	size_t length = 0;
-	char *buffer = malloc(capacity);
-	if (buffer == NULL) {
-		pclose(pipe);
-		*out_length = 0;
-		return NULL;
-	}
-
-	while (!feof(pipe)) {
-		if (length + 1024 > capacity) {
-			capacity *= 2;
-			char *new_buffer = realloc(buffer, capacity);
-			if (new_buffer == NULL) {
-				free(buffer);
-				pclose(pipe);
-				*out_length = 0;
-				return NULL;
-			}
-			buffer = new_buffer;
-		}
-
-		size_t read_count = fread(buffer + length, 1, 1024, pipe);
-		length += read_count;
-
-		if (read_count == 0) {
-			break;
-		}
-	}
-
-	pclose(pipe);
-
-	buffer[length] = '\0';
-	*out_length = length;
-	return buffer;
-}
-
 /*
  * Extract the currently selected text as a UTF-8 string.
  * Returns a newly allocated string that the caller must free,
  * or NULL if no selection. Sets *out_length to string length.
  */
-static char *selection_get_text(size_t *out_length)
+char *selection_get_text(size_t *out_length)
 {
 	if (!editor.selection_active || selection_is_empty()) {
 		*out_length = 0;
@@ -2630,7 +2446,7 @@ static void editor_move_cursor(int key)
  * Delete the currently selected text. Handles both single-line and
  * multi-line selections. Moves cursor to the start of the deleted region.
  */
-static void editor_delete_selection(void)
+void editor_delete_selection(void)
 {
 	if (!editor.selection_active || selection_is_empty()) {
 		return;
@@ -2702,145 +2518,6 @@ static void editor_delete_selection(void)
 
 	editor.buffer.is_modified = true;
 	selection_clear();
-}
-
-/*
- * Copy the current selection to the clipboard without deleting it.
- */
-static void editor_copy(void)
-{
-	if (!editor.selection_active || selection_is_empty()) {
-		editor_set_status_message("Nothing to copy");
-		return;
-	}
-
-	size_t length;
-	char *text = selection_get_text(&length);
-	if (text == NULL) {
-		editor_set_status_message("Copy failed");
-		return;
-	}
-
-	if (clipboard_copy(text, length)) {
-		editor_set_status_message("Copied %zu bytes", length);
-	} else {
-		editor_set_status_message("Copy to clipboard failed");
-	}
-
-	free(text);
-}
-
-/*
- * Cut the current selection: copy to clipboard and delete.
- */
-static void editor_cut(void)
-{
-	if (!editor.selection_active || selection_is_empty()) {
-		editor_set_status_message("Nothing to cut");
-		return;
-	}
-
-	size_t length;
-	char *text = selection_get_text(&length);
-	if (text == NULL) {
-		editor_set_status_message("Cut failed");
-		return;
-	}
-
-	if (clipboard_copy(text, length)) {
-		editor_delete_selection();
-		editor_set_status_message("Cut %zu bytes", length);
-	} else {
-		editor_set_status_message("Cut to clipboard failed");
-	}
-
-	free(text);
-}
-
-/*
- * Paste from clipboard at current cursor position.
- * If there's a selection, replaces it with pasted content.
- */
-static void editor_paste(void)
-{
-	size_t length;
-	char *text = clipboard_paste(&length);
-
-	if (text == NULL || length == 0) {
-		editor_set_status_message("Clipboard empty");
-		free(text);
-		return;
-	}
-
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
-
-	/* Delete selection if active */
-	if (editor.selection_active && !selection_is_empty()) {
-		editor_delete_selection();
-	}
-
-	/* Track starting row for re-highlighting */
-	uint32_t start_row = editor.cursor_row;
-
-	/* Insert text character by character, handling newlines */
-	size_t offset = 0;
-	uint32_t chars_inserted = 0;
-	int ret = 0;
-
-	while (offset < length) {
-		uint32_t codepoint;
-		int bytes = utflite_decode(text + offset, length - offset, &codepoint);
-
-		if (bytes <= 0) {
-			/* Invalid UTF-8, skip one byte */
-			offset++;
-			continue;
-		}
-
-		if (codepoint == '\n') {
-			undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
-			ret = buffer_insert_newline_checked(&editor.buffer, editor.cursor_row,
-			                                     editor.cursor_column);
-			if (ret)
-				break;
-			editor.cursor_row++;
-			editor.cursor_column = 0;
-		} else if (codepoint == '\r') {
-			/* Skip carriage returns (Windows line endings) */
-		} else {
-			undo_record_insert_char(&editor.buffer, editor.cursor_row,
-			                        editor.cursor_column, codepoint);
-			ret = buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
-			                                            editor.cursor_column, codepoint);
-			if (ret)
-				break;
-			editor.cursor_column++;
-		}
-
-		chars_inserted++;
-		offset += bytes;
-	}
-
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
-
-	if (ret) {
-		editor_set_status_message("Paste failed after %u chars: %s",
-		                          chars_inserted, edit_strerror(ret));
-	}
-
-	/* Recompute pairs and re-highlight affected lines */
-	buffer_compute_pairs(&editor.buffer);
-	for (uint32_t row = start_row; row <= editor.cursor_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
-			syntax_highlight_line(line, &editor.buffer, row);
-		}
-	}
-
-	free(text);
-	editor.buffer.is_modified = true;
-	if (!ret)
-		editor_set_status_message("Pasted %u characters", chars_inserted);
 }
 
 /*
@@ -6111,7 +5788,7 @@ static void editor_perform_exit(void)
 	}
 	search_cleanup();
 	worker_shutdown();
-	free(internal_clipboard);
+	clipboard_cleanup();
 	buffer_free(&editor.buffer);
 	themes_free();
 	free(active_theme.name);
