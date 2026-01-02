@@ -13,13 +13,21 @@ This is not a vim replacement. If you've invested years in vim, you've probably 
 ## Quick Start
 
 ```bash
-git clone https://github.com/yourusername/edit.git
+git clone https://github.com/edwardedmonds/edit.git
 cd edit
 make
 ./edit yourfile.txt
 ```
 
 That's it. No configuration required. No plugins to install. No tutorial to complete before you can type characters into a file.
+
+To install system-wide:
+
+```bash
+make install      # installs to ~/.local/bin
+make uninstall    # removes it
+make clean        # removes build artifacts
+```
 
 ### Essential Keybindings
 
