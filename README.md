@@ -29,22 +29,69 @@ make uninstall    # removes it
 make clean        # removes build artifacts
 ```
 
-### Essential Keybindings
+### Keyboard Shortcuts
 
-| Action | Key |
-|--------|-----|
-| New file | Ctrl+N |
-| Save | Ctrl+S |
-| Open file | Ctrl+O |
-| Quit | Ctrl+Q |
-| Undo / Redo | Ctrl+Z / Ctrl+Y |
-| Copy / Cut / Paste | Ctrl+C / Ctrl+X / Ctrl+V |
-| Find | Ctrl+F |
-| Find & Replace | Ctrl+H |
-| Find next / previous | F3 / Shift+F3 |
-| Go to line | Ctrl+G |
-| Go to file start / end | Ctrl+Home / Ctrl+End |
-| Select all | Ctrl+A |
+**File Operations**
+| Key | Action |
+|-----|--------|
+| Ctrl+N | New file |
+| Ctrl+S | Save |
+| Alt+Shift+S | Save As |
+| Ctrl+O | Open file |
+| Ctrl+Q | Quit |
+| Ctrl+T | Theme picker |
+
+**Navigation**
+| Key | Action |
+|-----|--------|
+| Arrow keys | Move cursor |
+| Ctrl+Left/Right | Move by word |
+| Home / End | Go to line start / end |
+| Page Up / Page Down | Page navigation |
+| Ctrl+Home / Ctrl+End | Go to file start / end |
+| Ctrl+G | Go to line |
+| Alt+] | Jump to matching bracket |
+
+**Selection**
+| Key | Action |
+|-----|--------|
+| Shift+Arrow keys | Extend selection |
+| Shift+Home / Shift+End | Select to line start / end |
+| Shift+Page Up/Down | Select by page |
+| Ctrl+Shift+Left/Right | Select by word |
+| Ctrl+A | Select all |
+| Ctrl+D | Add cursor at next occurrence |
+
+**Editing**
+| Key | Action |
+|-----|--------|
+| Ctrl+C / Ctrl+X / Ctrl+V | Copy / Cut / Paste |
+| Ctrl+Z / Ctrl+Y | Undo / Redo |
+| Backspace / Delete | Delete character |
+| Alt+K | Delete line |
+| Alt+D | Duplicate line |
+| Alt+Up / Alt+Down | Move line up / down |
+| Alt+/ | Toggle comment |
+
+**Search**
+| Key | Action |
+|-----|--------|
+| Ctrl+F | Find |
+| Ctrl+H | Find & Replace |
+| F3 / Alt+N | Find next |
+| Shift+F3 / Alt+P | Find previous |
+| Alt+A | Find all (add cursors at all matches) |
+| Alt+C | Toggle case sensitivity (in search) |
+| Alt+W | Toggle whole word (in search) |
+| Alt+R | Toggle regex (in search) |
+
+**View**
+| Key | Action |
+|-----|--------|
+| Alt+L | Toggle line numbers |
+| Alt+Shift+W | Toggle whitespace indicators |
+| Alt+Shift+C | Cycle color column (off → 80 → 120) |
+| Alt+Z | Cycle wrap mode (off → char → word) |
 
 If you've used any text editor in the last thirty years, you already know how to use edit.
 
