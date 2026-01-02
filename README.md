@@ -40,6 +40,7 @@ make clean        # removes build artifacts
 | Ctrl+O | Open file |
 | Ctrl+Q | Quit |
 | Ctrl+T | Theme picker |
+| F1 | Help |
 
 **Navigation**
 | Key | Action |

@@ -232,6 +232,7 @@ int input_read_key(void)
 					}
 					int code = (sequence[1] - '0') * 10 + (sequence[2] - '0');
 					if (digit3 == '~') {
+						if (code == 11) return KEY_F1;       /* F1 */
 						if (code == 13) return KEY_F3;       /* F3 */
 						if (code == 25) return KEY_SHIFT_F3; /* Shift+F3 */
 					} else if (digit3 == ';') {
@@ -319,6 +320,7 @@ int input_read_key(void)
 			switch (sequence[1]) {
 				case 'H': return KEY_HOME;
 				case 'F': return KEY_END;
+				case 'P': return KEY_F1;  /* F1 in xterm */
 				case 'R': return KEY_F3;  /* F3 in xterm */
 			}
 		}

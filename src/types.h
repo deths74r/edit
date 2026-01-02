@@ -255,6 +255,7 @@ enum key_code {
 	KEY_CTRL_END = -49,
 
 	/* Function keys. */
+	KEY_F1 = -45,
 	KEY_F3 = -48,
 	KEY_SHIFT_F3 = -47,
 

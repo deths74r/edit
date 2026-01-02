@@ -1244,3 +1244,212 @@ int theme_picker_dialog(void)
 
 	return result;
 }
+
+/*****************************************************************************
+ * Help Dialog
+ *****************************************************************************/
+
+/* Help item: can be a header or a keybinding entry */
+struct help_item {
+	const char *key;         /* Key combination (NULL for headers) */
+	const char *description; /* Description or header text */
+};
+
+/* All keyboard shortcuts organized by category */
+static const struct help_item help_items[] = {
+	{NULL, "FILE OPERATIONS"},
+	{"Ctrl+N", "New file"},
+	{"Ctrl+S", "Save"},
+	{"Alt+Shift+S", "Save As"},
+	{"Ctrl+O", "Open file"},
+	{"Ctrl+Q", "Quit"},
+	{"Ctrl+T", "Theme picker"},
+	{"F1", "Help"},
+	{NULL, ""},
+	{NULL, "NAVIGATION"},
+	{"Arrow keys", "Move cursor"},
+	{"Ctrl+Left/Right", "Move by word"},
+	{"Home / End", "Line start / end"},
+	{"Page Up/Down", "Page navigation"},
+	{"Ctrl+Home/End", "File start / end"},
+	{"Ctrl+G", "Go to line"},
+	{"Alt+]", "Jump to matching bracket"},
+	{NULL, ""},
+	{NULL, "SELECTION"},
+	{"Shift+Arrows", "Extend selection"},
+	{"Shift+Home/End", "Select to line start / end"},
+	{"Shift+Page Up/Down", "Select by page"},
+	{"Ctrl+Shift+Left/Right", "Select by word"},
+	{"Ctrl+A", "Select all"},
+	{"Ctrl+D", "Add cursor at next occurrence"},
+	{NULL, ""},
+	{NULL, "EDITING"},
+	{"Ctrl+C / X / V", "Copy / Cut / Paste"},
+	{"Ctrl+Z / Y", "Undo / Redo"},
+	{"Backspace / Delete", "Delete character"},
+	{"Alt+K", "Delete line"},
+	{"Alt+D", "Duplicate line"},
+	{"Alt+Up/Down", "Move line up / down"},
+	{"Alt+/", "Toggle comment"},
+	{NULL, ""},
+	{NULL, "SEARCH"},
+	{"Ctrl+F", "Find"},
+	{"Ctrl+H", "Find & Replace"},
+	{"F3 / Alt+N", "Find next"},
+	{"Shift+F3 / Alt+P", "Find previous"},
+	{"Alt+A", "Find all (multi-cursor)"},
+	{"Alt+C", "Toggle case sensitivity"},
+	{"Alt+W", "Toggle whole word"},
+	{"Alt+R", "Toggle regex"},
+	{NULL, ""},
+	{NULL, "VIEW"},
+	{"Alt+L", "Toggle line numbers"},
+	{"Alt+Shift+W", "Toggle whitespace"},
+	{"Alt+Shift+C", "Cycle color column"},
+	{"Alt+Z", "Cycle wrap mode"},
+};
+
+static const int help_item_count = sizeof(help_items) / sizeof(help_items[0]);
+
+/* Help dialog state */
+static struct {
+	struct dialog_state dialog;
+} help_state;
+
+/*
+ * Draw the help dialog panel.
+ */
+static void help_draw(void)
+{
+	struct output_buffer output;
+	output_buffer_init(&output);
+
+	/* Recalculate dimensions in case of resize */
+	dialog_calculate_dimensions(&help_state.dialog);
+
+	/* Draw header */
+	dialog_draw_header(&output, &help_state.dialog, "Help - Keyboard Shortcuts");
+
+	/* Draw content rows */
+	for (int row = 0; row < help_state.dialog.visible_rows; row++) {
+		int item_index = help_state.dialog.scroll_offset + row;
+		int screen_row = help_state.dialog.panel_top + 1 + row;
+
+		dialog_goto(&output, screen_row, help_state.dialog.panel_left);
+
+		if (item_index < help_state.dialog.item_count) {
+			const struct help_item *item = &help_items[item_index];
+			bool is_selected = (item_index == help_state.dialog.selected_index);
+
+			/* Set background for selected item */
+			if (is_selected) {
+				dialog_set_style(&output, &active_theme.dialog_highlight);
+			} else {
+				dialog_set_style(&output, &active_theme.dialog);
+			}
+
+			/* Build the line content */
+			char line[256];
+			if (item->key == NULL) {
+				/* Header or blank line */
+				if (item->description[0] == '\0') {
+					/* Blank line */
+					snprintf(line, sizeof(line), "%*s",
+					         help_state.dialog.panel_width, "");
+				} else {
+					/* Category header - centered */
+					int desc_len = (int)strlen(item->description);
+					int padding = (help_state.dialog.panel_width - desc_len) / 2;
+					if (padding < 1) padding = 1;
+					snprintf(line, sizeof(line), "%*s%s%*s",
+					         padding, "", item->description,
+					         help_state.dialog.panel_width - padding - desc_len, "");
+				}
+			} else {
+				/* Keybinding entry: "  Key              Description" */
+				snprintf(line, sizeof(line), "  %-18s %s",
+				         item->key, item->description);
+				/* Pad to panel width */
+				int line_len = (int)strlen(line);
+				if (line_len < help_state.dialog.panel_width) {
+					int pad = help_state.dialog.panel_width - line_len;
+					memset(line + line_len, ' ', pad);
+					line[help_state.dialog.panel_width] = '\0';
+				}
+			}
+
+			output_buffer_append_string(&output, line);
+		} else {
+			/* Empty row past end of list */
+			dialog_draw_empty_row(&output, &help_state.dialog, row);
+		}
+	}
+
+	/* Draw footer */
+	dialog_draw_footer(&output, &help_state.dialog, "Arrow keys to scroll, Escape to close");
+
+	output_buffer_flush(&output);
+	output_buffer_free(&output);
+}
+
+/*
+ * Show the Help dialog with all keyboard shortcuts.
+ */
+void help_dialog(void)
+{
+	/* Initialize state */
+	memset(&help_state, 0, sizeof(help_state));
+	help_state.dialog.active = true;
+	help_state.dialog.item_count = help_item_count;
+	help_state.dialog.selected_index = 0;
+
+	/* Calculate initial dimensions */
+	dialog_calculate_dimensions(&help_state.dialog);
+	dialog_ensure_visible(&help_state.dialog);
+
+	/* Enable dialog mouse mode and flush pending input */
+	input_set_dialog_mouse_mode(true);
+	tcflush(STDIN_FILENO, TCIFLUSH);
+
+	while (help_state.dialog.active) {
+		help_draw();
+
+		/* Read input */
+		int key = input_read_key();
+
+		if (key == -1) {
+			continue;
+		}
+
+		/* Handle resize */
+		if (key == KEY_RESIZE) {
+			if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns)) {
+				editor.screen_rows = 24;
+				editor.screen_columns = 80;
+			}
+			int __unused = render_refresh_screen(); (void)__unused;
+			continue;
+		}
+
+		/* Check for mouse event */
+		if (key == KEY_MOUSE_EVENT) {
+			struct mouse_input last_mouse = input_get_last_mouse();
+			enum dialog_result dr = dialog_handle_mouse(&help_state.dialog, &last_mouse);
+
+			if (dr == DIALOG_CANCEL) {
+				help_state.dialog.active = false;
+			}
+			/* No confirm action for help dialog - just scroll/navigate */
+			continue;
+		}
+
+		/* Handle generic dialog keys */
+		enum dialog_result dr = dialog_handle_key(&help_state.dialog, key);
+
+		if (dr == DIALOG_CONFIRM || dr == DIALOG_CANCEL) {
+			help_state.dialog.active = false;
+		}
+	}
+
+	dialog_close(&help_state.dialog);
+}

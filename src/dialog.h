@@ -175,4 +175,13 @@ char *open_file_dialog(void);
  */
 int theme_picker_dialog(void);
 
+/*****************************************************************************
+ * Help Dialog
+ *****************************************************************************/
+
+/*
+ * Show the Help dialog with all keyboard shortcuts.
+ */
+void help_dialog(void);
+
 #endif /* EDIT_DIALOG_H */

@@ -6186,6 +6186,10 @@ void editor_process_keypress(void)
 			editor_command_theme_picker();
 			break;
 
+		case KEY_F1:
+			help_dialog();
+			break;
+
 		case KEY_CTRL_N:
 			/* New file - prompt to save if modified, then clear buffer */
 			if (editor.buffer.is_modified) {
