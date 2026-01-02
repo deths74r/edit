@@ -225,11 +225,27 @@ int input_read_key(void)
 					}
 				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
 					/* Two-digit sequences like \x1b[13~ for F3, \x1b[25~ for Shift+F3 */
+					/* Also handles \x1b[13;2~ format (code;modifier~) */
 					char digit3;
-					if (read(STDIN_FILENO, &digit3, 1) == 1 && digit3 == '~') {
-						int code = (sequence[1] - '0') * 10 + (sequence[2] - '0');
+					if (read(STDIN_FILENO, &digit3, 1) != 1) {
+						return '\x1b';
+					}
+					int code = (sequence[1] - '0') * 10 + (sequence[2] - '0');
+					if (digit3 == '~') {
 						if (code == 13) return KEY_F3;       /* F3 */
 						if (code == 25) return KEY_SHIFT_F3; /* Shift+F3 */
+					} else if (digit3 == ';') {
+						/* Modified two-digit key: \x1b[13;2~ = Shift+F3 */
+						char modifier, final;
+						if (read(STDIN_FILENO, &modifier, 1) != 1) {
+							return '\x1b';
+						}
+						if (read(STDIN_FILENO, &final, 1) != 1) {
+							return '\x1b';
+						}
+						if (final == '~' && modifier == '2') {  /* Shift modifier */
+							if (code == 13) return KEY_SHIFT_F3;
+						}
 					}
 				} else if (sequence[2] == ';') {
 					/* Modified key sequences */
