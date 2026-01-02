@@ -114,7 +114,7 @@ struct buffer_snapshot *buffer_snapshot_create(void)
 
 	uint32_t line_count = editor.buffer.line_count;
 	snapshot->line_count = line_count;
-	strncpy(snapshot->swap_path, autosave.swap_path, PATH_MAX - 1);
+	snprintf(snapshot->swap_path, PATH_MAX, "%s", autosave.swap_path);
 
 	if (line_count == 0) {
 		snapshot->lines = NULL;
@@ -240,7 +240,7 @@ int worker_process_autosave(struct task *task, struct task_result *result)
 	}
 
 	/* Write to temporary file first, then rename (atomic) */
-	char tmp_path[PATH_MAX];
+	char tmp_path[PATH_MAX + 8];
 	snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", snapshot->swap_path);
 
 	FILE *fp = fopen(tmp_path, "w");
@@ -431,7 +431,7 @@ void autosave_check(void)
 		.type = TASK_AUTOSAVE,
 		.task_id = task_generate_id()
 	};
-	strncpy(task.autosave.swap_path, autosave.swap_path, PATH_MAX - 1);
+	snprintf(task.autosave.swap_path, PATH_MAX, "%s", autosave.swap_path);
 
 	int err = task_queue_push(&task);
 	if (err == 0) {

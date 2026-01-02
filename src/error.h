@@ -131,29 +131,24 @@ extern void terminal_disable_raw_mode(void);
 
 /*
  * WARN - Log a warning if condition is true, with formatted message.
- * Returns the condition value for use in if statements.
  */
-#define WARN(condition, fmt, ...) ({					\
-	int __warn_cond = !!(condition);				\
-	if (unlikely(__warn_cond)) {					\
-		fprintf(stderr, "WARNING: %s:%d: " fmt "\n",		\
-			__FILE__, __LINE__, ##__VA_ARGS__);		\
+#define WARN(condition, ...) do {					\
+	if (unlikely(condition)) {					\
+		fprintf(stderr, "WARNING: %s:%d: ", __FILE__, __LINE__);	\
+		fprintf(stderr, __VA_ARGS__);				\
+		fprintf(stderr, "\n");					\
 	}								\
-	__warn_cond;							\
-})
+} while (0)
 
 /*
  * WARN_ON - Log a warning if condition is true.
- * Returns the condition value.
  */
-#define WARN_ON(condition) ({						\
-	int __warn_cond = !!(condition);				\
-	if (unlikely(__warn_cond)) {					\
-		fprintf(stderr, "WARNING: %s:%d: %s\n",			\
+#define WARN_ON(condition) do {					\
+	if (unlikely(condition)) {					\
+		fprintf(stderr, "WARNING: %s:%d: %s\n",		\
 			__FILE__, __LINE__, #condition);		\
 	}								\
-	__warn_cond;							\
-})
+} while (0)
 
 /*
  * WARN_ON_ONCE - Like WARN_ON but only triggers once per call site.
@@ -297,23 +292,24 @@ static inline char * __must_check edit_strdup(const char *s)
 #define LOG_LEVEL	LOG_WARN
 #endif
 
-#define edit_log(level, fmt, ...) do {					\
+#define edit_log(level, ...) do {					\
 	if ((level) <= LOG_LEVEL) {					\
 		const char *__level_str[] = {"ERR", "WARN", "INFO", "DBG"}; \
-		fprintf(stderr, "[%s] %s:%d: " fmt "\n",		\
-			__level_str[level], __FILE__, __LINE__,		\
-			##__VA_ARGS__);					\
+		fprintf(stderr, "[%s] %s:%d: ",			\
+			__level_str[level], __FILE__, __LINE__);	\
+		fprintf(stderr, __VA_ARGS__);				\
+		fprintf(stderr, "\n");					\
 	}								\
 } while (0)
 
-#define log_err(fmt, ...)	edit_log(LOG_ERR, fmt, ##__VA_ARGS__)
-#define log_warn(fmt, ...)	edit_log(LOG_WARN, fmt, ##__VA_ARGS__)
-#define log_info(fmt, ...)	edit_log(LOG_INFO, fmt, ##__VA_ARGS__)
+#define log_err(...)	edit_log(LOG_ERR, __VA_ARGS__)
+#define log_warn(...)	edit_log(LOG_WARN, __VA_ARGS__)
+#define log_info(...)	edit_log(LOG_INFO, __VA_ARGS__)
 
 #ifdef DEBUG
-#define log_debug(fmt, ...)	edit_log(LOG_DEBUG, fmt, ##__VA_ARGS__)
+#define log_debug(...)	edit_log(LOG_DEBUG, __VA_ARGS__)
 #else
-#define log_debug(fmt, ...)	do { } while (0)
+#define log_debug(...)	do { } while (0)
 #endif
 
 /*****************************************************************************

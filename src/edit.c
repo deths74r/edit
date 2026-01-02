@@ -4135,17 +4135,6 @@ static int search_match_type(uint32_t row, uint32_t column)
  *****************************************************************************/
 
 /*
- * Output an ANSI escape sequence for the given syntax token type.
- * Includes foreground color, background color, and text attributes.
- */
-static void render_set_syntax_style(struct output_buffer *output, enum syntax_token type)
-{
-	char escape[128];
-	int length = style_to_escape(&active_theme.syntax[type], escape, sizeof(escape));
-	output_buffer_append(output, escape, length);
-}
-
-/*
  * Render a segment of a line's content to the output buffer.
  *
  * Two rendering modes:
