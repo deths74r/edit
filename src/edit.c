@@ -37,23 +37,6 @@ static int last_scroll_direction = 0;  /* -1 = up, 1 = down, 0 = none */
 /* Incremental search state (non-static for module access). */
 struct search_state search = {0};
 
-/* Go-to-line mode state. */
-static struct goto_state goto_line = {0};
-
-/* Save As mode state. */
-static struct save_as_state save_as = {0};
-
-/* Quit prompt state - shown when quitting with unsaved changes. */
-static struct quit_prompt_state quit_prompt = {0};
-
-/* Forward declaration for mouse handler. */
-static void editor_handle_mouse(struct mouse_input *mouse);
-
-/* search_find_next and search_find_previous are declared in search.h */
-
-/* Forward declaration for worker thread result processing (non-static for module access). */
-void editor_set_status_message(const char *format, ...);
-
 /*****************************************************************************
  * Worker Task Processing
  *****************************************************************************/
@@ -1200,7 +1183,7 @@ static int __must_check file_open(struct buffer *buffer, const char *filename)
  *   -EINVAL if buffer->filename is NULL
  *   -errno from fopen(), fwrite(), or fclose()
  */
-static int __must_check file_save(struct buffer *buffer)
+int __must_check file_save(struct buffer *buffer)
 {
 	if (buffer->filename == NULL)
 		return -EINVAL;
@@ -1262,73 +1245,7 @@ static int __must_check file_save(struct buffer *buffer)
 	return 0;
 }
 
-/*****************************************************************************
- * Editor Operations
- *****************************************************************************/
-
-/*
- * Initialize the global editor state. Sets up an empty buffer and zeroes
- * all cursor positions, scroll offsets, and screen dimensions. Line numbers
- * are shown by default. The quit confirmation counter starts at its maximum.
- */
-static void editor_init(void)
-{
-	buffer_init(&editor.buffer);
-	editor.cursor_row = 0;
-	editor.cursor_column = 0;
-	editor.row_offset = 0;
-	editor.column_offset = 0;
-	editor.screen_rows = 0;
-	editor.screen_columns = 0;
-	editor.gutter_width = 0;
-	editor.show_line_numbers = true;
-	editor.status_message[0] = '\0';
-	editor.status_message_time = 0;
-	editor.selection_anchor_row = 0;
-	editor.selection_anchor_column = 0;
-	editor.selection_active = false;
-	editor.wrap_mode = WRAP_WORD;
-	editor.wrap_indicator = WRAP_INDICATOR_RETURN;
-	editor.show_whitespace = false;
-	editor.color_column = 0;
-	editor.color_column_style = COLOR_COLUMN_SOLID;
-	editor.theme_indicator = THEME_INDICATOR_CHECK;
-	editor.cursor_count = 0;
-	editor.primary_cursor = 0;
-
-	/* Initialize theme system */
-	themes_load();
-	config_load();
-	theme_apply_by_index(current_theme_index);
-
-	/* Initialize worker thread */
-	int err = worker_init();
-	if (err) {
-		log_warn("Worker thread disabled: %s", edit_strerror(err));
-		/* Continue without background processing - not fatal */
-	}
-
-	/* Initialize search system (async search and replace) */
-	err = search_init();
-	if (err) {
-		log_warn("Async search/replace disabled: %s", edit_strerror(err));
-	}
-}
-
-/* Start a new selection at the current cursor position. The anchor is set
- * to the cursor position and selection becomes active. */
-static void selection_start(void)
-{
-	editor.selection_anchor_row = editor.cursor_row;
-	editor.selection_anchor_column = editor.cursor_column;
-	editor.selection_active = true;
-}
-
-/* Clear the current selection. After this, no text is selected. */
-void selection_clear(void)
-{
-	editor.selection_active = false;
-}
+/* selection_clear is now in editor.c but kept here for compatibility */
 
 /*****************************************************************************
  * Multi-Cursor Management
@@ -1517,30 +1434,6 @@ static bool multicursor_selection_contains(uint32_t row, uint32_t column)
  * Selection Range Functions
  *****************************************************************************/
 
-/* Get the normalized selection range (start always before end). The selection
- * spans from (start_row, start_col) to (end_row, end_col) where start <= end. */
-static void selection_get_range(uint32_t *start_row, uint32_t *start_col,
-                                uint32_t *end_row, uint32_t *end_col)
-{
-	uint32_t anchor_row = editor.selection_anchor_row;
-	uint32_t anchor_col = editor.selection_anchor_column;
-	uint32_t cursor_row = editor.cursor_row;
-	uint32_t cursor_col = editor.cursor_column;
-
-	if (anchor_row < cursor_row ||
-	    (anchor_row == cursor_row && anchor_col <= cursor_col)) {
-		*start_row = anchor_row;
-		*start_col = anchor_col;
-		*end_row = cursor_row;
-		*end_col = cursor_col;
-	} else {
-		*start_row = cursor_row;
-		*start_col = cursor_col;
-		*end_row = anchor_row;
-		*end_col = anchor_col;
-	}
-}
-
 /* Check if a cell position is within the selection. Returns false if no
  * selection is active or if the position is outside the selected range. */
 static bool selection_contains(uint32_t row, uint32_t column)
@@ -1576,58 +1469,6 @@ static bool selection_contains(uint32_t row, uint32_t column)
 
 	/* Row is between start and end */
 	return true;
-}
-
-/* Check if the current selection is empty (anchor equals cursor). */
-bool selection_is_empty(void)
-{
-	if (!editor.selection_active) {
-		return true;
-	}
-	return editor.selection_anchor_row == editor.cursor_row &&
-	       editor.selection_anchor_column == editor.cursor_column;
-}
-
-/*****************************************************************************
- * Undo/Redo Editor Commands
- *****************************************************************************/
-
-/*
- * Undo the most recent group of operations.
- */
-static void editor_undo(void)
-{
-	/* End any in-progress group */
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
-
-	uint32_t new_row, new_col;
-	if (undo_perform(&editor.buffer, &new_row, &new_col)) {
-		editor.cursor_row = new_row;
-		editor.cursor_column = new_col;
-		selection_clear();
-		editor_set_status_message("Undo");
-	} else {
-		editor_set_status_message("Nothing to undo");
-	}
-}
-
-/*
- * Redo the most recently undone group of operations.
- */
-static void editor_redo(void)
-{
-	/* End any in-progress group */
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
-
-	uint32_t new_row, new_col;
-	if (redo_perform(&editor.buffer, &new_row, &new_col)) {
-		editor.cursor_row = new_row;
-		editor.cursor_column = new_col;
-		selection_clear();
-		editor_set_status_message("Redo");
-	} else {
-		editor_set_status_message("Nothing to redo");
-	}
 }
 
 /*
@@ -1688,146 +1529,6 @@ char *selection_get_text(size_t *out_length)
 	buffer[offset] = '\0';
 	*out_length = offset;
 	return buffer;
-}
-
-/*
- * Calculate the width of the line number gutter. The gutter expands to
- * fit the number of digits needed for the highest line number, with a
- * minimum of 2 digits plus one space for padding. Set to 0 when line
- * numbers are disabled.
- */
-static void editor_update_gutter_width(void)
-{
-	if (!editor.show_line_numbers) {
-		editor.gutter_width = 0;
-		return;
-	}
-
-	/* Calculate digits needed for line count */
-	uint32_t line_count = editor.buffer.line_count;
-	if (line_count == 0) {
-		line_count = 1;
-	}
-
-	uint32_t digits = 0;
-	while (line_count > 0) {
-		digits++;
-		line_count /= 10;
-	}
-
-	/* Minimum 2 digits, plus 1 space after */
-	if (digits < 2) {
-		digits = 2;
-	}
-	editor.gutter_width = digits + 1;
-}
-
-/*
- * Query the terminal size and update editor dimensions. Falls back to
- * 80x24 if the size cannot be determined. Reserves 2 rows at the bottom
- * for the status bar and message bar.
- */
-static void editor_update_screen_size(void)
-{
-	int ret = terminal_get_window_size(&editor.screen_rows, &editor.screen_columns);
-	if (ret) {
-		/* Fall back to standard 80x24 */
-		editor.screen_rows = 24;
-		editor.screen_columns = 80;
-	}
-	/* Reserve space for status bar and message bar */
-	editor.screen_rows -= 2;
-
-	/* Terminal width changed, invalidate all wrap caches. */
-	buffer_invalidate_all_wrap_caches(&editor.buffer);
-}
-
-/*
- * Set a formatted status message to display at the bottom of the screen.
- * Uses printf-style formatting. The message timestamp is recorded so it
- * can be cleared after a timeout.
- */
-void editor_set_status_message(const char *format, ...)
-{
-	va_list arguments;
-	va_start(arguments, format);
-	vsnprintf(editor.status_message, sizeof(editor.status_message), format, arguments);
-	va_end(arguments);
-	editor.status_message_time = time(NULL);
-}
-
-/*
- * Get the UTF-8 string for a color column style.
- * Returns NULL for background-only style.
- */
-static const char *color_column_char(enum color_column_style style)
-{
-	switch (style) {
-		case COLOR_COLUMN_SOLID:  return "│";  /* U+2502 */
-		case COLOR_COLUMN_DASHED: return "┆";  /* U+2506 */
-		case COLOR_COLUMN_DOTTED: return "┊";  /* U+250A */
-		case COLOR_COLUMN_HEAVY:  return "┃";  /* U+2503 */
-		default: return NULL;  /* Background only */
-	}
-}
-
-/*
- * Get human-readable name for color column style.
- */
-static const char *color_column_style_name(enum color_column_style style)
-{
-	switch (style) {
-		case COLOR_COLUMN_BACKGROUND: return "background";
-		case COLOR_COLUMN_SOLID:      return "solid";
-		case COLOR_COLUMN_DASHED:     return "dashed";
-		case COLOR_COLUMN_DOTTED:     return "dotted";
-		case COLOR_COLUMN_HEAVY:      return "heavy";
-		default: return "unknown";
-	}
-}
-
-/*
- * Cycle to the next color column style.
- */
-static void editor_cycle_color_column_style(void)
-{
-	if (editor.color_column == 0) {
-		editor_set_status_message("Color column is off (F4 to enable)");
-		return;
-	}
-
-	switch (editor.color_column_style) {
-		case COLOR_COLUMN_BACKGROUND:
-			editor.color_column_style = COLOR_COLUMN_SOLID;
-			break;
-		case COLOR_COLUMN_SOLID:
-			editor.color_column_style = COLOR_COLUMN_DASHED;
-			break;
-		case COLOR_COLUMN_DASHED:
-			editor.color_column_style = COLOR_COLUMN_DOTTED;
-			break;
-		case COLOR_COLUMN_DOTTED:
-			editor.color_column_style = COLOR_COLUMN_HEAVY;
-			break;
-		case COLOR_COLUMN_HEAVY:
-			editor.color_column_style = COLOR_COLUMN_BACKGROUND;
-			break;
-	}
-
-	editor_set_status_message("Column %u style: %s",
-	                          editor.color_column,
-	                          color_column_style_name(editor.color_column_style));
-}
-
-/*
- * Get the text area width (screen width minus gutter).
- * Used for computing wrap points.
- */
-static uint16_t editor_get_text_width(void)
-{
-	return editor.screen_columns > editor.gutter_width
-		? editor.screen_columns - editor.gutter_width
-		: 1;
 }
 
 /*
@@ -2879,7 +2580,7 @@ static void multicursor_backspace(void)
  * bar if no filename is set or if the save fails. Resets the quit
  * confirmation counter on success.
  */
-static void editor_save(void)
+void editor_save(void)
 {
 	if (editor.buffer.filename == NULL) {
 		editor_set_status_message("No filename specified");
@@ -5149,8 +4850,8 @@ static void render_draw_message_bar(struct output_buffer *output)
 	/* Clear line with message bar background color */
 	output_buffer_append_string(output, "\x1b[K");
 
-	if (save_as.active) {
-		if (save_as.confirm_overwrite) {
+	if (save_as_is_active()) {
+		if (save_as_is_confirm_overwrite()) {
 			/* Warning prompt */
 			message_bar_set_style(output, &active_theme.prompt_warning);
 			output_buffer_append_string(output, "File exists. Overwrite? (y/n)");
@@ -5161,16 +4862,17 @@ static void render_draw_message_bar(struct output_buffer *output)
 
 			/* Input */
 			message_bar_set_style(output, &active_theme.prompt_input);
+			const char *path = save_as_get_path();
 			char path_buf[PATH_MAX];
-			int path_len = strlen(save_as.path);
+			int path_len = strlen(path);
 			int max_len = (int)editor.screen_columns - 9;
 			if (path_len > max_len && max_len > 4) {
 				/* Truncate from the left */
 				snprintf(path_buf, sizeof(path_buf), "...%s",
-				         save_as.path + path_len - max_len + 3);
+				         path + path_len - max_len + 3);
 				output_buffer_append_string(output, path_buf);
 			} else {
-				output_buffer_append(output, save_as.path, path_len);
+				output_buffer_append(output, path, path_len);
 			}
 		}
 		return;
@@ -5252,14 +4954,14 @@ static void render_draw_message_bar(struct output_buffer *output)
 		return;
 	}
 
-	if (goto_line.active) {
+	if (goto_line_is_active()) {
 		/* Label */
 		message_bar_set_style(output, &active_theme.prompt_label);
 		output_buffer_append_string(output, "Go to line: ");
 
 		/* Input */
 		message_bar_set_style(output, &active_theme.prompt_input);
-		output_buffer_append_string(output, goto_line.input);
+		output_buffer_append_string(output, goto_line_get_input());
 		return;
 	}
 
@@ -5628,569 +5330,6 @@ static bool search_handle_key(int key)
 						search.query[search.query_length] = '\0';
 						search_update();
 					}
-				}
-				return true;
-			}
-			break;
-	}
-
-	return false;
-}
-
-/*****************************************************************************
- * Go to Line
- *****************************************************************************/
-
-/*
- * Enter go-to-line mode. Saves cursor position for cancel.
- */
-static void goto_enter(void)
-{
-	goto_line.active = true;
-	goto_line.input[0] = '\0';
-	goto_line.input_length = 0;
-	goto_line.saved_cursor_row = editor.cursor_row;
-	goto_line.saved_cursor_column = editor.cursor_column;
-	goto_line.saved_row_offset = editor.row_offset;
-	editor_set_status_message("");
-}
-
-/*
- * Exit go-to-line mode, optionally restoring cursor position.
- */
-static void goto_exit(bool restore)
-{
-	if (restore) {
-		editor.cursor_row = goto_line.saved_cursor_row;
-		editor.cursor_column = goto_line.saved_cursor_column;
-		editor.row_offset = goto_line.saved_row_offset;
-	}
-	goto_line.active = false;
-}
-
-/*
- * Execute the go-to-line command. Jumps to the line number in input.
- */
-static void goto_execute(void)
-{
-	if (goto_line.input_length == 0) {
-		goto_exit(true);
-		return;
-	}
-
-	/* Parse line number */
-	long line_num = strtol(goto_line.input, NULL, 10);
-
-	if (line_num < 1) {
-		line_num = 1;
-	}
-	if (line_num > (long)editor.buffer.line_count) {
-		line_num = editor.buffer.line_count;
-	}
-	if (editor.buffer.line_count == 0) {
-		line_num = 1;
-	}
-
-	/* Jump to line (1-indexed input, 0-indexed internal) */
-	editor.cursor_row = (uint32_t)(line_num - 1);
-	editor.cursor_column = 0;
-
-	/* Center the line on screen */
-	uint32_t half_screen = editor.screen_rows / 2;
-	if (editor.cursor_row >= half_screen) {
-		editor.row_offset = editor.cursor_row - half_screen;
-	} else {
-		editor.row_offset = 0;
-	}
-
-	/* Clamp row_offset (wrap-aware) */
-	uint32_t max_offset = calculate_max_row_offset();
-	if (editor.row_offset > max_offset) {
-		editor.row_offset = max_offset;
-	}
-
-	selection_clear();
-	goto_exit(false);
-	editor_set_status_message("Line %ld", line_num);
-}
-
-/*
- * Handle keypress in go-to-line mode. Returns true if handled.
- */
-static bool goto_handle_key(int key)
-{
-	if (!goto_line.active) {
-		return false;
-	}
-
-	switch (key) {
-		case '\x1b':  /* Escape - cancel */
-			goto_exit(true);
-			editor_set_status_message("Cancelled");
-			return true;
-
-		case '\r':  /* Enter - execute */
-			goto_execute();
-			return true;
-
-		case KEY_BACKSPACE:
-		case CONTROL_KEY('h'):
-			if (goto_line.input_length > 0) {
-				goto_line.input_length--;
-				goto_line.input[goto_line.input_length] = '\0';
-			}
-			return true;
-
-		default:
-			/* Accept digits only */
-			if (key >= '0' && key <= '9') {
-				if (goto_line.input_length < sizeof(goto_line.input) - 1) {
-					goto_line.input[goto_line.input_length++] = (char)key;
-					goto_line.input[goto_line.input_length] = '\0';
-
-					/* Live preview: jump as user types */
-					long line_num = strtol(goto_line.input, NULL, 10);
-					if (line_num >= 1 && line_num <= (long)editor.buffer.line_count) {
-						editor.cursor_row = (uint32_t)(line_num - 1);
-						editor.cursor_column = 0;
-
-						/* Center on screen */
-						uint32_t half_screen = editor.screen_rows / 2;
-						if (editor.cursor_row >= half_screen) {
-							editor.row_offset = editor.cursor_row - half_screen;
-						} else {
-							editor.row_offset = 0;
-						}
-					}
-				}
-				return true;
-			}
-			break;
-	}
-
-	return true;  /* Consume all keys in goto mode */
-}
-
-/*****************************************************************************
- * Quit Prompt
- *****************************************************************************/
-
-/*
- * Perform the actual exit - cleanup and terminate.
- * Called when quitting normally or after user confirms quit.
- */
-static void editor_perform_exit(void)
-{
-	terminal_clear_screen();
-	/* Remove swap file on clean exit (no unsaved changes) */
-	if (!editor.buffer.is_modified) {
-		autosave_remove_swap();
-	}
-	search_cleanup();
-	worker_shutdown();
-	clipboard_cleanup();
-	buffer_free(&editor.buffer);
-	themes_free();
-	free(active_theme.name);
-	exit(0);
-}
-
-/*
- * Enter quit prompt mode - ask user what to do with unsaved changes.
- */
-static void quit_prompt_enter(void)
-{
-	quit_prompt.active = true;
-	editor_set_status_message("Unsaved changes! Save before quitting? [y]es [n]o [c]ancel: ");
-}
-
-/*
- * Handle a keypress in quit prompt mode.
- * Returns true if the key was consumed.
- */
-static bool quit_prompt_handle_key(int key)
-{
-	if (!quit_prompt.active) {
-		return false;
-	}
-
-	switch (key) {
-		case 'y':
-		case 'Y':
-			/* Save and quit */
-			quit_prompt.active = false;
-			if (editor.buffer.filename == NULL) {
-				/* No filename - need to do Save As first */
-				editor_set_status_message("No filename. Use Ctrl-Shift-S to Save As, then quit.");
-				return true;
-			}
-			editor_save();
-			if (!editor.buffer.is_modified) {
-				/* Save succeeded */
-				editor_perform_exit();
-			}
-			/* Save failed - message already set by editor_save */
-			return true;
-
-		case 'n':
-		case 'N':
-			/* Quit without saving */
-			quit_prompt.active = false;
-			editor_perform_exit();
-			return true;
-
-		case 'c':
-		case 'C':
-		case '\x1b':  /* Escape */
-		case CONTROL_KEY('q'):  /* Ctrl+Q again cancels */
-			/* Cancel - return to editing */
-			quit_prompt.active = false;
-			editor_set_status_message("Quit cancelled");
-			return true;
-
-		default:
-			/* Invalid key - remind user of options */
-			editor_set_status_message("Unsaved changes! Save before quitting? [y]es [n]o [c]ancel: ");
-			return true;
-	}
-}
-
-/*****************************************************************************
- * Save As
- *****************************************************************************/
-
-/*
- * Check if a file exists at the given path.
- */
-static bool file_exists(const char *path)
-{
-	struct stat st;
-	return stat(path, &st) == 0;
-}
-
-/*
- * Enter Save As mode. Pre-fills with current filename if available.
- */
-static void save_as_enter(void)
-{
-	save_as.active = true;
-	save_as.confirm_overwrite = false;
-
-	if (editor.buffer.filename != NULL) {
-		/* Start with current filename */
-		size_t length = strlen(editor.buffer.filename);
-		if (length >= sizeof(save_as.path)) {
-			length = sizeof(save_as.path) - 1;
-		}
-		memcpy(save_as.path, editor.buffer.filename, length);
-		save_as.path[length] = '\0';
-		save_as.path_length = length;
-		save_as.cursor_position = length;
-	} else {
-		/* No current filename - start with current directory */
-		if (getcwd(save_as.path, sizeof(save_as.path)) != NULL) {
-			size_t length = strlen(save_as.path);
-			if (length + 1 < sizeof(save_as.path)) {
-				save_as.path[length] = '/';
-				save_as.path[length + 1] = '\0';
-				save_as.path_length = length + 1;
-				save_as.cursor_position = length + 1;
-			}
-		} else {
-			save_as.path[0] = '\0';
-			save_as.path_length = 0;
-			save_as.cursor_position = 0;
-		}
-	}
-
-	editor_set_status_message("");
-}
-
-/*
- * Exit Save As mode.
- */
-static void save_as_exit(void)
-{
-	save_as.active = false;
-	save_as.confirm_overwrite = false;
-}
-
-/*
- * Execute the Save As operation.
- * Returns true on success.
- */
-static bool save_as_execute(void)
-{
-	if (save_as.path_length == 0) {
-		editor_set_status_message("No filename provided");
-		return false;
-	}
-
-	/* Check if file exists and we haven't confirmed overwrite */
-	if (!save_as.confirm_overwrite && file_exists(save_as.path)) {
-		save_as.confirm_overwrite = true;
-		editor_set_status_message("File exists. Overwrite? (y/n)");
-		return false;
-	}
-
-	/* Update the filename */
-	char *old_filename = editor.buffer.filename;
-	editor.buffer.filename = strdup(save_as.path);
-
-	if (editor.buffer.filename == NULL) {
-		editor.buffer.filename = old_filename;
-		editor_set_status_message("Memory allocation failed");
-		return false;
-	}
-
-	free(old_filename);
-
-	/* Save the file - editor_save handles error display */
-	int ret = file_save(&editor.buffer);
-	if (ret) {
-		editor_set_status_message("Save failed: %s", edit_strerror(ret));
-		return false;
-	}
-
-	/* Exit save as mode */
-	save_as_exit();
-
-	return true;
-}
-
-/*
- * Handle key input in Save As mode.
- * Returns true if the key was handled.
- */
-static bool save_as_handle_key(int key)
-{
-	if (!save_as.active) {
-		return false;
-	}
-
-	/* Handle overwrite confirmation */
-	if (save_as.confirm_overwrite) {
-		switch (key) {
-			case 'y':
-			case 'Y':
-				/* Keep confirm_overwrite true so execute() skips the check */
-				save_as_execute();
-				return true;
-
-			case 'n':
-			case 'N':
-			case '\x1b':
-				save_as.confirm_overwrite = false;
-				editor_set_status_message("Save cancelled");
-				return true;
-
-			default:
-				editor_set_status_message("File exists. Overwrite? (y/n)");
-				return true;
-		}
-	}
-
-	switch (key) {
-		case '\x1b':
-			save_as_exit();
-			editor_set_status_message("Save As cancelled");
-			return true;
-
-		case '\r':
-			save_as_execute();
-			return true;
-
-		case KEY_BACKSPACE:
-		case CONTROL_KEY('h'):
-			if (save_as.cursor_position > 0) {
-				/* Delete character before cursor (handle UTF-8) */
-				uint32_t delete_position = save_as.cursor_position - 1;
-				while (delete_position > 0 &&
-				       (save_as.path[delete_position] & 0xC0) == 0x80) {
-					delete_position--;
-				}
-
-				uint32_t delete_length = save_as.cursor_position - delete_position;
-				memmove(save_as.path + delete_position,
-				        save_as.path + save_as.cursor_position,
-				        save_as.path_length - save_as.cursor_position + 1);
-
-				save_as.path_length -= delete_length;
-				save_as.cursor_position = delete_position;
-			}
-			return true;
-
-		case KEY_DELETE:
-			if (save_as.cursor_position < save_as.path_length) {
-				/* Delete character at cursor (handle UTF-8) */
-				uint32_t delete_end = save_as.cursor_position + 1;
-				while (delete_end < save_as.path_length &&
-				       (save_as.path[delete_end] & 0xC0) == 0x80) {
-					delete_end++;
-				}
-
-				uint32_t delete_length = delete_end - save_as.cursor_position;
-				memmove(save_as.path + save_as.cursor_position,
-				        save_as.path + delete_end,
-				        save_as.path_length - delete_end + 1);
-
-				save_as.path_length -= delete_length;
-			}
-			return true;
-
-		case KEY_ARROW_LEFT:
-			if (save_as.cursor_position > 0) {
-				save_as.cursor_position--;
-				while (save_as.cursor_position > 0 &&
-				       (save_as.path[save_as.cursor_position] & 0xC0) == 0x80) {
-					save_as.cursor_position--;
-				}
-			}
-			return true;
-
-		case KEY_ARROW_RIGHT:
-			if (save_as.cursor_position < save_as.path_length) {
-				save_as.cursor_position++;
-				while (save_as.cursor_position < save_as.path_length &&
-				       (save_as.path[save_as.cursor_position] & 0xC0) == 0x80) {
-					save_as.cursor_position++;
-				}
-			}
-			return true;
-
-		case KEY_HOME:
-		case CONTROL_KEY('a'):
-			save_as.cursor_position = 0;
-			return true;
-
-		case KEY_END:
-		case CONTROL_KEY('e'):
-			save_as.cursor_position = save_as.path_length;
-			return true;
-
-		case CONTROL_KEY('u'):
-			/* Clear entire path */
-			save_as.path[0] = '\0';
-			save_as.path_length = 0;
-			save_as.cursor_position = 0;
-			return true;
-
-		case CONTROL_KEY('w'):
-			/* Delete word before cursor */
-			if (save_as.cursor_position > 0) {
-				uint32_t word_start = save_as.cursor_position;
-
-				/* Skip trailing slashes/spaces */
-				while (word_start > 0 &&
-				       (save_as.path[word_start - 1] == '/' ||
-				        save_as.path[word_start - 1] == ' ')) {
-					word_start--;
-				}
-
-				/* Find start of word */
-				while (word_start > 0 &&
-				       save_as.path[word_start - 1] != '/' &&
-				       save_as.path[word_start - 1] != ' ') {
-					word_start--;
-				}
-
-				uint32_t delete_length = save_as.cursor_position - word_start;
-				memmove(save_as.path + word_start,
-				        save_as.path + save_as.cursor_position,
-				        save_as.path_length - save_as.cursor_position + 1);
-
-				save_as.path_length -= delete_length;
-				save_as.cursor_position = word_start;
-			}
-			return true;
-
-		case '\t':
-			/* Tab completion for file paths */
-			{
-				char *last_slash = strrchr(save_as.path, '/');
-				char directory_path[PATH_MAX];
-				char prefix[256] = "";
-
-				if (last_slash) {
-					size_t directory_length = last_slash - save_as.path + 1;
-					memcpy(directory_path, save_as.path, directory_length);
-					directory_path[directory_length] = '\0';
-					snprintf(prefix, sizeof(prefix), "%s", last_slash + 1);
-				} else {
-					strcpy(directory_path, ".");
-					snprintf(prefix, sizeof(prefix), "%s", save_as.path);
-				}
-
-				DIR *directory = opendir(directory_path);
-				if (directory) {
-					struct dirent *entry;
-					char *match = NULL;
-					int match_count = 0;
-					size_t prefix_length = strlen(prefix);
-
-					while ((entry = readdir(directory)) != NULL) {
-						if (entry->d_name[0] == '.' && prefix[0] != '.') {
-							continue;
-						}
-						if (strncmp(entry->d_name, prefix, prefix_length) == 0) {
-							match_count++;
-							if (match == NULL) {
-								match = strdup(entry->d_name);
-							}
-						}
-					}
-					closedir(directory);
-
-					if (match_count == 1 && match) {
-						snprintf(save_as.path, sizeof(save_as.path),
-						         "%s%s", directory_path, match);
-						save_as.path_length = strlen(save_as.path);
-
-						/* Add trailing slash if directory */
-						struct stat st;
-						if (stat(save_as.path, &st) == 0 && S_ISDIR(st.st_mode)) {
-							if (save_as.path_length + 1 < sizeof(save_as.path)) {
-								save_as.path[save_as.path_length++] = '/';
-								save_as.path[save_as.path_length] = '\0';
-							}
-						}
-
-						save_as.cursor_position = save_as.path_length;
-					} else if (match_count > 1) {
-						editor_set_status_message("%d matches", match_count);
-					}
-
-					free(match);
-				}
-			}
-			return true;
-
-		default:
-			/* Insert printable character */
-			if (key >= 32 && key < 127) {
-				if (save_as.path_length + 1 < sizeof(save_as.path)) {
-					memmove(save_as.path + save_as.cursor_position + 1,
-					        save_as.path + save_as.cursor_position,
-					        save_as.path_length - save_as.cursor_position + 1);
-
-					save_as.path[save_as.cursor_position] = (char)key;
-					save_as.path_length++;
-					save_as.cursor_position++;
-				}
-				return true;
-			} else if (key >= 128) {
-				/* UTF-8 multi-byte */
-				char utf8[4];
-				int bytes = utflite_encode((uint32_t)key, utf8);
-
-				if (bytes > 0 && save_as.path_length + (uint32_t)bytes < sizeof(save_as.path)) {
-					memmove(save_as.path + save_as.cursor_position + bytes,
-					        save_as.path + save_as.cursor_position,
-					        save_as.path_length - save_as.cursor_position + 1);
-
-					memcpy(save_as.path + save_as.cursor_position, utf8, bytes);
-					save_as.path_length += bytes;
-					save_as.cursor_position += bytes;
 				}
 				return true;
 			}
@@ -7025,7 +6164,7 @@ static void editor_process_keypress(void)
 			break;
 
 		case CONTROL_KEY('g'):
-			goto_enter();
+			goto_line_enter();
 			break;
 
 		case CONTROL_KEY('a'):

@@ -48,6 +48,7 @@
 #include "autosave.h"
 #include "dialog.h"
 #include "clipboard.h"
+#include "editor.h"
 
 /*
  * Module headers will be added as modules are extracted:
@@ -62,7 +63,7 @@
  * (autosave.h already included above)
  * (dialog.h already included above)
  * (clipboard.h already included above)
- * #include "editor.h"
+ * (editor.h already included above)
  */
 
 #endif /* EDIT_H */
