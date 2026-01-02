@@ -1324,69 +1324,72 @@ static void help_draw(void)
 	struct output_buffer output;
 	output_buffer_init(&output);
 
-	/* Recalculate dimensions in case of resize */
-	dialog_calculate_dimensions(&help_state.dialog);
+	/* Hide cursor */
+	output_buffer_append_string(&output, "\x1b[?25l");
+
+	/* Calculate dimensions to fit all content */
+	int content_rows = help_item_count;
+	int panel_height = content_rows + 2;  /* +2 for header and footer */
+	int panel_width = 50;  /* Wide enough for longest keybinding line */
+
+	/* Center the panel */
+	int panel_top = ((int)editor.screen_rows - panel_height) / 2;
+	int panel_left = ((int)editor.screen_columns - panel_width) / 2;
+	if (panel_top < 1) panel_top = 1;
+	if (panel_left < 1) panel_left = 1;
+
+	/* Store dimensions for drawing helpers */
+	help_state.dialog.panel_top = panel_top;
+	help_state.dialog.panel_left = panel_left;
+	help_state.dialog.panel_width = panel_width;
+	help_state.dialog.panel_height = panel_height;
+	help_state.dialog.visible_rows = content_rows;
 
 	/* Draw header */
-	dialog_draw_header(&output, &help_state.dialog, "Help - Keyboard Shortcuts");
+	dialog_draw_header(&output, &help_state.dialog, "Help");
 
 	/* Draw content rows */
-	for (int row = 0; row < help_state.dialog.visible_rows; row++) {
-		int item_index = help_state.dialog.scroll_offset + row;
-		int screen_row = help_state.dialog.panel_top + 1 + row;
+	for (int row = 0; row < content_rows; row++) {
+		int screen_row = panel_top + 1 + row;
+		const struct help_item *item = &help_items[row];
 
-		dialog_goto(&output, screen_row, help_state.dialog.panel_left);
+		dialog_goto(&output, screen_row, panel_left);
+		dialog_set_style(&output, &active_theme.dialog);
 
-		if (item_index < help_state.dialog.item_count) {
-			const struct help_item *item = &help_items[item_index];
-			bool is_selected = (item_index == help_state.dialog.selected_index);
-
-			/* Set background for selected item */
-			if (is_selected) {
-				dialog_set_style(&output, &active_theme.dialog_highlight);
+		/* Build the line content */
+		char line[256];
+		if (item->key == NULL) {
+			/* Header or blank line */
+			if (item->description[0] == '\0') {
+				/* Blank line */
+				snprintf(line, sizeof(line), "%*s", panel_width, "");
 			} else {
-				dialog_set_style(&output, &active_theme.dialog);
+				/* Category header - centered */
+				int desc_len = (int)strlen(item->description);
+				int padding = (panel_width - desc_len) / 2;
+				if (padding < 1) padding = 1;
+				snprintf(line, sizeof(line), "%*s%s%*s",
+				         padding, "", item->description,
+				         panel_width - padding - desc_len, "");
 			}
-
-			/* Build the line content */
-			char line[256];
-			if (item->key == NULL) {
-				/* Header or blank line */
-				if (item->description[0] == '\0') {
-					/* Blank line */
-					snprintf(line, sizeof(line), "%*s",
-					         help_state.dialog.panel_width, "");
-				} else {
-					/* Category header - centered */
-					int desc_len = (int)strlen(item->description);
-					int padding = (help_state.dialog.panel_width - desc_len) / 2;
-					if (padding < 1) padding = 1;
-					snprintf(line, sizeof(line), "%*s%s%*s",
-					         padding, "", item->description,
-					         help_state.dialog.panel_width - padding - desc_len, "");
-				}
-			} else {
-				/* Keybinding entry: "  Key              Description" */
-				snprintf(line, sizeof(line), "  %-18s %s",
-				         item->key, item->description);
-				/* Pad to panel width */
-				int line_len = (int)strlen(line);
-				if (line_len < help_state.dialog.panel_width) {
-					int pad = help_state.dialog.panel_width - line_len;
-					memset(line + line_len, ' ', pad);
-					line[help_state.dialog.panel_width] = '\0';
-				}
-			}
-
-			output_buffer_append_string(&output, line);
 		} else {
-			/* Empty row past end of list */
-			dialog_draw_empty_row(&output, &help_state.dialog, row);
+			/* Keybinding entry: "  Key              Description" */
+			snprintf(line, sizeof(line), "  %-18s %s",
+			         item->key, item->description);
+			/* Pad to panel width */
+			int line_len = (int)strlen(line);
+			if (line_len < panel_width) {
+				int pad = panel_width - line_len;
+				memset(line + line_len, ' ', pad);
+				line[panel_width] = '\0';
+			}
 		}
+
+		output_buffer_append_string(&output, line);
 	}
 
 	/* Draw footer */
-	dialog_draw_footer(&output, &help_state.dialog, "Arrow keys to scroll, Escape to close");
+	dialog_draw_footer(&output, &help_state.dialog, "Press any key to close");
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
@@ -1401,20 +1404,14 @@ void help_dialog(void)
 	memset(&help_state, 0, sizeof(help_state));
 	help_state.dialog.active = true;
 	help_state.dialog.item_count = help_item_count;
-	help_state.dialog.selected_index = 0;
 
-	/* Calculate initial dimensions */
-	dialog_calculate_dimensions(&help_state.dialog);
-	dialog_ensure_visible(&help_state.dialog);
-
-	/* Enable dialog mouse mode and flush pending input */
-	input_set_dialog_mouse_mode(true);
+	/* Flush pending input */
 	tcflush(STDIN_FILENO, TCIFLUSH);
 
 	while (help_state.dialog.active) {
 		help_draw();
 
-		/* Read input */
+		/* Read input - any key closes the dialog */
 		int key = input_read_key();
 
 		if (key == -1) {
@@ -1431,25 +1428,18 @@ void help_dialog(void)
 			continue;
 		}
 
-		/* Check for mouse event */
+		/* Ignore mouse events */
 		if (key == KEY_MOUSE_EVENT) {
-			struct mouse_input last_mouse = input_get_last_mouse();
-			enum dialog_result dr = dialog_handle_mouse(&help_state.dialog, &last_mouse);
-
-			if (dr == DIALOG_CANCEL) {
-				help_state.dialog.active = false;
-			}
-			/* No confirm action for help dialog - just scroll/navigate */
 			continue;
 		}
 
-		/* Handle generic dialog keys */
-		enum dialog_result dr = dialog_handle_key(&help_state.dialog, key);
-
-		if (dr == DIALOG_CONFIRM || dr == DIALOG_CANCEL) {
-			help_state.dialog.active = false;
-		}
+		/* Any other key closes the dialog */
+		help_state.dialog.active = false;
 	}
+
+	/* Show cursor again */
+	printf("\x1b[?25h");
+	fflush(stdout);
 
 	dialog_close(&help_state.dialog);
 }
