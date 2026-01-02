@@ -44,6 +44,7 @@
 #include "input.h"
 #include "render.h"
 #include "worker.h"
+#include "search.h"
 
 /*
  * Module headers will be added as modules are extracted:
@@ -54,7 +55,7 @@
  * (input.h already included above)
  * (render.h already included above)
  * (worker.h already included above)
- * #include "search.h"
+ * (search.h already included above)
  * #include "autosave.h"
  * #include "clipboard.h"
  * #include "dialog.h"

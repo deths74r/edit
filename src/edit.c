@@ -48,20 +48,6 @@ static enum clipboard_tool detected_clipboard_tool = CLIPBOARD_UNKNOWN;
 struct search_state search = {0};
 
 /*****************************************************************************
- * Background Search State
- *****************************************************************************/
-
-static struct async_search_state async_search = {
-	.current_match_index = -1
-};
-
-/*****************************************************************************
- * Background Replace All State
- *****************************************************************************/
-
-static struct async_replace_state async_replace = {0};
-
-/*****************************************************************************
  * Auto-Save and Crash Recovery
  *****************************************************************************/
 
@@ -85,9 +71,7 @@ static struct quit_prompt_state quit_prompt = {0};
 /* Forward declaration for mouse handler. */
 static void editor_handle_mouse(struct mouse_input *mouse);
 
-/* Forward declarations for search functions used in mouse handling. */
-static bool search_find_next(bool wrap);
-static bool search_find_previous(bool wrap);
+/* search_find_next and search_find_previous are declared in search.h */
 
 /* Forward declaration for worker thread result processing (non-static for module access). */
 void editor_set_status_message(const char *format, ...);
@@ -267,11 +251,6 @@ int worker_process_warm_lines(struct task *task, struct task_result *result)
 
 	return 0;
 }
-
-/* Forward declarations for async search functions used by worker */
-static int search_results_add_match(uint32_t row, uint32_t start_col, uint32_t end_col);
-static void search_results_update_progress(uint32_t rows_searched, uint32_t total_rows);
-static void search_results_mark_complete(void);
 
 /*
  * Search a single line for pattern matches.
@@ -476,16 +455,6 @@ int worker_process_search(struct task *task, struct task_result *result)
 		return 0;
 	}
 
-	/* Store pattern in results for validation */
-	pthread_mutex_lock(&async_search.results_mutex);
-	strncpy(async_search.results.pattern, pattern, sizeof(async_search.results.pattern) - 1);
-	async_search.results.pattern[sizeof(async_search.results.pattern) - 1] = '\0';
-	async_search.results.use_regex = use_regex;
-	async_search.results.case_sensitive = case_sensitive;
-	async_search.results.whole_word = whole_word;
-	async_search.results.total_rows = end_row - start_row;
-	pthread_mutex_unlock(&async_search.results_mutex);
-
 	/* Compile regex if needed */
 	regex_t compiled_regex;
 	bool regex_valid = false;
@@ -556,12 +525,6 @@ int worker_process_search(struct task *task, struct task_result *result)
 
 	return 0;
 }
-
-/* Forward declarations for async replace functions used by worker */
-static int replace_results_add(uint32_t row, uint32_t start_col, uint32_t end_col,
-                               char *replacement_text, uint32_t replacement_len);
-static void replace_results_update_progress(uint32_t rows_searched, uint32_t total_rows);
-static void replace_results_mark_search_complete(void);
 
 /*
  * Expand replacement text with backreferences.
@@ -747,6 +710,7 @@ int worker_process_replace_all(struct task *task, struct task_result *result)
 				if (expanded) {
 					replace_results_add(row, start_col, end_col,
 					                    expanded, strlen(expanded));
+					free(expanded);
 					total_replacements++;
 				}
 
@@ -802,12 +766,9 @@ int worker_process_replace_all(struct task *task, struct task_result *result)
 						                   byte_to_cell[match_end_byte] : line->cell_count;
 
 						/* Plain text replacement (no backrefs) */
-						char *repl_copy = strdup(replacement_str);
-						if (repl_copy) {
-							replace_results_add(row, start_col, end_col,
-							                    repl_copy, strlen(repl_copy));
-							total_replacements++;
-						}
+						replace_results_add(row, start_col, end_col,
+						                    replacement_str, strlen(replacement_str));
+						total_replacements++;
 					}
 
 					pos++;
@@ -827,7 +788,7 @@ int worker_process_replace_all(struct task *task, struct task_result *result)
 		regfree(&compiled_regex);
 	}
 
-	replace_results_mark_search_complete();
+	replace_results_mark_complete();
 
 	result->replace.replacements = total_replacements;
 	result->replace.complete = true;
@@ -852,9 +813,6 @@ static struct warming_state warming = {0};
 
 /* Forward declarations */
 static void editor_request_background_warming(void);
-static uint32_t async_search_get_progress(bool *complete, uint32_t *rows_searched, uint32_t *total_rows);
-static bool async_search_next_match(void);
-static void async_replace_apply_pending(void);
 
 /*
  * Process any pending results from the worker thread.
@@ -896,8 +854,8 @@ void worker_process_results(void)
 			break;
 
 		case TASK_SEARCH:
-			if (result.task_id == async_search.task_id) {
-				async_search.active = false;
+			if (result.task_id == search_async_get_task_id()) {
+				search_async_set_inactive();
 			}
 
 			if (result.error == -EEDIT_CANCELLED) {
@@ -907,7 +865,7 @@ void worker_process_results(void)
 				                          edit_strerror(result.error));
 			} else {
 				bool complete;
-				uint32_t count = async_search_get_progress(&complete, NULL, NULL);
+				uint32_t count = search_async_get_progress(&complete, NULL, NULL);
 				if (complete) {
 					if (count == 0) {
 						editor_set_status_message("No matches found");
@@ -917,8 +875,8 @@ void worker_process_results(void)
 						                          count, count == 1 ? "" : "es");
 						search.has_match = true;
 						/* Auto-navigate to first match if not already at one */
-						if (async_search.current_match_index < 0) {
-							async_search_next_match();
+						if (search_async_get_current_match_index() < 0) {
+							search_async_next_match();
 						}
 					}
 				}
@@ -926,19 +884,19 @@ void worker_process_results(void)
 			break;
 
 		case TASK_REPLACE_ALL:
-			if (result.task_id == async_replace.task_id) {
+			if (result.task_id == search_async_replace_get_task_id()) {
 				if (result.error == -EEDIT_CANCELLED) {
-					async_replace.active = false;
+					search_async_replace_set_inactive();
 					editor_set_status_message("Replace cancelled");
 				} else if (result.error) {
-					async_replace.active = false;
+					search_async_replace_set_inactive();
 					editor_set_status_message("Replace error: %s",
 					                          edit_strerror(result.error));
 				} else {
 					/* Search phase complete - apply replacements */
 					editor_set_status_message("Found %u matches, applying...",
 					                          result.replace.replacements);
-					async_replace_apply_pending();
+					search_async_replace_apply();
 				}
 			}
 			break;
@@ -1047,697 +1005,6 @@ static void editor_request_background_warming(void)
 	}
 }
 
-/*****************************************************************************
- * Background Search Management
- *****************************************************************************/
-
-/*
- * Initialize the async search system.
- * Call once at startup after worker_init().
- */
-static int __must_check async_search_init(void)
-{
-	if (pthread_mutex_init(&async_search.results_mutex, NULL) != 0) {
-		log_err("Failed to initialize search results mutex");
-		return -EEDIT_MUTEX;
-	}
-
-	async_search.mutex_initialized = true;
-	async_search.results.matches = NULL;
-	async_search.results.match_count = 0;
-	async_search.results.match_capacity = 0;
-	async_search.results.complete = false;
-	async_search.active = false;
-	async_search.current_match_index = -1;
-
-	return 0;
-}
-
-/*
- * Cleanup async search resources.
- * Call before worker_shutdown().
- */
-static void async_search_cleanup(void)
-{
-	if (!async_search.mutex_initialized) {
-		return;
-	}
-
-	pthread_mutex_lock(&async_search.results_mutex);
-	free(async_search.results.matches);
-	async_search.results.matches = NULL;
-	async_search.results.match_count = 0;
-	pthread_mutex_unlock(&async_search.results_mutex);
-
-	pthread_mutex_destroy(&async_search.results_mutex);
-	async_search.mutex_initialized = false;
-}
-
-/*
- * Clear search results (call with mutex held).
- */
-static void search_results_clear_locked(void)
-{
-	async_search.results.match_count = 0;
-	async_search.results.rows_searched = 0;
-	async_search.results.complete = false;
-	async_search.current_match_index = -1;
-}
-
-/*
- * Add a match to results (call from worker thread).
- * Returns 0 on success, -ENOMEM if at capacity.
- */
-static int search_results_add_match(uint32_t row, uint32_t start_col, uint32_t end_col)
-{
-	pthread_mutex_lock(&async_search.results_mutex);
-
-	/* Check capacity */
-	if (async_search.results.match_count >= MAX_SEARCH_MATCHES) {
-		pthread_mutex_unlock(&async_search.results_mutex);
-		return -ENOMEM;  /* At limit, stop adding */
-	}
-
-	/* Grow array if needed */
-	if (async_search.results.match_count >= async_search.results.match_capacity) {
-		uint32_t new_capacity = async_search.results.match_capacity == 0 ?
-		                        256 : async_search.results.match_capacity * 2;
-		if (new_capacity > MAX_SEARCH_MATCHES) {
-			new_capacity = MAX_SEARCH_MATCHES;
-		}
-
-		struct search_match *new_matches = realloc(
-			async_search.results.matches,
-			new_capacity * sizeof(struct search_match)
-		);
-		if (new_matches == NULL) {
-			pthread_mutex_unlock(&async_search.results_mutex);
-			return -ENOMEM;
-		}
-
-		async_search.results.matches = new_matches;
-		async_search.results.match_capacity = new_capacity;
-	}
-
-	/* Add match */
-	struct search_match *match = &async_search.results.matches[async_search.results.match_count++];
-	match->row = row;
-	match->start_col = start_col;
-	match->end_col = end_col;
-
-	pthread_mutex_unlock(&async_search.results_mutex);
-	return 0;
-}
-
-/*
- * Update search progress (call from worker thread).
- */
-static void search_results_update_progress(uint32_t rows_searched, uint32_t total_rows)
-{
-	pthread_mutex_lock(&async_search.results_mutex);
-	async_search.results.rows_searched = rows_searched;
-	async_search.results.total_rows = total_rows;
-	pthread_mutex_unlock(&async_search.results_mutex);
-}
-
-/*
- * Mark search as complete (call from worker thread).
- */
-static void search_results_mark_complete(void)
-{
-	pthread_mutex_lock(&async_search.results_mutex);
-	async_search.results.complete = true;
-	pthread_mutex_unlock(&async_search.results_mutex);
-}
-
-/*
- * Check if async search should be used for current buffer.
- */
-static bool should_use_async_search(void)
-{
-	return worker_is_initialized() &&
-	       async_search.mutex_initialized &&
-	       editor.buffer.line_count > ASYNC_SEARCH_THRESHOLD;
-}
-
-/*
- * Check if a cell is within a search match.
- * Returns: 0 = no match, 1 = match, 2 = current match
- */
-static int async_search_get_match_state(uint32_t row, uint32_t col)
-{
-	if (!async_search.mutex_initialized) {
-		return 0;
-	}
-
-	if (!async_search.active && async_search.results.match_count == 0) {
-		return 0;
-	}
-
-	pthread_mutex_lock(&async_search.results_mutex);
-
-	int result = 0;
-	for (uint32_t i = 0; i < async_search.results.match_count; i++) {
-		struct search_match *match = &async_search.results.matches[i];
-		if (match->row == row && col >= match->start_col && col < match->end_col) {
-			result = (i == (uint32_t)async_search.current_match_index) ? 2 : 1;
-			break;
-		}
-	}
-
-	pthread_mutex_unlock(&async_search.results_mutex);
-	return result;
-}
-
-/*
- * Get current search progress for status display.
- * Returns match count and sets *complete to indicate if search finished.
- */
-static uint32_t async_search_get_progress(bool *complete, uint32_t *rows_searched,
-                                          uint32_t *total_rows)
-{
-	if (!async_search.mutex_initialized) {
-		if (complete) *complete = true;
-		if (rows_searched) *rows_searched = 0;
-		if (total_rows) *total_rows = 0;
-		return 0;
-	}
-
-	pthread_mutex_lock(&async_search.results_mutex);
-	uint32_t count = async_search.results.match_count;
-	if (complete) *complete = async_search.results.complete;
-	if (rows_searched) *rows_searched = async_search.results.rows_searched;
-	if (total_rows) *total_rows = async_search.results.total_rows;
-	pthread_mutex_unlock(&async_search.results_mutex);
-	return count;
-}
-
-/* Forward declarations for navigation */
-static void editor_scroll(void);
-
-/*
- * Navigate to the next search match.
- * Returns true if moved to a match.
- */
-static bool async_search_next_match(void)
-{
-	if (!async_search.mutex_initialized) {
-		return false;
-	}
-
-	pthread_mutex_lock(&async_search.results_mutex);
-
-	if (async_search.results.match_count == 0) {
-		pthread_mutex_unlock(&async_search.results_mutex);
-		return false;
-	}
-
-	/* Find next match after current cursor position */
-	uint32_t cursor_row = editor.cursor_row;
-	uint32_t cursor_col = editor.cursor_column;
-	int32_t next_index = -1;
-
-	/* First, try to find a match after current position */
-	for (uint32_t i = 0; i < async_search.results.match_count; i++) {
-		struct search_match *match = &async_search.results.matches[i];
-		if (match->row > cursor_row ||
-		    (match->row == cursor_row && match->start_col > cursor_col)) {
-			next_index = i;
-			break;
-		}
-	}
-
-	/* Wrap around to first match if none found after cursor */
-	if (next_index < 0) {
-		next_index = 0;
-	}
-
-	/* Navigate to match */
-	struct search_match *match = &async_search.results.matches[next_index];
-	async_search.current_match_index = next_index;
-
-	uint32_t row = match->row;
-	uint32_t col = match->start_col;
-
-	pthread_mutex_unlock(&async_search.results_mutex);
-
-	/* Update cursor position */
-	editor.cursor_row = row;
-	editor.cursor_column = col;
-	editor_scroll();
-
-	return true;
-}
-
-/*
- * Navigate to the previous search match.
- * Returns true if moved to a match.
- */
-static bool async_search_prev_match(void)
-{
-	if (!async_search.mutex_initialized) {
-		return false;
-	}
-
-	pthread_mutex_lock(&async_search.results_mutex);
-
-	if (async_search.results.match_count == 0) {
-		pthread_mutex_unlock(&async_search.results_mutex);
-		return false;
-	}
-
-	/* Find previous match before current cursor position */
-	uint32_t cursor_row = editor.cursor_row;
-	uint32_t cursor_col = editor.cursor_column;
-	int32_t prev_index = -1;
-
-	/* Search backwards */
-	for (int32_t i = async_search.results.match_count - 1; i >= 0; i--) {
-		struct search_match *match = &async_search.results.matches[i];
-		if (match->row < cursor_row ||
-		    (match->row == cursor_row && match->start_col < cursor_col)) {
-			prev_index = i;
-			break;
-		}
-	}
-
-	/* Wrap around to last match if none found before cursor */
-	if (prev_index < 0) {
-		prev_index = async_search.results.match_count - 1;
-	}
-
-	/* Navigate to match */
-	struct search_match *match = &async_search.results.matches[prev_index];
-	async_search.current_match_index = prev_index;
-
-	uint32_t row = match->row;
-	uint32_t col = match->start_col;
-
-	pthread_mutex_unlock(&async_search.results_mutex);
-
-	/* Update cursor position */
-	editor.cursor_row = row;
-	editor.cursor_column = col;
-	editor_scroll();
-
-	return true;
-}
-
-/*
- * Cancel current async search.
- */
-static void async_search_cancel(void)
-{
-	if (async_search.active) {
-		task_cancel(async_search.task_id);
-		async_search.active = false;
-		log_debug("Cancelled async search");
-	}
-}
-
-/*
- * Start an async search.
- * Cancels any existing search first.
- */
-static void async_search_start(const char *pattern, bool use_regex,
-                               bool case_sensitive, bool whole_word)
-{
-	if (!worker_is_initialized() || !async_search.mutex_initialized) {
-		return;  /* Fall back to sync search */
-	}
-
-	/* Cancel existing search */
-	if (async_search.active) {
-		task_cancel(async_search.task_id);
-		async_search.active = false;
-	}
-
-	/* Clear previous results */
-	pthread_mutex_lock(&async_search.results_mutex);
-	search_results_clear_locked();
-	pthread_mutex_unlock(&async_search.results_mutex);
-
-	/* Submit new search task */
-	struct task task = {
-		.type = TASK_SEARCH,
-		.task_id = task_generate_id(),
-		.search = {
-			.start_row = 0,
-			.end_row = 0,  /* 0 = entire buffer */
-			.use_regex = use_regex,
-			.case_sensitive = case_sensitive,
-			.whole_word = whole_word
-		}
-	};
-	strncpy(task.search.pattern, pattern, sizeof(task.search.pattern) - 1);
-	task.search.pattern[sizeof(task.search.pattern) - 1] = '\0';
-
-	int err = task_queue_push(&task);
-	if (err == 0) {
-		async_search.task_id = task.task_id;
-		async_search.active = true;
-		log_debug("Started async search for '%s' (task %lu)", pattern, task.task_id);
-	} else {
-		log_warn("Failed to start async search: %s", edit_strerror(err));
-	}
-}
-
-/*****************************************************************************
- * Background Replace All Management
- *****************************************************************************/
-
-/*
- * Initialize async replace system.
- */
-static int __must_check async_replace_init(void)
-{
-	if (pthread_mutex_init(&async_replace.results_mutex, NULL) != 0) {
-		log_err("Failed to initialize replace results mutex");
-		return -EEDIT_MUTEX;
-	}
-
-	async_replace.mutex_initialized = true;
-	async_replace.results.replacements = NULL;
-	async_replace.results.count = 0;
-	async_replace.results.capacity = 0;
-	async_replace.active = false;
-
-	return 0;
-}
-
-/*
- * Cleanup async replace resources.
- */
-static void async_replace_cleanup(void)
-{
-	if (!async_replace.mutex_initialized) {
-		return;
-	}
-
-	pthread_mutex_lock(&async_replace.results_mutex);
-
-	/* Free all replacement texts */
-	for (uint32_t i = 0; i < async_replace.results.count; i++) {
-		free(async_replace.results.replacements[i].replacement_text);
-	}
-	free(async_replace.results.replacements);
-	async_replace.results.replacements = NULL;
-	async_replace.results.count = 0;
-
-	pthread_mutex_unlock(&async_replace.results_mutex);
-	pthread_mutex_destroy(&async_replace.results_mutex);
-	async_replace.mutex_initialized = false;
-}
-
-/*
- * Clear replace results (call with mutex held or when single-threaded).
- */
-static void replace_results_clear_locked(void)
-{
-	for (uint32_t i = 0; i < async_replace.results.count; i++) {
-		free(async_replace.results.replacements[i].replacement_text);
-	}
-	async_replace.results.count = 0;
-	async_replace.results.rows_searched = 0;
-	async_replace.results.search_complete = false;
-	async_replace.results.applied_count = 0;
-	async_replace.results.apply_complete = false;
-}
-
-/*
- * Add a replacement to results (call from worker thread).
- * Takes ownership of replacement_text.
- */
-static int replace_results_add(uint32_t row, uint32_t start_col, uint32_t end_col,
-                               char *replacement_text, uint32_t replacement_len)
-{
-	pthread_mutex_lock(&async_replace.results_mutex);
-
-	/* Grow array if needed */
-	if (async_replace.results.count >= async_replace.results.capacity) {
-		uint32_t new_capacity = async_replace.results.capacity == 0 ?
-		                        256 : async_replace.results.capacity * 2;
-
-		struct replacement *new_array = realloc(
-			async_replace.results.replacements,
-			new_capacity * sizeof(struct replacement)
-		);
-		if (new_array == NULL) {
-			pthread_mutex_unlock(&async_replace.results_mutex);
-			free(replacement_text);
-			return -ENOMEM;
-		}
-
-		async_replace.results.replacements = new_array;
-		async_replace.results.capacity = new_capacity;
-	}
-
-	/* Add replacement */
-	struct replacement *r = &async_replace.results.replacements[async_replace.results.count++];
-	r->row = row;
-	r->start_col = start_col;
-	r->end_col = end_col;
-	r->replacement_text = replacement_text;
-	r->replacement_len = replacement_len;
-
-	pthread_mutex_unlock(&async_replace.results_mutex);
-	return 0;
-}
-
-/*
- * Update replace search progress.
- */
-static void replace_results_update_progress(uint32_t rows_searched, uint32_t total_rows)
-{
-	pthread_mutex_lock(&async_replace.results_mutex);
-	async_replace.results.rows_searched = rows_searched;
-	async_replace.results.total_rows = total_rows;
-	pthread_mutex_unlock(&async_replace.results_mutex);
-}
-
-/*
- * Mark search phase as complete.
- */
-static void replace_results_mark_search_complete(void)
-{
-	pthread_mutex_lock(&async_replace.results_mutex);
-	async_replace.results.search_complete = true;
-	pthread_mutex_unlock(&async_replace.results_mutex);
-}
-
-/*
- * Check if async replace should be used.
- */
-static bool should_use_async_replace(void)
-{
-	return worker_is_initialized() &&
-	       async_replace.mutex_initialized &&
-	       editor.buffer.line_count > ASYNC_SEARCH_THRESHOLD;
-}
-
-/*
- * Get replace operation progress.
- */
-static uint32_t async_replace_get_progress(bool *search_complete, bool *apply_complete,
-                                           uint32_t *rows_searched, uint32_t *total_rows)
-{
-	if (!async_replace.mutex_initialized) {
-		if (search_complete) *search_complete = true;
-		if (apply_complete) *apply_complete = true;
-		if (rows_searched) *rows_searched = 0;
-		if (total_rows) *total_rows = 0;
-		return 0;
-	}
-
-	pthread_mutex_lock(&async_replace.results_mutex);
-	uint32_t count = async_replace.results.count;
-	if (search_complete) *search_complete = async_replace.results.search_complete;
-	if (apply_complete) *apply_complete = async_replace.results.apply_complete;
-	if (rows_searched) *rows_searched = async_replace.results.rows_searched;
-	if (total_rows) *total_rows = async_replace.results.total_rows;
-	pthread_mutex_unlock(&async_replace.results_mutex);
-	return count;
-}
-
-/*
- * Cancel async replace.
- */
-static void async_replace_cancel(void)
-{
-	if (async_replace.active) {
-		task_cancel(async_replace.task_id);
-		async_replace.active = false;
-		log_debug("Cancelled async replace");
-	}
-}
-
-/*
- * Apply pending replacements from background search.
- * Called from main thread after search completes.
- * Processes replacements in reverse order to preserve positions.
- */
-static void async_replace_apply_pending(void)
-{
-	pthread_mutex_lock(&async_replace.results_mutex);
-
-	if (!async_replace.results.search_complete ||
-	    async_replace.results.apply_complete ||
-	    async_replace.results.count == 0) {
-		pthread_mutex_unlock(&async_replace.results_mutex);
-		return;
-	}
-
-	uint32_t count = async_replace.results.count;
-
-	/* Copy replacements to local array so we can release mutex */
-	struct replacement *local_replacements = malloc(count * sizeof(struct replacement));
-	if (local_replacements == NULL) {
-		pthread_mutex_unlock(&async_replace.results_mutex);
-		editor_set_status_message("Out of memory applying replacements");
-		return;
-	}
-	memcpy(local_replacements, async_replace.results.replacements,
-	       count * sizeof(struct replacement));
-
-	/* Clear the results (we've taken ownership of replacement_text pointers) */
-	async_replace.results.count = 0;
-	async_replace.results.apply_complete = true;
-
-	pthread_mutex_unlock(&async_replace.results_mutex);
-
-	/* Start undo group for all replacements */
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
-
-	/* Apply in reverse order to preserve positions */
-	uint32_t applied = 0;
-	for (int32_t i = count - 1; i >= 0; i--) {
-		struct replacement *r = &local_replacements[i];
-
-		/* Validate row is still in range */
-		if (r->row >= editor.buffer.line_count) {
-			free(r->replacement_text);
-			continue;
-		}
-
-		struct line *line = &editor.buffer.lines[r->row];
-
-		/* Ensure line is warm */
-		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
-			line_warm(line, &editor.buffer);
-		}
-
-		/* Validate columns are still in range */
-		if (r->start_col > line->cell_count || r->end_col > line->cell_count) {
-			free(r->replacement_text);
-			continue;
-		}
-
-		/* Delete the matched text */
-		if (r->end_col > r->start_col) {
-			buffer_delete_range_no_record(&editor.buffer, r->row,
-			                              r->start_col, r->row, r->end_col);
-		}
-
-		/* Insert replacement text */
-		if (r->replacement_len > 0) {
-			/* Convert replacement text to codepoints and insert */
-			size_t byte_idx = 0;
-			uint32_t col = r->start_col;
-			while (byte_idx < r->replacement_len) {
-				uint32_t codepoint;
-				int bytes = utflite_decode(r->replacement_text + byte_idx,
-				                           r->replacement_len - byte_idx,
-				                           &codepoint);
-				if (bytes <= 0) {
-					codepoint = 0xFFFD;
-					bytes = 1;
-				}
-				buffer_insert_cell_at_column(&editor.buffer, r->row, col, codepoint);
-				col++;
-				byte_idx += bytes;
-			}
-		}
-
-		applied++;
-		free(r->replacement_text);
-
-		/* Update status periodically */
-		if (applied % 100 == 0) {
-			editor_set_status_message("Applying... %u/%u", applied, count);
-		}
-	}
-
-	/* End undo group */
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
-
-	free(local_replacements);
-
-	editor_set_status_message("Replaced %u occurrence%s", applied, applied == 1 ? "" : "s");
-
-	/* Mark buffer as modified */
-	if (applied > 0) {
-		editor.buffer.is_modified = true;
-	}
-
-	async_replace.active = false;
-}
-
-/*
- * Start async replace-all operation.
- */
-static void async_replace_start(const char *pattern, const char *replacement_text,
-                                bool use_regex, bool case_sensitive, bool whole_word)
-{
-	if (!worker_is_initialized() || !async_replace.mutex_initialized) {
-		return;
-	}
-
-	/* Cancel any existing replace operation */
-	if (async_replace.active) {
-		task_cancel(async_replace.task_id);
-	}
-
-	/* Clear previous results */
-	pthread_mutex_lock(&async_replace.results_mutex);
-	replace_results_clear_locked();
-	pthread_mutex_unlock(&async_replace.results_mutex);
-
-	/* Store parameters */
-	strncpy(async_replace.pattern, pattern, sizeof(async_replace.pattern) - 1);
-	async_replace.pattern[sizeof(async_replace.pattern) - 1] = '\0';
-	strncpy(async_replace.replacement, replacement_text, sizeof(async_replace.replacement) - 1);
-	async_replace.replacement[sizeof(async_replace.replacement) - 1] = '\0';
-	async_replace.use_regex = use_regex;
-	async_replace.case_sensitive = case_sensitive;
-	async_replace.whole_word = whole_word;
-
-	/* Submit task */
-	struct task task = {
-		.type = TASK_REPLACE_ALL,
-		.task_id = task_generate_id(),
-		.replace = {
-			.use_regex = use_regex,
-			.case_sensitive = case_sensitive,
-			.whole_word = whole_word
-		}
-	};
-	strncpy(task.replace.pattern, pattern, sizeof(task.replace.pattern) - 1);
-	task.replace.pattern[sizeof(task.replace.pattern) - 1] = '\0';
-	strncpy(task.replace.replacement, replacement_text, sizeof(task.replace.replacement) - 1);
-	task.replace.replacement[sizeof(task.replace.replacement) - 1] = '\0';
-
-	int err = task_queue_push(&task);
-	if (err == 0) {
-		async_replace.task_id = task.task_id;
-		async_replace.active = true;
-		editor_set_status_message("Replacing all...");
-		log_debug("Started async replace for '%s' -> '%s' (task %lu)",
-		          pattern, replacement_text, task.task_id);
-	} else {
-		log_warn("Failed to start async replace: %s", edit_strerror(err));
-		editor_set_status_message("Failed to start replace: %s", edit_strerror(err));
-	}
-}
 
 /*****************************************************************************
  * Auto-Save Functions
@@ -2671,16 +1938,10 @@ static void editor_init(void)
 		/* Continue without background processing - not fatal */
 	}
 
-	/* Initialize async search system */
-	err = async_search_init();
+	/* Initialize search system (async search and replace) */
+	err = search_init();
 	if (err) {
-		log_warn("Async search disabled: %s", edit_strerror(err));
-	}
-
-	/* Initialize async replace system */
-	err = async_replace_init();
-	if (err) {
-		log_warn("Async replace disabled: %s", edit_strerror(err));
+		log_warn("Async search/replace disabled: %s", edit_strerror(err));
 	}
 }
 
@@ -5299,12 +4560,8 @@ static void search_exit(bool restore_position)
 	}
 
 	/* Cancel async search and clear results */
-	async_search_cancel();
-	if (async_search.mutex_initialized) {
-		pthread_mutex_lock(&async_search.results_mutex);
-		search_results_clear_locked();
-		pthread_mutex_unlock(&async_search.results_mutex);
-	}
+	search_async_cancel();
+	search_async_clear_results();
 
 	search.active = false;
 	search.replace_mode = false;
@@ -5598,7 +4855,7 @@ static uint32_t search_query_cell_count(const char *query, uint32_t query_len)
  * Center the viewport vertically on the current match.
  * Called after finding a match to snap it to the middle of the screen.
  */
-static void search_center_on_match(void)
+void search_center_on_match(void)
 {
 	if (!search.has_match) {
 		return;
@@ -5626,7 +4883,7 @@ static void search_center_on_match(void)
  * If wrap is true, wraps around to beginning of file.
  * Returns true if a match was found.
  */
-static bool search_find_next(bool wrap)
+bool search_find_next(bool wrap)
 {
 	if (search.query_length == 0) {
 		return false;
@@ -5685,7 +4942,7 @@ static bool search_find_next(bool wrap)
  * Find the previous match starting from current position.
  * If wrap is true, wraps around to end of file.
  */
-static bool search_find_previous(bool wrap)
+bool search_find_previous(bool wrap)
 {
 	if (search.query_length == 0) {
 		return false;
@@ -5757,16 +5014,14 @@ static void search_update(void)
 		editor.cursor_row = search.saved_cursor_row;
 		editor.cursor_column = search.saved_cursor_column;
 		search.has_match = false;
-		async_search_cancel();
-		pthread_mutex_lock(&async_search.results_mutex);
-		search_results_clear_locked();
-		pthread_mutex_unlock(&async_search.results_mutex);
+		search_async_cancel();
+		search_async_clear_results();
 		return;
 	}
 
 	/* Use async search for large files */
-	if (should_use_async_search()) {
-		async_search_start(search.query, search.use_regex,
+	if (search_should_use_async()) {
+		search_async_start(search.query, search.use_regex,
 		                   search.case_sensitive, search.whole_word);
 		/* Results will come via worker_process_results() */
 		return;
@@ -8349,8 +7604,8 @@ static bool search_handle_key(int key)
 		case KEY_ALT_A:
 			/* Replace all (only in replace mode) */
 			if (search.replace_mode) {
-				if (should_use_async_replace()) {
-					async_replace_start(search.query, search.replace_text,
+				if (search_should_use_async_replace()) {
+					search_async_replace_start(search.query, search.replace_text,
 					                    search.use_regex, search.case_sensitive,
 					                    search.whole_word);
 				} else {
@@ -8390,8 +7645,8 @@ static bool search_handle_key(int key)
 		case KEY_ARROW_RIGHT:
 			/* Find next match */
 			search.direction = 1;
-			if (should_use_async_search()) {
-				if (!async_search_next_match()) {
+			if (search_should_use_async()) {
+				if (!search_async_next_match()) {
 					editor_set_status_message("No more matches");
 				}
 			} else {
@@ -8406,8 +7661,8 @@ static bool search_handle_key(int key)
 		case KEY_ARROW_LEFT:
 			/* Find previous match */
 			search.direction = -1;
-			if (should_use_async_search()) {
-				if (!async_search_prev_match()) {
+			if (search_should_use_async()) {
+				if (!search_async_prev_match()) {
 					editor_set_status_message("No more matches");
 				}
 			} else {
@@ -8634,8 +7889,7 @@ static void editor_perform_exit(void)
 	if (!editor.buffer.is_modified) {
 		autosave_remove_swap();
 	}
-	async_replace_cleanup();
-	async_search_cleanup();
+	search_cleanup();
 	worker_shutdown();
 	free(internal_clipboard);
 	buffer_free(&editor.buffer);
