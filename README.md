@@ -203,8 +203,8 @@ struct cell {
 Visually:
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                         12 bytes                            │
+┌────────────────────────────────────────────────────────────┐
+│                         12 bytes                           │
 ├──────────────┬─────────┬────────┬───────┬──────────────────┤
 │   codepoint  │  syntax │neighbor│ flags │     context      │
 │   4 bytes    │ 2 bytes │ 1 byte │1 byte │     4 bytes      │
@@ -450,3 +450,4 @@ GPL-2.0-only. See LICENSE file.
 ---
 
 *Edit is what happens when someone gets tired of explaining vim to new developers and tired of launching VS Code to change one line.*
+
