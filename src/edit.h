@@ -40,13 +40,14 @@
 #include "theme.h"
 #include "buffer.h"
 #include "syntax.h"
+#include "undo.h"
 
 /*
  * Module headers will be added as modules are extracted:
  * (theme.h already included above)
  * (buffer.h already included above)
  * (syntax.h already included above)
- * #include "undo.h"
+ * (undo.h already included above)
  * #include "input.h"
  * #include "render.h"
  * #include "search.h"

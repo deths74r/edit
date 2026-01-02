@@ -2069,13 +2069,6 @@ static void async_replace_cancel(void)
 	}
 }
 
-/* Forward declarations for apply function */
-static void buffer_delete_range_no_record(struct buffer *buffer,
-                                          uint32_t start_row, uint32_t start_col,
-                                          uint32_t end_row, uint32_t end_col);
-static void undo_begin_group(struct buffer *buffer);
-static void undo_end_group(struct buffer *buffer);
-
 /*
  * Apply pending replacements from background search.
  * Called from main thread after search completes.
@@ -2111,7 +2104,7 @@ static void async_replace_apply_pending(void)
 	pthread_mutex_unlock(&async_replace.results_mutex);
 
 	/* Start undo group for all replacements */
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Apply in reverse order to preserve positions */
 	uint32_t applied = 0;
@@ -2173,7 +2166,7 @@ static void async_replace_apply_pending(void)
 	}
 
 	/* End undo group */
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	free(local_replacements);
 
@@ -3774,585 +3767,26 @@ static bool selection_is_empty(void)
 }
 
 /*****************************************************************************
- * Undo/Redo History
+ * Undo/Redo Editor Commands
  *****************************************************************************/
-
-/* Initialize an undo history structure. */
-static void undo_history_init(struct undo_history *history)
-{
-	history->groups = NULL;
-	history->group_count = 0;
-	history->group_capacity = 0;
-	history->current_index = 0;
-	history->recording = false;
-	history->last_edit_time.tv_sec = 0;
-	history->last_edit_time.tv_nsec = 0;
-}
-
-/* Free all resources used by an undo history. */
-void undo_history_free(struct undo_history *history)
-{
-	for (uint32_t i = 0; i < history->group_count; i++) {
-		struct undo_group *group = &history->groups[i];
-		for (uint32_t j = 0; j < group->operation_count; j++) {
-			free(group->operations[j].text);
-		}
-		free(group->operations);
-	}
-	free(history->groups);
-	undo_history_init(history);
-}
-
-/* Forward declaration */
-static void undo_end_group(struct buffer *buffer);
-
-/*
- * Begin a new undo group. If within timeout of the last edit,
- * continues the existing group. Called before making edits.
- */
-static void undo_begin_group(struct buffer *buffer)
-{
-	struct undo_history *history = &buffer->undo_history;
-
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-
-	double dt = (double)(now.tv_sec - history->last_edit_time.tv_sec) +
-	            (double)(now.tv_nsec - history->last_edit_time.tv_nsec) / 1.0e9;
-
-	if (history->recording) {
-		/* Already recording - check if we should continue or start new group */
-		if (dt < UNDO_GROUP_TIMEOUT) {
-			/* Within timeout - continue current group */
-			history->last_edit_time = now;
-			return;
-		}
-		/* Timeout passed - end current group and start new one */
-		undo_end_group(buffer);
-	}
-
-	/* Check if we should continue the previous group (auto-grouping) */
-	/* This applies when recording was false but we're within timeout of last edit */
-	if (dt < UNDO_GROUP_TIMEOUT && history->current_index > 0 &&
-	    history->current_index == history->group_count) {
-		/* Continue the previous group */
-		history->recording = true;
-		history->last_edit_time = now;
-		return;
-	}
-
-	/* Truncate any redo history (we're making a new edit) */
-	for (uint32_t i = history->current_index; i < history->group_count; i++) {
-		struct undo_group *group = &history->groups[i];
-		for (uint32_t j = 0; j < group->operation_count; j++) {
-			free(group->operations[j].text);
-		}
-		free(group->operations);
-	}
-	history->group_count = history->current_index;
-
-	/* Grow groups array if needed */
-	if (history->group_count >= history->group_capacity) {
-		uint32_t new_capacity = history->group_capacity == 0 ?
-		                        INITIAL_UNDO_CAPACITY : history->group_capacity * 2;
-		struct undo_group *new_groups = realloc(history->groups,
-		                                        new_capacity * sizeof(struct undo_group));
-		if (new_groups == NULL) {
-			WARN_ON_ONCE(1);  /* Undo recording disabled due to OOM */
-			return;
-		}
-		history->groups = new_groups;
-		history->group_capacity = new_capacity;
-	}
-
-	/* Initialize new group */
-	struct undo_group *group = &history->groups[history->group_count];
-	group->operations = NULL;
-	group->operation_count = 0;
-	group->operation_capacity = 0;
-	group->cursor_row_before = editor.cursor_row;
-	group->cursor_column_before = editor.cursor_column;
-	group->cursor_row_after = editor.cursor_row;
-	group->cursor_column_after = editor.cursor_column;
-
-	history->group_count++;
-	history->current_index = history->group_count;
-	history->recording = true;
-	history->last_edit_time = now;
-}
-
-/*
- * End the current undo group. Records final cursor position.
- */
-static void undo_end_group(struct buffer *buffer)
-{
-	struct undo_history *history = &buffer->undo_history;
-
-	if (!history->recording || history->group_count == 0) {
-		return;
-	}
-
-	struct undo_group *group = &history->groups[history->group_count - 1];
-	group->cursor_row_after = editor.cursor_row;
-	group->cursor_column_after = editor.cursor_column;
-
-	/* If group is empty, remove it */
-	if (group->operation_count == 0) {
-		history->group_count--;
-		history->current_index = history->group_count;
-	}
-
-	history->recording = false;
-}
-
-/*
- * Add an operation to the current undo group.
- */
-static void undo_record_operation(struct buffer *buffer, struct edit_operation *op)
-{
-	struct undo_history *history = &buffer->undo_history;
-
-	if (!history->recording || history->group_count == 0) {
-		return;
-	}
-
-	struct undo_group *group = &history->groups[history->group_count - 1];
-
-	/* Grow operations array if needed */
-	if (group->operation_count >= group->operation_capacity) {
-		uint32_t new_capacity = group->operation_capacity == 0 ?
-		                        INITIAL_OPERATION_CAPACITY : group->operation_capacity * 2;
-		struct edit_operation *new_ops = realloc(group->operations,
-		                                         new_capacity * sizeof(struct edit_operation));
-		if (new_ops == NULL) {
-			WARN_ON_ONCE(1);  /* Undo operation lost due to OOM */
-			return;
-		}
-		group->operations = new_ops;
-		group->operation_capacity = new_capacity;
-	}
-
-	group->operations[group->operation_count++] = *op;
-}
-
-/* Record insertion of a single character. */
-static void undo_record_insert_char(struct buffer *buffer, uint32_t row,
-                                    uint32_t column, uint32_t codepoint)
-{
-	struct edit_operation op = {
-		.type = EDIT_OP_INSERT_CHAR,
-		.row = row,
-		.column = column,
-		.codepoint = codepoint,
-		.text = NULL,
-		.text_length = 0,
-		.end_row = 0,
-		.end_column = 0
-	};
-	undo_record_operation(buffer, &op);
-}
-
-/* Record deletion of a single character. */
-static void undo_record_delete_char(struct buffer *buffer, uint32_t row,
-                                    uint32_t column, uint32_t codepoint)
-{
-	struct edit_operation op = {
-		.type = EDIT_OP_DELETE_CHAR,
-		.row = row,
-		.column = column,
-		.codepoint = codepoint,
-		.text = NULL,
-		.text_length = 0,
-		.end_row = 0,
-		.end_column = 0
-	};
-	undo_record_operation(buffer, &op);
-}
-
-/* Record insertion of a newline. */
-static void undo_record_insert_newline(struct buffer *buffer, uint32_t row,
-                                       uint32_t column)
-{
-	struct edit_operation op = {
-		.type = EDIT_OP_INSERT_NEWLINE,
-		.row = row,
-		.column = column,
-		.codepoint = 0,
-		.text = NULL,
-		.text_length = 0,
-		.end_row = 0,
-		.end_column = 0
-	};
-	undo_record_operation(buffer, &op);
-}
-
-/* Record deletion of a newline (line join). */
-static void undo_record_delete_newline(struct buffer *buffer, uint32_t row,
-                                       uint32_t column)
-{
-	struct edit_operation op = {
-		.type = EDIT_OP_DELETE_NEWLINE,
-		.row = row,
-		.column = column,
-		.codepoint = 0,
-		.text = NULL,
-		.text_length = 0,
-		.end_row = 0,
-		.end_column = 0
-	};
-	undo_record_operation(buffer, &op);
-}
-
-/* Record deletion of multiple characters (selection delete). */
-static void undo_record_delete_text(struct buffer *buffer,
-                                    uint32_t start_row, uint32_t start_col,
-                                    uint32_t end_row, uint32_t end_col,
-                                    const char *text, size_t text_length)
-{
-	struct edit_operation op = {
-		.type = EDIT_OP_DELETE_TEXT,
-		.row = start_row,
-		.column = start_col,
-		.codepoint = 0,
-		.text = NULL,
-		.text_length = text_length,
-		.end_row = end_row,
-		.end_column = end_col
-	};
-	if (text_length > 0) {
-		op.text = malloc(text_length + 1);
-		if (op.text != NULL) {
-			memcpy(op.text, text, text_length);
-			op.text[text_length] = '\0';
-		}
-	}
-	undo_record_operation(buffer, &op);
-}
-
-/*
- * Insert a cell at the specified position without recording to undo history.
- * Used during undo/redo operations.
- */
-static void buffer_insert_cell_no_record(struct buffer *buffer, uint32_t row,
-                                         uint32_t column, uint32_t codepoint)
-{
-	if (row > buffer->line_count) {
-		row = buffer->line_count;
-	}
-
-	if (row == buffer->line_count) {
-		buffer_insert_empty_line(buffer, buffer->line_count);
-	}
-
-	struct line *line = &buffer->lines[row];
-	line_warm(line, buffer);
-	line_insert_cell(line, column, codepoint);
-	line_set_temperature(line, LINE_TEMPERATURE_HOT);
-	buffer->is_modified = true;
-
-	neighbor_compute_line(line);
-	syntax_highlight_line(line, buffer, row);
-	line_invalidate_wrap_cache(line);
-}
-
-/*
- * Delete a cell at the specified position without recording to undo history.
- * Used during undo/redo operations.
- */
-static void buffer_delete_cell_no_record(struct buffer *buffer, uint32_t row,
-                                         uint32_t column)
-{
-	if (row >= buffer->line_count) {
-		return;
-	}
-
-	struct line *line = &buffer->lines[row];
-	line_warm(line, buffer);
-
-	if (column >= line->cell_count) {
-		return;
-	}
-
-	line_delete_cell(line, column);
-	line_set_temperature(line, LINE_TEMPERATURE_HOT);
-	buffer->is_modified = true;
-
-	neighbor_compute_line(line);
-	syntax_highlight_line(line, buffer, row);
-	line_invalidate_wrap_cache(line);
-}
-
-/*
- * Insert a newline at the specified position without recording to undo history.
- * Used during undo/redo operations.
- */
-static void buffer_insert_newline_no_record(struct buffer *buffer, uint32_t row,
-                                            uint32_t column)
-{
-	if (row > buffer->line_count) {
-		return;
-	}
-
-	if (row == buffer->line_count) {
-		buffer_insert_empty_line(buffer, buffer->line_count);
-		return;
-	}
-
-	struct line *line = &buffer->lines[row];
-	line_warm(line, buffer);
-
-	if (column >= line->cell_count) {
-		buffer_insert_empty_line(buffer, row + 1);
-	} else {
-		buffer_insert_empty_line(buffer, row + 1);
-		struct line *new_line = &buffer->lines[row + 1];
-
-		for (uint32_t i = column; i < line->cell_count; i++) {
-			line_append_cell(new_line, line->cells[i].codepoint);
-		}
-
-		line->cell_count = column;
-		line_set_temperature(line, LINE_TEMPERATURE_HOT);
-
-		neighbor_compute_line(line);
-		neighbor_compute_line(new_line);
-		syntax_highlight_line(line, buffer, row);
-		syntax_highlight_line(new_line, buffer, row + 1);
-		line_invalidate_wrap_cache(line);
-	}
-
-	buffer->is_modified = true;
-}
-
-/*
- * Join line with the next line without recording to undo history.
- * Used during undo/redo operations.
- */
-static void buffer_join_lines_no_record(struct buffer *buffer, uint32_t row)
-{
-	if (row >= buffer->line_count - 1) {
-		return;
-	}
-
-	struct line *line = &buffer->lines[row];
-	struct line *next_line = &buffer->lines[row + 1];
-
-	line_warm(line, buffer);
-	line_warm(next_line, buffer);
-
-	/* Append all cells from next line to current line */
-	for (uint32_t i = 0; i < next_line->cell_count; i++) {
-		line_append_cell(line, next_line->cells[i].codepoint);
-	}
-
-	line_set_temperature(line, LINE_TEMPERATURE_HOT);
-	buffer_delete_line(buffer, row + 1);
-	buffer->is_modified = true;
-
-	neighbor_compute_line(line);
-	syntax_highlight_line(line, buffer, row);
-	line_invalidate_wrap_cache(line);
-}
-
-/*
- * Insert UTF-8 text at the specified position without recording to undo history.
- * Used during undo/redo operations.
- */
-static void buffer_insert_text_no_record(struct buffer *buffer, uint32_t row,
-                                         uint32_t column, const char *text,
-                                         size_t text_length)
-{
-	size_t offset = 0;
-	uint32_t cur_row = row;
-	uint32_t cur_col = column;
-
-	while (offset < text_length) {
-		uint32_t codepoint;
-		int bytes = utflite_decode(text + offset, text_length - offset, &codepoint);
-
-		if (bytes <= 0) {
-			offset++;
-			continue;
-		}
-
-		if (codepoint == '\n') {
-			buffer_insert_newline_no_record(buffer, cur_row, cur_col);
-			cur_row++;
-			cur_col = 0;
-		} else if (codepoint != '\r') {
-			buffer_insert_cell_no_record(buffer, cur_row, cur_col, codepoint);
-			cur_col++;
-		}
-
-		offset += bytes;
-	}
-}
-
-/*
- * Delete a range of text without recording to undo history.
- * Used during undo/redo operations.
- */
-static void buffer_delete_range_no_record(struct buffer *buffer,
-                                          uint32_t start_row, uint32_t start_col,
-                                          uint32_t end_row, uint32_t end_col)
-{
-	if (start_row == end_row) {
-		/* Single line deletion */
-		struct line *line = &buffer->lines[start_row];
-		line_warm(line, buffer);
-
-		for (uint32_t i = end_col; i > start_col; i--) {
-			line_delete_cell(line, start_col);
-		}
-		line_set_temperature(line, LINE_TEMPERATURE_HOT);
-		neighbor_compute_line(line);
-		syntax_highlight_line(line, buffer, start_row);
-	} else {
-		/* Multi-line deletion */
-		struct line *start_line = &buffer->lines[start_row];
-		struct line *end_line = &buffer->lines[end_row];
-
-		line_warm(start_line, buffer);
-		line_warm(end_line, buffer);
-
-		/* Truncate start line at start_col */
-		start_line->cell_count = start_col;
-
-		/* Append content after end_col from end line */
-		for (uint32_t i = end_col; i < end_line->cell_count; i++) {
-			line_append_cell(start_line, end_line->cells[i].codepoint);
-		}
-
-		/* Delete lines from start_row+1 to end_row inclusive */
-		for (uint32_t i = end_row; i > start_row; i--) {
-			buffer_delete_line(buffer, i);
-		}
-
-		line_set_temperature(start_line, LINE_TEMPERATURE_HOT);
-		neighbor_compute_line(start_line);
-		buffer_compute_pairs(buffer);
-
-		/* Re-highlight affected lines */
-		for (uint32_t r = start_row; r < buffer->line_count; r++) {
-			if (buffer->lines[r].temperature != LINE_TEMPERATURE_COLD) {
-				syntax_highlight_line(&buffer->lines[r], buffer, r);
-			}
-		}
-	}
-
-	buffer->is_modified = true;
-}
-
-/*
- * Reverse an operation (for undo). Does not record to undo history.
- */
-static void undo_reverse_operation(struct buffer *buffer, struct edit_operation *op)
-{
-	switch (op->type) {
-		case EDIT_OP_INSERT_CHAR:
-			/* Undo insert = delete */
-			buffer_delete_cell_no_record(buffer, op->row, op->column);
-			break;
-
-		case EDIT_OP_DELETE_CHAR:
-			/* Undo delete = insert */
-			buffer_insert_cell_no_record(buffer, op->row, op->column, op->codepoint);
-			break;
-
-		case EDIT_OP_INSERT_NEWLINE:
-			/* Undo newline = join lines */
-			buffer_join_lines_no_record(buffer, op->row);
-			break;
-
-		case EDIT_OP_DELETE_NEWLINE:
-			/* Undo join = split line */
-			buffer_insert_newline_no_record(buffer, op->row, op->column);
-			break;
-
-		case EDIT_OP_DELETE_TEXT:
-			/* Undo delete = insert the saved text */
-			buffer_insert_text_no_record(buffer, op->row, op->column,
-			                             op->text, op->text_length);
-			break;
-	}
-}
-
-/*
- * Apply an operation (for redo). Does not record to undo history.
- */
-static void undo_apply_operation(struct buffer *buffer, struct edit_operation *op)
-{
-	switch (op->type) {
-		case EDIT_OP_INSERT_CHAR:
-			/* Insert the character */
-			buffer_insert_cell_no_record(buffer, op->row, op->column, op->codepoint);
-			break;
-
-		case EDIT_OP_DELETE_CHAR:
-			/* Delete the character */
-			buffer_delete_cell_no_record(buffer, op->row, op->column);
-			break;
-
-		case EDIT_OP_INSERT_NEWLINE:
-			/* Split the line */
-			buffer_insert_newline_no_record(buffer, op->row, op->column);
-			break;
-
-		case EDIT_OP_DELETE_NEWLINE:
-			/* Join lines */
-			buffer_join_lines_no_record(buffer, op->row);
-			break;
-
-		case EDIT_OP_DELETE_TEXT:
-			/* Delete text range */
-			buffer_delete_range_no_record(buffer, op->row, op->column,
-			                              op->end_row, op->end_column);
-			break;
-	}
-}
 
 /*
  * Undo the most recent group of operations.
  */
 static void editor_undo(void)
 {
-	struct undo_history *history = &editor.buffer.undo_history;
-
 	/* End any in-progress group */
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
-	if (history->current_index == 0) {
+	uint32_t new_row, new_col;
+	if (undo_perform(&editor.buffer, &new_row, &new_col)) {
+		editor.cursor_row = new_row;
+		editor.cursor_column = new_col;
+		selection_clear();
+		editor_set_status_message("Undo");
+	} else {
 		editor_set_status_message("Nothing to undo");
-		return;
 	}
-
-	history->current_index--;
-	struct undo_group *group = &history->groups[history->current_index];
-
-	/* Reverse operations in reverse order */
-	for (int i = (int)group->operation_count - 1; i >= 0; i--) {
-		undo_reverse_operation(&editor.buffer, &group->operations[i]);
-	}
-
-	/* Restore cursor position */
-	editor.cursor_row = group->cursor_row_before;
-	editor.cursor_column = group->cursor_column_before;
-
-	/* Clear selection */
-	selection_clear();
-
-	/* Recompute syntax highlighting */
-	buffer_compute_pairs(&editor.buffer);
-	for (uint32_t row = 0; row < editor.buffer.line_count; row++) {
-		if (editor.buffer.lines[row].temperature != LINE_TEMPERATURE_COLD) {
-			syntax_highlight_line(&editor.buffer.lines[row], &editor.buffer, row);
-		}
-	}
-
-	/* Update modified flag */
-	editor.buffer.is_modified = (history->current_index > 0);
-
-	editor_set_status_message("Undo");
 }
 
 /*
@@ -4360,43 +3794,18 @@ static void editor_undo(void)
  */
 static void editor_redo(void)
 {
-	struct undo_history *history = &editor.buffer.undo_history;
-
 	/* End any in-progress group */
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
-	if (history->current_index >= history->group_count) {
+	uint32_t new_row, new_col;
+	if (redo_perform(&editor.buffer, &new_row, &new_col)) {
+		editor.cursor_row = new_row;
+		editor.cursor_column = new_col;
+		selection_clear();
+		editor_set_status_message("Redo");
+	} else {
 		editor_set_status_message("Nothing to redo");
-		return;
 	}
-
-	struct undo_group *group = &history->groups[history->current_index];
-	history->current_index++;
-
-	/* Apply operations in order */
-	for (uint32_t i = 0; i < group->operation_count; i++) {
-		undo_apply_operation(&editor.buffer, &group->operations[i]);
-	}
-
-	/* Restore cursor position */
-	editor.cursor_row = group->cursor_row_after;
-	editor.cursor_column = group->cursor_column_after;
-
-	/* Clear selection */
-	selection_clear();
-
-	/* Recompute syntax highlighting */
-	buffer_compute_pairs(&editor.buffer);
-	for (uint32_t row = 0; row < editor.buffer.line_count; row++) {
-		if (editor.buffer.lines[row].temperature != LINE_TEMPERATURE_COLD) {
-			syntax_highlight_line(&editor.buffer.lines[row], &editor.buffer, row);
-		}
-	}
-
-	/* Mark as modified */
-	editor.buffer.is_modified = true;
-
-	editor_set_status_message("Redo");
 }
 
 /*****************************************************************************
@@ -5869,7 +5278,7 @@ static void editor_paste(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Delete selection if active */
 	if (editor.selection_active && !selection_is_empty()) {
@@ -5918,7 +5327,7 @@ static void editor_paste(void)
 		offset += bytes;
 	}
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	if (ret) {
 		editor_set_status_message("Paste failed after %u chars: %s",
@@ -5947,7 +5356,7 @@ static void editor_paste(void)
  */
 static void editor_insert_character(uint32_t codepoint)
 {
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Delete selection first if active */
 	if (editor.selection_active && !selection_is_empty()) {
@@ -5959,12 +5368,12 @@ static void editor_insert_character(uint32_t codepoint)
 	                                                editor.cursor_column, codepoint);
 	if (ret) {
 		editor_set_status_message("Insert failed: %s", edit_strerror(ret));
-		undo_end_group(&editor.buffer);
+		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 		return;
 	}
 	editor.cursor_column++;
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 }
 
 /*
@@ -5975,7 +5384,7 @@ static void editor_insert_character(uint32_t codepoint)
  */
 static void editor_insert_newline(void)
 {
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/*
 	 * Capture leading whitespace before any modifications. We limit the
@@ -6033,7 +5442,7 @@ static void editor_insert_newline(void)
 	                                         editor.cursor_column);
 	if (ret) {
 		editor_set_status_message("Cannot insert line: %s", edit_strerror(ret));
-		undo_end_group(&editor.buffer);
+		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 		return;
 	}
 	editor.cursor_row++;
@@ -6046,14 +5455,14 @@ static void editor_insert_newline(void)
 		                                            editor.cursor_column, indent_chars[i]);
 		if (ret) {
 			editor_set_status_message("Auto-indent failed: %s", edit_strerror(ret));
-			undo_end_group(&editor.buffer);
+			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 			return;
 		}
 		editor.cursor_column++;
 	}
 
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 }
 
 /*
@@ -6065,9 +5474,9 @@ static void editor_delete_character(void)
 {
 	/* Delete selection if active */
 	if (editor.selection_active && !selection_is_empty()) {
-		undo_begin_group(&editor.buffer);
+		undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 		editor_delete_selection();
-		undo_end_group(&editor.buffer);
+		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 		return;
 	}
 
@@ -6075,7 +5484,7 @@ static void editor_delete_character(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	struct line *line = &editor.buffer.lines[editor.cursor_row];
 	line_warm(line, &editor.buffer);
@@ -6093,11 +5502,11 @@ static void editor_delete_character(void)
 	                                                     editor.cursor_column);
 	if (ret) {
 		editor_set_status_message("Delete failed: %s", edit_strerror(ret));
-		undo_end_group(&editor.buffer);
+		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 		return;
 	}
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 }
 
 /*
@@ -6110,9 +5519,9 @@ static void editor_handle_backspace(void)
 {
 	/* Delete selection if active */
 	if (editor.selection_active && !selection_is_empty()) {
-		undo_begin_group(&editor.buffer);
+		undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 		editor_delete_selection();
-		undo_end_group(&editor.buffer);
+		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 		return;
 	}
 
@@ -6120,7 +5529,7 @@ static void editor_handle_backspace(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	int ret;
 	if (editor.cursor_column > 0) {
@@ -6135,7 +5544,7 @@ static void editor_handle_backspace(void)
 		                                                editor.cursor_column);
 		if (ret) {
 			editor_set_status_message("Delete failed: %s", edit_strerror(ret));
-			undo_end_group(&editor.buffer);
+			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 			return;
 		}
 	} else {
@@ -6149,7 +5558,7 @@ static void editor_handle_backspace(void)
 		ret = line_append_cells_from_line_checked(previous_line, current_line);
 		if (ret) {
 			editor_set_status_message("Join lines failed: %s", edit_strerror(ret));
-			undo_end_group(&editor.buffer);
+			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 			return;
 		}
 		line_set_temperature(previous_line, LINE_TEMPERATURE_HOT);
@@ -6158,7 +5567,7 @@ static void editor_handle_backspace(void)
 		editor.cursor_column = previous_line_length;
 	}
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 }
 
@@ -6177,7 +5586,7 @@ static void multicursor_insert_character(uint32_t codepoint)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Process in reverse order (bottom to top) so positions stay valid */
 	for (int i = (int)editor.cursor_count - 1; i >= 0; i--) {
@@ -6209,7 +5618,7 @@ static void multicursor_insert_character(uint32_t codepoint)
 	}
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Update primary cursor in legacy fields for rendering */
 	struct cursor *primary = &editor.cursors[editor.primary_cursor];
@@ -6228,7 +5637,7 @@ static void multicursor_backspace(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Process in reverse order */
 	for (int i = (int)editor.cursor_count - 1; i >= 0; i--) {
@@ -6278,7 +5687,7 @@ static void multicursor_backspace(void)
 	}
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	multicursor_normalize();
 
@@ -7703,7 +7112,7 @@ static bool search_replace_current(void)
 		return false;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Delete the match characters (from end to start for correct undo) */
 	for (uint32_t i = 0; i < match_cells; i++) {
@@ -7743,7 +7152,7 @@ static bool search_replace_current(void)
 		if (ret) {
 			editor_set_status_message("Replace failed: %s", edit_strerror(ret));
 			free(final_replacement);
-			undo_end_group(&editor.buffer);
+			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 			return false;
 		}
 
@@ -7770,7 +7179,7 @@ static bool search_replace_current(void)
 	line_invalidate_wrap_cache(line);
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	return true;
 }
@@ -7804,7 +7213,7 @@ static void search_replace_all(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	uint32_t count = 0;
 
@@ -7839,7 +7248,7 @@ static void search_replace_all(void)
 		}
 	}
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Restore cursor to beginning if no replacements, or keep at last position */
 	if (count == 0) {
@@ -10833,7 +10242,7 @@ static void editor_delete_line(void)
 	struct line *line = &editor.buffer.lines[row];
 	line_warm(line, &editor.buffer);
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Build text to save for undo: line content + newline (if not last line) */
 	size_t text_capacity = line->cell_count * 4 + 2;
@@ -10878,7 +10287,7 @@ static void editor_delete_line(void)
 	editor.cursor_column = 0;
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 	selection_clear();
 
 	editor_set_status_message("Line deleted");
@@ -10901,7 +10310,7 @@ static void editor_duplicate_line(void)
 	struct line *source = &editor.buffer.lines[row];
 	line_warm(source, &editor.buffer);
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Save cursor at end of line, insert newline (creates a new line) */
 	uint32_t saved_col = editor.cursor_column;
@@ -10935,7 +10344,7 @@ static void editor_duplicate_line(void)
 		editor.cursor_column = dest->cell_count;
 	}
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	editor_set_status_message("Line duplicated");
 }
@@ -11101,7 +10510,7 @@ static void editor_toggle_comment(void)
 
 	bool should_comment = !all_commented;
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/*
 	 * Find the minimum indent across all lines with content. We insert
@@ -11244,7 +10653,7 @@ static void editor_toggle_comment(void)
 	}
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	uint32_t count = end_row - start_row + 1;
 	editor_set_status_message("%s %u line%s",
@@ -11270,7 +10679,7 @@ static void editor_move_line_up(void)
 		row = editor.buffer.line_count - 1;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Swap with line above */
 	buffer_swap_lines(&editor.buffer, row, row - 1);
@@ -11283,7 +10692,7 @@ static void editor_move_line_up(void)
 	editor.cursor_row--;
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	editor_set_status_message("Line moved up");
 }
@@ -11302,7 +10711,7 @@ static void editor_move_line_down(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Swap with line below */
 	buffer_swap_lines(&editor.buffer, row, row + 1);
@@ -11315,7 +10724,7 @@ static void editor_move_line_down(void)
 	editor.cursor_row++;
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	editor_set_status_message("Line moved down");
 }
@@ -11343,7 +10752,7 @@ static void editor_indent_lines(void)
 		end_row = editor.buffer.line_count - 1;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	for (uint32_t row = start_row; row <= end_row; row++) {
 		struct line *line = &editor.buffer.lines[row];
@@ -11381,7 +10790,7 @@ static void editor_indent_lines(void)
 	}
 
 	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	uint32_t count = end_row - start_row + 1;
 	editor_set_status_message("Indented %u line%s", count, count > 1 ? "s" : "");
@@ -11410,7 +10819,7 @@ static void editor_outdent_lines(void)
 		end_row = editor.buffer.line_count - 1;
 	}
 
-	undo_begin_group(&editor.buffer);
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	uint32_t lines_modified = 0;
 
@@ -11475,7 +10884,7 @@ static void editor_outdent_lines(void)
 		editor.buffer.is_modified = true;
 	}
 
-	undo_end_group(&editor.buffer);
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	editor_set_status_message("Outdented %u line%s", lines_modified,
 	                          lines_modified != 1 ? "s" : "");
