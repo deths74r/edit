@@ -116,11 +116,13 @@ For files larger than 5,000 lines, search runs in a background thread so the UI 
 
 **Alt+Shift+Z** cycles through wrap indicators—the symbol shown at line continuation points. Options include blank, arrows, corners, and various Unicode glyphs.
 
-**F3** toggles whitespace visibility. Tabs appear as `→`, trailing spaces as `·`.
+**Alt+Shift+W** toggles whitespace visibility. Tabs appear as `→`, trailing spaces as `·`.
 
-**F4** cycles the color column: off, 80 characters, 120 characters. A subtle vertical line helps you keep lines within bounds.
+**Alt+Shift+C** cycles the color column: off, 80 characters, 120 characters. A subtle vertical line helps you keep lines within bounds.
 
-**F5** (or **Ctrl+T**) opens the theme picker.
+**Alt+L** toggles line numbers on/off.
+
+**Ctrl+T** opens the theme picker.
 
 ## Themes
 

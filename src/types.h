@@ -246,18 +246,15 @@ enum key_code {
 	KEY_PAGE_DOWN = -93,
 	KEY_DELETE = -92,
 
-	/* Function keys. */
-	KEY_F2 = -91,
-	KEY_F3 = -76,
-	KEY_F4 = -75,
-	KEY_SHIFT_F4 = -74,
-	KEY_F12 = -65,
+	/* Ctrl key combinations. */
 	KEY_ALT_SHIFT_S = -64,
 	KEY_CTRL_O = -63,
 	KEY_CTRL_T = -62,
-	KEY_F5 = -61,
 
 	/* Alt key combinations. */
+	KEY_ALT_L = -91,
+	KEY_ALT_SHIFT_W = -90,
+	KEY_ALT_SHIFT_C = -89,
 	KEY_ALT_N = -88,
 	KEY_ALT_P = -87,
 	KEY_ALT_Z = -86,

@@ -194,9 +194,12 @@ int input_read_key(void)
 				case '/': return KEY_ALT_SLASH;
 				case 'a': case 'A': return KEY_ALT_A;
 				case ']': return KEY_ALT_BRACKET;
-				case 'c': case 'C': return KEY_ALT_C;
-				case 'w': case 'W': return KEY_ALT_W;
+				case 'c': return KEY_ALT_C;
+				case 'C': return KEY_ALT_SHIFT_C;
+				case 'w': return KEY_ALT_W;
+				case 'W': return KEY_ALT_SHIFT_W;
 				case 'r': return KEY_ALT_R;
+				case 'l': case 'L': return KEY_ALT_L;
 				default: return '\x1b';
 			}
 		}
@@ -239,7 +242,6 @@ int input_read_key(void)
 								case 'D': return KEY_SHIFT_ARROW_LEFT;
 								case 'H': return KEY_SHIFT_HOME;
 								case 'F': return KEY_SHIFT_END;
-								case 'S': return KEY_SHIFT_F4;
 							}
 						} else if (modifier == '5') {  /* Ctrl */
 							switch (final) {
@@ -262,24 +264,6 @@ int input_read_key(void)
 						/* \x1b[5;2~ or \x1b[6;2~ - Shift+PageUp/Down */
 						if (sequence[1] == '5') return KEY_SHIFT_PAGE_UP;
 						if (sequence[1] == '6') return KEY_SHIFT_PAGE_DOWN;
-					}
-				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
-					/* Two-digit escape sequence like \x1b[12~ for F2 */
-					if (read(STDIN_FILENO, &sequence[3], 1) != 1) {
-						return '\x1b';
-					}
-					if (sequence[3] == '~') {
-						if (sequence[1] == '1' && sequence[2] == '2') {
-							return KEY_F2;
-						} else if (sequence[1] == '1' && sequence[2] == '3') {
-							return KEY_F3;
-						} else if (sequence[1] == '1' && sequence[2] == '4') {
-							return KEY_F4;
-						} else if (sequence[1] == '1' && sequence[2] == '5') {
-							return KEY_F5;
-						} else if (sequence[1] == '2' && sequence[2] == '4') {
-							return KEY_F12;
-						}
 					}
 				}
 			} else if (sequence[1] == '<') {
@@ -308,9 +292,6 @@ int input_read_key(void)
 			switch (sequence[1]) {
 				case 'H': return KEY_HOME;
 				case 'F': return KEY_END;
-				case 'Q': return KEY_F2;
-				case 'R': return KEY_F3;
-				case 'S': return KEY_F4;
 			}
 		}
 

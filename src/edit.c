@@ -4454,20 +4454,15 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	}
 
 	/*
-	 * Fill remaining space with appropriate background color.
-	 * Use cursor_line background if on cursor line for highlight effect.
+	 * Set background color for any remaining content.
+	 * The actual filling happens in render_draw_rows after this function
+	 * returns, where the color column (if any) is also handled.
 	 */
 	struct syntax_color fill_bg = is_cursor_line ? active_theme.cursor_line : active_theme.background;
 	char bg_escape[48];
 	snprintf(bg_escape, sizeof(bg_escape), "\x1b[48;2;%d;%d;%dm",
 	         fill_bg.red, fill_bg.green, fill_bg.blue);
 	output_buffer_append_string(output, bg_escape);
-
-	/* Fill to max_width with spaces */
-	while (rendered_width < max_width) {
-		output_buffer_append_string(output, " ");
-		rendered_width++;
-	}
 }
 
 /*
@@ -4814,6 +4809,15 @@ static void render_draw_rows(struct output_buffer *output)
 					}
 					output_buffer_append_string(output, col_escape);
 				}
+			} else {
+				/* No color column on non-cursor line - just clear to end */
+				char fill_escape[64];
+				snprintf(fill_escape, sizeof(fill_escape),
+				         "\x1b[48;2;%d;%d;%dm\x1b[K",
+				         active_theme.background.red,
+				         active_theme.background.green,
+				         active_theme.background.blue);
+				output_buffer_append_string(output, fill_escape);
 			}
 
 			/* Advance to next segment or line */
@@ -6154,7 +6158,6 @@ void editor_process_keypress(void)
 			break;
 
 		case KEY_ALT_SHIFT_S:
-		case KEY_F12:
 			save_as_enter();
 			break;
 
@@ -6162,7 +6165,6 @@ void editor_process_keypress(void)
 			editor_command_open_file();
 			break;
 
-		case KEY_F5:
 		case KEY_CTRL_T:
 			editor_command_theme_picker();
 			break;
@@ -6187,18 +6189,18 @@ void editor_process_keypress(void)
 			editor_redo();
 			break;
 
-		case KEY_F2:
+		case KEY_ALT_L:
 			editor.show_line_numbers = !editor.show_line_numbers;
 			editor_update_gutter_width();
 			editor_set_status_message("Line numbers %s", editor.show_line_numbers ? "on" : "off");
 			break;
 
-		case KEY_F3:
+		case KEY_ALT_SHIFT_W:
 			editor.show_whitespace = !editor.show_whitespace;
 			editor_set_status_message("Whitespace %s", editor.show_whitespace ? "visible" : "hidden");
 			break;
 
-		case KEY_F4:
+		case KEY_ALT_SHIFT_C:
 			/* Cycle color column: 0 -> 80 -> 120 -> 0 */
 			if (editor.color_column == 0) {
 				editor.color_column = 80;
@@ -6208,16 +6210,12 @@ void editor_process_keypress(void)
 				editor.color_column = 0;
 			}
 			if (editor.color_column > 0) {
-				editor_set_status_message("Column %u (%s) - Shift+F4 to change style",
+				editor_set_status_message("Column %u (%s)",
 				                          editor.color_column,
 				                          color_column_style_name(editor.color_column_style));
 			} else {
 				editor_set_status_message("Color column off");
 			}
-			break;
-
-		case KEY_SHIFT_F4:
-			editor_cycle_color_column_style();
 			break;
 
 		case KEY_ALT_Z:
