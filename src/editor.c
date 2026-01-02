@@ -155,7 +155,7 @@ void editor_update_gutter_width(void)
 		digits++;
 	}
 
-	/* Minimum 3 digits, plus 2 for padding */
+	/* Apply minimum digits and add trailing space */
 	if (digits < MINIMUM_GUTTER_DIGITS) {
 		digits = MINIMUM_GUTTER_DIGITS;
 	}

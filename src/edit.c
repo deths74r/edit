@@ -4638,7 +4638,7 @@ static void render_draw_rows(struct output_buffer *output)
 
 					char line_number_buffer[16];
 					snprintf(line_number_buffer, sizeof(line_number_buffer),
-					         "%*u ", editor.gutter_width - 1, file_row + 1);
+					         "%-*u ", editor.gutter_width - 1, file_row + 1);
 					output_buffer_append(output, line_number_buffer,
 					                     editor.gutter_width);
 				} else {

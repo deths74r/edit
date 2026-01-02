@@ -353,6 +353,10 @@ void buffer_init(struct buffer *buffer)
 	buffer->undo_history.recording = false;
 	buffer->undo_history.last_edit_time.tv_sec = 0;
 	buffer->undo_history.last_edit_time.tv_nsec = 0;
+
+	/* Start with one empty line so cursor has somewhere to be */
+	line_init(&buffer->lines[0]);
+	buffer->line_count = 1;
 }
 
 /*

@@ -149,8 +149,8 @@
 #define MINIMUM_WINDOW_SIZE 10
 #define STATUS_BAR_ROWS 2
 /* Gutter (line number column) */
-#define MINIMUM_GUTTER_DIGITS 3
-#define GUTTER_PADDING 2
+#define MINIMUM_GUTTER_DIGITS 1
+#define GUTTER_PADDING 1
 #define DECIMAL_BASE 10
 /* Dialog dimensions */
 #define DIALOG_MIN_WIDTH 40
