@@ -9,6 +9,7 @@ A minimal terminal text editor written in C.
 - [Installation](#installation)
 - [Key Bindings](#key-bindings)
 - [Architecture](#architecture)
+  - [Module Overview](#module-overview)
   - [The Three-Temperature Model](#the-three-temperature-model)
   - [The Cell](#the-cell)
   - [The Neighbor Layer](#the-neighbor-layer)
@@ -18,6 +19,8 @@ A minimal terminal text editor written in C.
   - [Undo and Redo](#undo-and-redo)
   - [Multi-Cursor Editing](#multi-cursor-editing)
   - [The Rendering Pipeline](#the-rendering-pipeline)
+  - [Background Worker Thread](#background-worker-thread)
+  - [Crash Recovery](#crash-recovery)
   - [Error Handling](#error-handling)
   - [The Theme System](#the-theme-system)
 - [Extending the Editor](#extending-the-editor)
@@ -29,13 +32,13 @@ A minimal terminal text editor written in C.
 
 Every text editor embodies a theory about what editing should be. Vim believes editing is a language—verbs, nouns, modifiers—and rewards those who become fluent. Emacs believes an editor should be a Lisp environment that happens to edit text. VS Code believes an editor should be a platform that extensions transform into whatever you need.
 
-This editor has a different theory: that a single C file, compiled without dependencies, can handle daily text editing tasks while remaining something one person can understand completely. Not understand in the abstract, but actually read—every function, every data structure, every bit of state. The entire implementation fits in roughly 12,000 lines across three source files.
+This editor has a different theory: that a small C codebase, compiled without dependencies, can handle daily text editing tasks while remaining something one person can understand completely. Not understand in the abstract, but actually read—every function, every data structure, every bit of state. The entire implementation fits in roughly 19,000 lines across 16 modules.
 
 The constraint shapes everything. A plugin system means an API, and an API means backwards compatibility concerns, documentation, version negotiation. Skip all that. Language server protocol support means async communication, JSON parsing, protocol state machines. Let a different tool handle that. Split panes mean layout algorithms, focus management, per-pane state. The terminal multiplexer already solved this problem.
 
 What remains is an editor that does exactly what it appears to do. It handles Unicode correctly—grapheme clusters, combining marks, double-width CJK characters—using utflite, a UTF-8 library that grew out of this project. It highlights C syntax, because the editor is written in C and should be pleasant for editing itself. It wraps long lines, because horizontal scrolling is tedious. It supports multiple cursors, because some edits are naturally parallel. It has undo that groups rapid keystrokes together, because that's how typing feels. It searches with regular expressions, because pattern matching is fundamental to working with text.
 
-The entire state lives in a single global struct. If something breaks, there's one place to look.
+The modular architecture keeps related code together while maintaining clear boundaries between subsystems. Each module owns its data and exposes a minimal interface.
 
 ---
 
@@ -47,7 +50,7 @@ The editor handles **Unicode** as humans perceive it. The cursor moves by graphe
 
 **Line wrapping** operates in three modes. Off means long lines scroll horizontally. Word wrap breaks at word boundaries, using precomputed token information to find appropriate break points. Character wrap breaks anywhere when necessary. Eight visual indicators show where lines continue.
 
-**Search** is incremental—matches highlight as you type. The current match shows in gold, others in blue. Case sensitivity, whole-word matching, and POSIX extended regular expressions can be toggled independently. Replace mode supports backreferences (`\1`, `\2`) in replacement text. Replace-all operates as a single undo group.
+**Search** is incremental—matches highlight as you type. The current match shows in gold, others in blue. Case sensitivity, whole-word matching, and POSIX extended regular expressions can be toggled independently. Replace mode supports backreferences (`\1`, `\2`) in replacement text. Replace-all operates as a single undo group. Search runs asynchronously via the background worker thread, keeping the UI responsive during large file searches.
 
 **Multiple cursors** emerge from repeated Ctrl+D presses: the first selects the word under the cursor, subsequent presses add cursors at each next occurrence. All cursors receive typed characters simultaneously. The implementation processes cursors in reverse document order so insertions don't shift positions of cursors yet to be processed.
 
@@ -59,7 +62,9 @@ The editor handles **Unicode** as humans perceive it. The cursor moves by graphe
 
 **File dialogs** provide visual navigation: a file browser for opening files, a theme picker with live preview. Both support mouse and keyboard.
 
-**49 themes** ship built-in, with support for custom themes in `~/.edit/themes/`. All enforce WCAG 2.1 AA contrast requirements—the editor adjusts colors automatically when necessary.
+**Two built-in themes** ship with the editor—Dark and Light—with support for custom themes in `~/.edit/themes/`. All enforce WCAG 2.1 AA contrast requirements—the editor adjusts colors automatically when necessary.
+
+**Crash recovery** automatically saves your work to a swap file every 30 seconds when there are unsaved changes. If the editor crashes or your system loses power, the next time you open the file, you'll be prompted to recover your work.
 
 **Visual aids** include an optional column marker at 80 or 120 characters (five display styles), trailing whitespace highlighting, visible whitespace mode (tabs and spaces rendered as symbols), and cursor line highlighting.
 
@@ -91,7 +96,7 @@ make uninstall
 | Ctrl+S | Save |
 | Ctrl+O | Open file dialog |
 | F12 or Alt+Shift+S | Save As |
-| Ctrl+Q | Quit (press 3 times if unsaved changes) |
+| Ctrl+Q | Quit (prompts if unsaved changes) |
 
 ### Navigation
 
@@ -163,7 +168,34 @@ make uninstall
 
 ## Architecture
 
-The architecture reflects a particular set of priorities: fast startup, predictable memory use, and the ability to open large files without paying for lines you never look at. These priorities led to some unusual choices.
+The architecture reflects a particular set of priorities: fast startup, predictable memory use, and the ability to open large files without paying for lines you never look at. The modular design keeps the codebase navigable while maintaining these properties.
+
+### Module Overview
+
+The editor is organized into 16 modules, each with a clear responsibility:
+
+| Module | Lines | Purpose |
+|--------|------:|---------|
+| `types.h` | 1,145 | Shared structs, enums, and constants |
+| `edit.h` | 69 | Master header including all modules |
+| `edit.c` | 6,277 | Core editing operations and keypress handling |
+| `main.c` | 141 | Entry point, initialization, main loop |
+| `terminal.c/h` | 314 | Raw mode, resize handling, mouse tracking |
+| `theme.c/h` | 1,933 | Colors, themes, contrast enforcement, config |
+| `buffer.c/h` | 893 | Line and buffer operations |
+| `syntax.c/h` | 945 | Syntax highlighting, neighbor layer, pair matching |
+| `undo.c/h` | 781 | Undo/redo history with operation grouping |
+| `input.c/h` | 448 | Key and mouse input parsing |
+| `render.c/h` | 477 | Screen refresh, output buffering |
+| `worker.c/h` | 569 | Background thread for async operations |
+| `search.c/h` | 963 | Find/replace with async search |
+| `autosave.c/h` | 788 | Crash recovery via swap files |
+| `dialog.c/h` | 1,394 | Theme picker, file browser |
+| `clipboard.c/h` | 452 | System clipboard integration |
+| `editor.c/h` | 965 | Editor state, status messages, dialogs |
+| `error.c/h` | 407 | Linux kernel-style error handling |
+
+Dependencies flow downward: `main.c` depends on everything, `edit.c` depends on most modules, leaf modules like `terminal.c` depend only on `types.h` and standard libraries.
 
 ### The Three-Temperature Model
 
@@ -201,8 +233,6 @@ struct cell {
 
 Twelve bytes per character is three times the minimum, but it eliminates repeated work. Scrolling doesn't re-highlight. Ctrl+Arrow doesn't rescan for word boundaries. Jump-to-matching-bracket doesn't search the file. The cost is paid when a line is edited; after that, the information is immediately available.
 
-The `flags` byte is unused, reserved for future features like fold markers. It exists because 11 bytes would have worse alignment than 12.
-
 ### The Neighbor Layer
 
 Word movement (Ctrl+Arrow) and word selection (double-click) need to know where words begin and end. The naive implementation scans characters looking for transitions between word and non-word characters. This is O(n) in the distance moved, which feels fine until you hold Ctrl+Right and watch the cursor stutter through a long line.
@@ -218,8 +248,6 @@ Bits 5-7:  Reserved
 The token position is the key insight. A character marked START is at the beginning of a word. A character marked END is at the end. SOLO means a single-character token. MIDDLE is everything else.
 
 Ctrl+Right becomes: check current position; if END or SOLO, advance one cell; check new position; if START or SOLO, stop. Total cost: a few comparisons and memory accesses. No scanning, no loops over the line content.
-
-This matters because keyboard repeat rates are fast. A user holding Ctrl+Right expects smooth, consistent motion, not a cursor that speeds up through short words and slows down through long identifiers.
 
 ### Pair Entanglement
 
@@ -237,8 +265,6 @@ Bits 29-31:  Reserved
 Now jump-to-bracket is: read the pair ID from the current cell; scan for a cell with the same ID and opposite role. The scan is still O(n) in the worst case, but typically much faster because you're looking for a specific ID, not counting nesting levels.
 
 More importantly, this enables correct syntax highlighting for block comments. A `/*` on line 100 and its `*/` on line 500 share a pair ID. Highlighting line 300 can check whether it's inside a comment by examining the pair data, without scanning backward to find the comment start.
-
-The 24-bit pair ID field supports 16 million pairs—more than enough for any reasonable source file. If you somehow exceed this, pairs beyond the limit simply won't be matched, a graceful degradation.
 
 ### Syntax Highlighting
 
@@ -277,9 +303,7 @@ A 200-character line on an 80-column display becomes three segments: columns 0-7
 
 Cursor movement checks which segment it's in and moves within that segment for horizontal motion, between segments for vertical. Mouse clicks map screen coordinates to segments, then to cell positions. Selection rendering knows to highlight across segment breaks within a single line.
 
-The cache is invalidated on edit, resize, or wrap mode change. Recomputation is lazy—triggered when a line is about to render and its cache is stale. This means changing wrap mode is instant; the cost is amortized across subsequent renders.
-
-Word wrapping uses the neighbor layer to find break points. Walk backward from the maximum width looking for a word boundary. Prefer whitespace, then punctuation, then any boundary. If none found (a single word longer than the screen), break at the maximum width.
+The cache is invalidated on edit, resize, or wrap mode change. Recomputation is lazy—triggered when a line is about to render and its cache is stale.
 
 ### Undo and Redo
 
@@ -289,7 +313,7 @@ The editor records operations:
 
 ```c
 struct edit_operation {
-    enum edit_operation_type type;  // INSERT_CHAR, DELETE_CHAR, INSERT_NEWLINE, DELETE_NEWLINE, DELETE_TEXT
+    enum edit_operation_type type;  // INSERT_CHAR, DELETE_CHAR, INSERT_NEWLINE, etc.
     uint32_t row, column;           // Position
     uint32_t codepoint;             // For single-character operations
     char *text;                     // For multi-character operations
@@ -299,31 +323,17 @@ struct edit_operation {
 
 Memory scales with edit count, not file size. Undo reverses operations: INSERT_CHAR becomes delete, DELETE_CHAR becomes insert, INSERT_NEWLINE rejoins, DELETE_NEWLINE splits.
 
-Grouping matters for usability. Typing "hello" as five rapid keystrokes should undo as "hello", not as five individual characters. The editor groups operations that occur within one second. A pause starts a new group. This matches how typing feels—bursts of activity separated by thought.
-
-Cursor position is recorded at group boundaries. Undo restores the cursor to where it was before the group started. Redo restores it to where the group left it. This is subtle but important: undo isn't just restoring text, it's restoring the editing context.
+Grouping matters for usability. Typing "hello" as five rapid keystrokes should undo as "hello", not as five individual characters. The editor groups operations that occur within one second. A pause starts a new group.
 
 ### Multi-Cursor Editing
 
 Multi-cursor seems like a feature that requires pervasive changes—every editing operation needs to know about multiple cursors. In practice, it's simpler: process each cursor in turn, applying the same operation.
 
-The trick is ordering. If you have cursors at columns 10 and 20, and you insert a character at each, inserting at column 10 first shifts the second cursor to column 21. The solution is to process cursors in reverse document order: bottom to top, right to left. Later cursors don't shift because earlier ones haven't been processed yet.
-
-```c
-struct cursor {
-    uint32_t row, column;
-    uint32_t anchor_row, anchor_column;  // Selection anchor
-    bool has_selection;
-};
-```
-
-The array holds up to 100 cursors. This is arbitrary but sufficient—most multi-cursor operations involve a handful of cursors, not hundreds.
-
-Some operations are disabled in multi-cursor mode: inserting newlines (which would require complex logic about cursor positions across new lines) and backspace at line start (which would join lines and invalidate cursor positions). These restrictions keep the implementation tractable while covering the common case: inserting or deleting the same text at multiple positions.
+The trick is ordering. If you have cursors at columns 10 and 20, and you insert a character at each, inserting at column 10 first shifts the second cursor to column 21. The solution is to process cursors in reverse document order: bottom to top, right to left.
 
 ### The Rendering Pipeline
 
-Flicker happens when the terminal shows intermediate states during updates. Draw the background, flicker. Draw the text, flicker. Move the cursor, flicker. The solution is batching: build the entire frame in memory, then send it as a single write.
+Flicker happens when the terminal shows intermediate states during updates. The solution is batching: build the entire frame in memory, then send it as a single write.
 
 ```
 1. Hide cursor
@@ -338,15 +348,38 @@ Flicker happens when the terminal shows intermediate states during updates. Draw
 
 The output buffer accumulates escape sequences and text. Only step 8 touches the terminal. The terminal receives a complete frame atomically.
 
-Line rendering has two modes. In segment mode (wrap enabled), render cells from start to end of the current segment. In scroll mode (wrap disabled), skip cells until the horizontal offset, then render. Both modes apply syntax colors by reading each cell's `syntax` field and emitting the corresponding color escape sequence.
+### Background Worker Thread
+
+Long-running operations like searching large files would freeze the UI if run synchronously. The worker module provides a background thread that processes tasks asynchronously:
+
+```c
+struct worker_task {
+    enum task_type type;      // TASK_SEARCH, TASK_REPLACE, TASK_AUTOSAVE, etc.
+    union { ... } data;       // Task-specific parameters
+};
+```
+
+The main thread pushes tasks to a queue. The worker thread processes them and pushes results back. The main loop polls for results between renders, keeping the UI responsive.
+
+Search results stream in as they're found, highlighting matches incrementally. Replace-all previews the change count before committing. Autosave writes to disk without blocking typing.
+
+### Crash Recovery
+
+Losing unsaved work to a crash is unacceptable. The autosave module provides crash recovery:
+
+1. Every 30 seconds (if modified), save buffer contents to `~/.edit/swap/<filename>.swp`
+2. On clean exit, delete the swap file
+3. On next open, if a swap file exists, offer to recover
+
+The swap file is written atomically: write to a temp file, then rename. This prevents corrupt swap files if the system crashes mid-write.
+
+Fatal signal handlers (SIGSEGV, SIGBUS, etc.) attempt emergency save before terminating. The goal is that no crash loses unsaved work.
 
 ### Error Handling
 
-C programs typically handle errors by returning error codes or NULL pointers. This works but is error-prone—it's easy to forget to check, and errors must be propagated manually through call chains.
-
 The editor borrows idioms from the Linux kernel. The `error.h` header provides:
 
-**ERR_PTR**: Functions returning pointers can encode error codes in the pointer value itself. The top 4095 values of the address space are reserved for errors. This eliminates out-parameters and makes error handling structurally similar to success handling.
+**ERR_PTR**: Functions returning pointers can encode error codes in the pointer value itself. The top 4095 values of the address space are reserved for errors.
 
 ```c
 void *ptr = edit_malloc(size);
@@ -354,41 +387,13 @@ if (IS_ERR(ptr))
     return (int)PTR_ERR(ptr);
 ```
 
-**Checked Functions**: Critical operations have `_checked` variants returning error codes. Wrappers call `BUG_ON()` for callers that don't expect failure—this catches programming errors where the caller assumed an operation couldn't fail.
+**BUG/WARN Macros**: Assertions with different severity. `WARN_ON()` logs and continues. `BUG_ON()` triggers emergency save and abort.
 
-**Emergency Save**: Fatal errors (SIGSEGV, SIGBUS, etc.) trigger signal handlers that attempt to save buffer contents to a recovery file before terminating. The goal is that no crash loses unsaved work.
-
-**BUG/WARN Macros**: Assertions with different severity. `WARN_ON()` logs and continues—for conditions that shouldn't happen but aren't fatal. `BUG_ON()` triggers emergency save and abort—for conditions that indicate corruption or invariant violation.
-
-The philosophy is defense in depth. User-facing operations show friendly error messages in the status bar. Internal operations that can't fail without indicating corruption trigger emergency save. The rare crash should still preserve your work.
+**Emergency Save**: Fatal errors trigger signal handlers that save buffer contents before terminating.
 
 ### The Theme System
 
-Themes could be compile-time constants—49 color schemes embedded in the binary. This would be smaller and simpler. But it would mean recompiling to change colors, and no path for user customization.
-
-The editor embeds themes as data but supports loading custom themes from `~/.edit/themes/` at startup. The theme structure:
-
-```c
-struct theme {
-    char *name;
-    struct syntax_color background, foreground;
-    struct syntax_color line_number, line_number_active;
-    struct syntax_color status_bg, status_fg;
-    struct syntax_color message_bg, message_fg;
-    struct syntax_color selection, search_match, search_current;
-    struct syntax_color cursor_line, whitespace, trailing_ws;
-    struct syntax_color color_column, color_column_line;
-    struct syntax_color dialog_bg, dialog_fg;
-    struct syntax_color dialog_header_bg, dialog_header_fg;
-    struct syntax_color dialog_footer_bg, dialog_footer_fg;
-    struct syntax_color dialog_highlight_bg, dialog_highlight_fg;
-    struct syntax_color syntax[11];
-    struct syntax_color syntax_bg[11];
-    bool syntax_bg_set[11];
-};
-```
-
-Custom themes use INI format:
+Two themes are built in—Dark and Light—providing good defaults without requiring configuration. Custom themes can be added to `~/.edit/themes/` using INI format:
 
 ```ini
 [theme]
@@ -399,34 +404,31 @@ keyword = ff79c6
 string = f1fa8c
 ```
 
-Contrast enforcement is automatic. When a foreground color would have insufficient contrast against a background (selection highlight, search match), the editor adjusts it—lightening or darkening iteratively until WCAG 2.1 AA's 4.5:1 ratio is achieved. This means every theme is accessible without requiring theme authors to understand color theory.
+Contrast enforcement is automatic. When a foreground color would have insufficient contrast against a background, the editor adjusts it until WCAG 2.1 AA's 4.5:1 ratio is achieved.
 
-The theme picker provides live preview. Selecting a theme applies it immediately so you can see how your code looks before confirming. This is possible because themes are pure data with no side effects—switching themes just updates color values and triggers a re-render.
+The theme picker provides live preview—selecting a theme applies it immediately so you can see how your code looks before confirming.
 
 ---
 
 ## Extending the Editor
 
-The architecture makes extension straightforward. Common modifications:
+The modular architecture makes extension straightforward:
 
-**Adding a key binding:** Define a key code in `enum key_code`, detect it in `input_read_key()`, handle it in `editor_process_keypress()`.
+**Adding a key binding:** Define a key code in `types.h`, detect it in `input.c`, handle it in `edit.c`.
 
-**Adding a syntax token:** Add to `enum syntax_token`, define its color in theme files, update `syntax_highlight_line()` to detect and mark it.
+**Adding a syntax token:** Add to `enum syntax_token` in `types.h`, define its color in theme files, update `syntax.c` to detect and mark it.
 
-**Adding a new mode:** Follow the pattern of search, goto, or save-as: a state struct, enter/exit functions, a key handler that returns true if it consumed the key.
+**Adding a new mode:** Follow the pattern of search or goto: a state struct in `types.h`, enter/exit functions, a key handler that returns true if it consumed the key.
 
-The codebase follows Linux kernel style: tabs for indentation, explicit `struct` keywords, `snake_case` naming, functions named `module_verb_object()`. The CODING_STANDARDS.md file documents the conventions in detail.
+**Adding a background task:** Define the task type in `worker.h`, handle it in the worker thread switch statement, process results in the main loop.
+
+The codebase follows Linux kernel style: tabs for indentation, explicit `struct` keywords, `snake_case` naming, functions named `module_verb_object()`. See CODING_STANDARDS.md for details.
 
 ---
 
 ## Building from Source
 
-Requirements: a C17 compiler and make. The editor compiles on Linux, macOS, and BSD. The utflite UTF-8 library is bundled.
-
-The source consists of three files:
-- `src/edit.c` — Main editor implementation (~11,800 lines)
-- `src/error.h` — Error handling infrastructure (~320 lines)
-- `src/error.c` — Error string conversion (~70 lines)
+Requirements: a C17 compiler, make, and pthreads. The editor compiles on Linux, macOS, and BSD. The utflite UTF-8 library is bundled.
 
 ```bash
 make              # Build the editor
@@ -436,7 +438,7 @@ make install      # Install to ~/.local/bin and themes to ~/.edit/themes
 make uninstall    # Remove installed binary and themes
 ```
 
-The compiler is invoked with `-Wall -Wextra -pedantic -O2`. The build should complete with no warnings.
+The compiler is invoked with `-Wall -Wextra -pedantic -O2`. Expected warnings are documented in CLAUDE.md.
 
 ---
 
