@@ -42,6 +42,7 @@
 #include "syntax.h"
 #include "undo.h"
 #include "input.h"
+#include "render.h"
 
 /*
  * Module headers will be added as modules are extracted:
@@ -50,7 +51,7 @@
  * (syntax.h already included above)
  * (undo.h already included above)
  * (input.h already included above)
- * #include "render.h"
+ * (render.h already included above)
  * #include "search.h"
  * #include "worker.h"
  * #include "autosave.h"
