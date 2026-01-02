@@ -434,4 +434,4 @@ The build uses `-Wall -Wextra -pedantic -O2`. A few warnings are expected and do
 
 ## License
 
-MIT
+GPL-2.0-only
