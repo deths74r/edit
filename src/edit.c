@@ -16,10 +16,6 @@
 
 #include "edit.h"
 
-/* Dialog mouse mode flag - when true, mouse events go to dialog handler */
-static bool dialog_mouse_mode = false;
-static struct mouse_input dialog_last_mouse = {0};
-
 static struct open_file_state open_file = {0};
 static struct theme_picker_state theme_picker = {0};
 
@@ -126,8 +122,7 @@ static struct save_as_state save_as = {0};
 /* Quit prompt state - shown when quitting with unsaved changes. */
 static struct quit_prompt_state quit_prompt = {0};
 
-/* Forward declarations for functions used in input_read_key. */
-static struct mouse_input input_parse_sgr_mouse(void);
+/* Forward declaration for mouse handler. */
 static void editor_handle_mouse(struct mouse_input *mouse);
 
 /* Forward declarations for search functions used in mouse handling. */
@@ -2663,7 +2658,6 @@ static void autosave_format_time(time_t t, char *buf, size_t size)
 }
 
 /* Forward declarations for recovery prompt */
-static int input_read_key(void);
 static void output_buffer_append_string(struct output_buffer *output, const char *text);
 static void output_buffer_append_char(struct output_buffer *output, char character);
 static void output_buffer_flush(struct output_buffer *output);
@@ -2955,218 +2949,6 @@ static void output_buffer_free(struct output_buffer *output)
 	output->length = 0;
 	output->capacity = 0;
 }
-
-/*****************************************************************************
- * Input Handling
- *****************************************************************************/
-
-/* Reads a single keypress from stdin, handling escape sequences and UTF-8.
- * Returns the key code (positive for characters/codepoints, negative for
- * special keys like arrows). Returns -1 on error, -2 on terminal resize. */
-static int input_read_key(void)
-{
-	int read_count;
-	unsigned char character;
-
-	while ((read_count = read(STDIN_FILENO, &character, 1)) != 1) {
-		if (read_count == -1 && errno != EAGAIN) {
-			return -1;
-		}
-		if (terminal_check_resize()) {
-			return -2;
-		}
-	}
-
-	/* Handle escape sequences */
-	if (character == '\x1b') {
-		char sequence[4];
-
-		if (read(STDIN_FILENO, &sequence[0], 1) != 1) {
-			return '\x1b';
-		}
-
-		/* Check for Alt+key (Meta sends ESC followed by letter) */
-		if (sequence[0] != '[' && sequence[0] != 'O') {
-			switch (sequence[0]) {
-				case 'n': case 'N': return KEY_ALT_N;
-				case 'p': case 'P': return KEY_ALT_P;
-				case 'z': return KEY_ALT_Z;
-				case 'Z': return KEY_ALT_SHIFT_Z;
-				case 'S': return KEY_ALT_SHIFT_S;
-				case 'k': case 'K': return KEY_ALT_K;
-				case 'd': case 'D': return KEY_ALT_D;
-				case '/': return KEY_ALT_SLASH;
-				case 'a': case 'A': return KEY_ALT_A;
-				case ']': return KEY_ALT_BRACKET;
-				case 'c': case 'C': return KEY_ALT_C;
-				case 'w': case 'W': return KEY_ALT_W;
-				case 'r': return KEY_ALT_R;
-				default: return '\x1b';
-			}
-		}
-
-		if (read(STDIN_FILENO, &sequence[1], 1) != 1) {
-			return '\x1b';
-		}
-
-		if (sequence[0] == '[') {
-			if (sequence[1] >= '0' && sequence[1] <= '9') {
-				if (read(STDIN_FILENO, &sequence[2], 1) != 1) {
-					return '\x1b';
-				}
-				if (sequence[2] == '~') {
-					switch (sequence[1]) {
-						case '1': return KEY_HOME;
-						case '3': return KEY_DELETE;
-						case '4': return KEY_END;
-						case '5': return KEY_PAGE_UP;
-						case '6': return KEY_PAGE_DOWN;
-						case '7': return KEY_HOME;
-						case '8': return KEY_END;
-					}
-				} else if (sequence[2] == ';') {
-					/* Modified key sequences */
-					char modifier, final;
-					if (read(STDIN_FILENO, &modifier, 1) != 1) {
-						return '\x1b';
-					}
-					if (read(STDIN_FILENO, &final, 1) != 1) {
-						return '\x1b';
-					}
-					if (sequence[1] == '1') {
-						/* \x1b[1;{mod}{key} - modified arrow/Home/End */
-						if (modifier == '2') {  /* Shift */
-							switch (final) {
-								case 'A': return KEY_SHIFT_ARROW_UP;
-								case 'B': return KEY_SHIFT_ARROW_DOWN;
-								case 'C': return KEY_SHIFT_ARROW_RIGHT;
-								case 'D': return KEY_SHIFT_ARROW_LEFT;
-								case 'H': return KEY_SHIFT_HOME;
-								case 'F': return KEY_SHIFT_END;
-								case 'S': return KEY_SHIFT_F4;
-							}
-						} else if (modifier == '5') {  /* Ctrl */
-							switch (final) {
-								case 'C': return KEY_CTRL_ARROW_RIGHT;
-								case 'D': return KEY_CTRL_ARROW_LEFT;
-							}
-						} else if (modifier == '6') {  /* Ctrl+Shift */
-							switch (final) {
-								case 'C': return KEY_CTRL_SHIFT_ARROW_RIGHT;
-								case 'D': return KEY_CTRL_SHIFT_ARROW_LEFT;
-							}
-						} else if (modifier == '3') {  /* Alt */
-							switch (final) {
-								case 'A': return KEY_ALT_ARROW_UP;
-								case 'B': return KEY_ALT_ARROW_DOWN;
-							}
-						}
-					} else if ((sequence[1] == '5' || sequence[1] == '6') &&
-					           modifier == '2' && final == '~') {
-						/* \x1b[5;2~ or \x1b[6;2~ - Shift+PageUp/Down */
-						if (sequence[1] == '5') return KEY_SHIFT_PAGE_UP;
-						if (sequence[1] == '6') return KEY_SHIFT_PAGE_DOWN;
-					}
-				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
-					/* Two-digit escape sequence like \x1b[12~ for F2 */
-					if (read(STDIN_FILENO, &sequence[3], 1) != 1) {
-						return '\x1b';
-					}
-					if (sequence[3] == '~') {
-						if (sequence[1] == '1' && sequence[2] == '2') {
-							return KEY_F2;
-						} else if (sequence[1] == '1' && sequence[2] == '3') {
-							return KEY_F3;
-						} else if (sequence[1] == '1' && sequence[2] == '4') {
-							return KEY_F4;
-						} else if (sequence[1] == '1' && sequence[2] == '5') {
-							return KEY_F5;
-						} else if (sequence[1] == '2' && sequence[2] == '4') {
-							return KEY_F12;
-						}
-					}
-				}
-			} else if (sequence[1] == '<') {
-				/* SGR mouse event: \x1b[<button;column;row{M|m} */
-				struct mouse_input mouse = input_parse_sgr_mouse();
-				if (mouse.event != MOUSE_NONE) {
-					if (dialog_mouse_mode) {
-						dialog_last_mouse = mouse;
-					} else {
-						editor_handle_mouse(&mouse);
-					}
-				}
-				return KEY_MOUSE_EVENT;
-			} else {
-				switch (sequence[1]) {
-					case 'A': return KEY_ARROW_UP;
-					case 'B': return KEY_ARROW_DOWN;
-					case 'C': return KEY_ARROW_RIGHT;
-					case 'D': return KEY_ARROW_LEFT;
-					case 'H': return KEY_HOME;
-					case 'F': return KEY_END;
-					case 'Z': return KEY_SHIFT_TAB;
-				}
-			}
-		} else if (sequence[0] == 'O') {
-			switch (sequence[1]) {
-				case 'H': return KEY_HOME;
-				case 'F': return KEY_END;
-				case 'Q': return KEY_F2;
-				case 'R': return KEY_F3;
-				case 'S': return KEY_F4;
-			}
-		}
-
-		return '\x1b';
-	}
-
-	/* Handle UTF-8 multi-byte sequences */
-	if (character & 0x80) {
-		char utf8_buffer[4];
-		utf8_buffer[0] = character;
-		int bytes_to_read = 0;
-
-		/* Determine number of continuation bytes based on lead byte */
-		if ((character & 0xE0) == 0xC0) {
-			bytes_to_read = 1;  /* 2-byte sequence */
-		} else if ((character & 0xF0) == 0xE0) {
-			bytes_to_read = 2;  /* 3-byte sequence */
-		} else if ((character & 0xF8) == 0xF0) {
-			bytes_to_read = 3;  /* 4-byte sequence */
-		} else {
-			/* Invalid UTF-8 lead byte, return replacement character */
-			return UTFLITE_REPLACEMENT_CHAR;
-		}
-
-		/* Read continuation bytes */
-		for (int i = 0; i < bytes_to_read; i++) {
-			if (read(STDIN_FILENO, &utf8_buffer[1 + i], 1) != 1) {
-				return UTFLITE_REPLACEMENT_CHAR;
-			}
-			/* Verify continuation byte */
-			if ((utf8_buffer[1 + i] & 0xC0) != 0x80) {
-				return UTFLITE_REPLACEMENT_CHAR;
-			}
-		}
-
-		/* Decode UTF-8 to codepoint */
-		uint32_t codepoint;
-		utflite_decode(utf8_buffer, bytes_to_read + 1, &codepoint);
-		return (int)codepoint;
-	}
-
-	/* Handle Ctrl+O and Ctrl+T for open file and theme picker */
-	if (character == CONTROL_KEY('o')) {
-		return KEY_CTRL_O;
-	}
-	if (character == CONTROL_KEY('t')) {
-		return KEY_CTRL_T;
-	}
-
-	return character;
-}
-
 
 /*****************************************************************************
  * File Operations
@@ -6076,60 +5858,6 @@ static void editor_select_next_occurrence(void)
 }
 
 /*
- * Parse SGR mouse event after reading \x1b[<. Returns the parsed mouse
- * input or sets event to MOUSE_NONE on parse failure.
- */
-static struct mouse_input input_parse_sgr_mouse(void)
-{
-	struct mouse_input mouse = {.event = MOUSE_NONE, .row = 0, .column = 0};
-	char buffer[32];
-	int len = 0;
-
-	/* Read until 'M' (press) or 'm' (release) */
-	while (len < 31) {
-		if (read(STDIN_FILENO, &buffer[len], 1) != 1) {
-			return mouse;
-		}
-		if (buffer[len] == 'M' || buffer[len] == 'm') {
-			break;
-		}
-		len++;
-	}
-
-	char final = buffer[len];
-	buffer[len] = '\0';
-
-	/* Parse button;column;row */
-	int button, col, row;
-	if (sscanf(buffer, "%d;%d;%d", &button, &col, &row) != 3) {
-		return mouse;
-	}
-
-	/* Convert to 0-based coordinates */
-	mouse.column = (col > 0) ? (uint32_t)(col - 1) : 0;
-	mouse.row = (row > 0) ? (uint32_t)(row - 1) : 0;
-
-	/* Decode button field */
-	int button_number = button & 0x03;
-	bool is_drag = (button & 0x20) != 0;
-	bool is_scroll = (button & 0x40) != 0;
-
-	if (is_scroll) {
-		mouse.event = (button_number == 0) ? MOUSE_SCROLL_UP : MOUSE_SCROLL_DOWN;
-	} else if (button_number == 0) {
-		if (is_drag) {
-			mouse.event = MOUSE_LEFT_DRAG;
-		} else if (final == 'M') {
-			mouse.event = MOUSE_LEFT_PRESS;
-		} else {
-			mouse.event = MOUSE_LEFT_RELEASE;
-		}
-	}
-
-	return mouse;
-}
-
-/*
  * Calculate adaptive scroll amount based on scroll velocity.
  * Tracks time between scroll events and uses exponential smoothing
  * to determine if user is scrolling slowly (precision) or quickly
@@ -8870,7 +8598,7 @@ static char *path_join(const char *directory, const char *filename)
 static void dialog_close(struct dialog_state *dialog)
 {
 	dialog->active = false;
-	dialog_mouse_mode = false;
+	input_set_dialog_mouse_mode(false);
 
 	/* Show cursor again now that dialog is closed */
 	write(STDOUT_FILENO, "\x1b[?25h", 6);
@@ -9063,7 +8791,7 @@ static char *open_file_dialog(void)
 	}
 
 	/* Enable dialog mouse mode and flush any pending input */
-	dialog_mouse_mode = true;
+	input_set_dialog_mouse_mode(true);
 	tcflush(STDIN_FILENO, TCIFLUSH);
 
 	char *result = NULL;
@@ -9079,7 +8807,7 @@ static char *open_file_dialog(void)
 		}
 
 		/* Handle resize */
-		if (key == -2) {
+		if (key == KEY_RESIZE) {
 			if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns)) {
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
@@ -9090,7 +8818,8 @@ static char *open_file_dialog(void)
 
 		/* Check for mouse event */
 		if (key == KEY_MOUSE_EVENT) {
-			enum dialog_result dr = dialog_handle_mouse(&open_file.dialog, &dialog_last_mouse);
+			struct mouse_input last_mouse = input_get_last_mouse();
+			enum dialog_result dr = dialog_handle_mouse(&open_file.dialog, &last_mouse);
 
 			if (dr == DIALOG_CONFIRM) {
 				result = open_file_select_item();
@@ -9347,7 +9076,7 @@ static int theme_picker_dialog(void)
 	dialog_ensure_visible(&theme_picker.dialog);
 
 	/* Enable dialog mouse mode and flush pending input */
-	dialog_mouse_mode = true;
+	input_set_dialog_mouse_mode(true);
 	tcflush(STDIN_FILENO, TCIFLUSH);
 
 	int result = -1;
@@ -9373,7 +9102,7 @@ static int theme_picker_dialog(void)
 		}
 
 		/* Handle resize */
-		if (key == -2) {
+		if (key == KEY_RESIZE) {
 			if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns)) {
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
@@ -9384,7 +9113,8 @@ static int theme_picker_dialog(void)
 
 		/* Check for mouse event */
 		if (key == KEY_MOUSE_EVENT) {
-			enum dialog_result dr = dialog_handle_mouse(&theme_picker.dialog, &dialog_last_mouse);
+			struct mouse_input last_mouse = input_get_last_mouse();
+			enum dialog_result dr = dialog_handle_mouse(&theme_picker.dialog, &last_mouse);
 
 			if (dr == DIALOG_CONFIRM) {
 				result = theme_picker.dialog.selected_index;
@@ -10898,7 +10628,7 @@ static void editor_process_keypress(void)
 		return;
 	}
 
-	if (key == -2) {
+	if (key == KEY_RESIZE) {
 		/* Terminal resize */
 		editor_update_screen_size();
 		return;
@@ -11151,6 +10881,7 @@ int main(int argument_count, char *argument_values[])
 	}
 
 	terminal_enable_mouse();
+	input_set_mouse_handler(editor_handle_mouse);
 
 	/* Set up signal handler for window resize */
 	struct sigaction signal_action;

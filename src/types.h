@@ -215,6 +215,9 @@ enum key_code {
 	KEY_CTRL_SHIFT_ARROW_LEFT = -52,
 	KEY_CTRL_SHIFT_ARROW_RIGHT = -51,
 
+	/* Terminal resize event. */
+	KEY_RESIZE = -2,
+
 	/* Mouse events (handled internally, not returned). */
 	KEY_MOUSE_EVENT = -3
 };
