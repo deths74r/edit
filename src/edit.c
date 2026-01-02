@@ -4547,11 +4547,13 @@ static void render_draw_rows(struct output_buffer *output)
 	for (uint32_t screen_row = 0; screen_row < editor.screen_rows; screen_row++) {
 		output_buffer_append_string(output, ESCAPE_CLEAR_LINE);
 
-		bool is_empty_buffer_first_line = (editor.buffer.line_count == 0 && file_row == 0);
+		bool is_empty_buffer = (editor.buffer.line_count == 1 &&
+		                        editor.buffer.lines[0].cell_count == 0);
+		bool is_empty_buffer_first_line = (is_empty_buffer && file_row == 0);
 
 		if (file_row >= editor.buffer.line_count && !is_empty_buffer_first_line) {
 			/* Empty line past end of file */
-			if (editor.buffer.line_count == 0 && screen_row == welcome_row) {
+			if (is_empty_buffer && screen_row == welcome_row) {
 				/* Welcome message */
 				char color_escape[128];
 				int escape_len = style_to_escape(&active_theme.welcome,
