@@ -200,6 +200,37 @@ struct cell {
 };
 ```
 
+Visually:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                         12 bytes                            │
+├──────────────┬─────────┬────────┬───────┬──────────────────┤
+│   codepoint  │  syntax │neighbor│ flags │     context      │
+│   4 bytes    │ 2 bytes │ 1 byte │1 byte │     4 bytes      │
+└──────────────┴─────────┴────────┴───────┴──────────────────┘
+```
+
+Here's how the code `if (x)` is represented as cells:
+
+```
+ 'i'       'f'       ' '       '('       'x'       ')'
+  │         │         │         │         │         │
+  ▼         ▼         ▼         ▼         ▼         ▼
+┌─────┐   ┌─────┐   ┌─────┐   ┌─────┐   ┌─────┐   ┌─────┐
+│0x69 │   │0x66 │   │0x20 │   │0x28 │   │0x78 │   │0x29 │
+├─────┤   ├─────┤   ├─────┤   ├─────┤   ├─────┤   ├─────┤
+│ KWD │   │ KWD │   │NORM │   │BRKT │   │NORM │   │BRKT │
+├─────┤   ├─────┤   ├─────┤   ├─────┤   ├─────┤   ├─────┤
+│START│   │ END │   │SOLO │   │SOLO │   │SOLO │   │SOLO │
+├─────┤   ├─────┤   ├─────┤   ├─────┤   ├─────┤   ├─────┤
+│  —  │   │  —  │   │  —  │   │ #1  │◄──┼──►──┼──►│ #1  │
+│     │   │     │   │     │   │open │   │     │   │close│
+└─────┘   └─────┘   └─────┘   └─────┘   └─────┘   └─────┘
+```
+
+The `(` and `)` share pair ID #1, enabling instant bracket matching. The `if` keyword spans two cells with START/END positions, enabling word-jump navigation.
+
 Twelve bytes per character. This is larger than storing raw UTF-8 (1-4 bytes per codepoint), but the metadata enables features that would otherwise require expensive scans:
 
 - **syntax** stores the highlighting category (keyword, string, comment, etc.) so rendering doesn't recompute it
