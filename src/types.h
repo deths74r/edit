@@ -156,6 +156,9 @@
 /* Clipboard buffer sizes */
 #define CLIPBOARD_INITIAL_CAPACITY 4096
 #define CLIPBOARD_READ_CHUNK_SIZE 1024
+/* Stdin reading */
+#define STDIN_INITIAL_CAPACITY 65536
+#define STDIN_READ_CHUNK_SIZE 4096
 /* Syntax parsing */
 #define BRACKET_STACK_SIZE 256
 /* Color parsing */

@@ -174,6 +174,12 @@ void buffer_init(struct buffer *buffer);
  * Free all buffer resources.
  */
 void buffer_free(struct buffer *buffer);
+/*
+ * Load buffer content from a memory block (for stdin pipe input).
+ * Content is parsed into HOT lines (fully in-memory, no mmap backing).
+ * Returns 0 on success, -ENOMEM on allocation failure.
+ */
+int buffer_load_from_memory(struct buffer *buffer, const char *content, size_t size);
 
 /*
  * Ensure buffer can hold at least 'required' lines.

@@ -1106,6 +1106,51 @@ static void file_build_line_index(struct buffer *buffer)
 		}
 	}
 }
+/*
+ * Read all available data from stdin into a dynamically allocated buffer.
+ * Used when stdin is a pipe (not a terminal) to load piped content.
+ *
+ * Returns allocated buffer on success (caller must free).
+ * Returns NULL on error or empty input.
+ * Sets out_size to number of bytes read (or bytes attempted on error).
+ */
+char *stdin_read_all(size_t *out_size)
+{
+	size_t capacity = STDIN_INITIAL_CAPACITY;
+	size_t length = 0;
+	char *buffer = malloc(capacity);
+	if (buffer == NULL) {
+		*out_size = 0;
+		return NULL;
+	}
+	while (1) {
+		/* Grow buffer if needed */
+		if (length + STDIN_READ_CHUNK_SIZE > capacity) {
+			capacity *= 2;
+			char *new_buffer = realloc(buffer, capacity);
+			if (new_buffer == NULL) {
+				free(buffer);
+				*out_size = length;
+				return NULL;
+			}
+			buffer = new_buffer;
+		}
+		ssize_t bytes_read = read(STDIN_FILENO, buffer + length,
+		                          STDIN_READ_CHUNK_SIZE);
+		if (bytes_read < 0) {
+			if (errno == EINTR)
+				continue;
+			free(buffer);
+			*out_size = length;
+			return NULL;
+		}
+		if (bytes_read == 0)
+			break;  /* EOF */
+		length += bytes_read;
+	}
+	*out_size = length;
+	return buffer;
+}
 
 /*
  * Load a file from disk into a buffer using mmap. The file is memory-mapped
@@ -2584,6 +2629,11 @@ void editor_save(void)
 {
 	if (editor.buffer.filename == NULL) {
 		editor_set_status_message("No filename specified");
+		return;
+	}
+	/* Cannot save to stdin - prompt user to use Save As */
+	if (strcmp(editor.buffer.filename, "<stdin>") == 0) {
+		editor_set_status_message("Use Alt+Shift+S or F12 to Save As");
 		return;
 	}
 

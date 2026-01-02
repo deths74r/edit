@@ -21,6 +21,7 @@ extern struct editor_state editor;
 /* Functions from edit.c */
 extern void fatal_signal_handler(int sig);
 extern int file_open(struct buffer *buffer, const char *filename);
+extern char *stdin_read_all(size_t *out_size);
 extern void editor_handle_mouse(struct mouse_input *mouse);
 extern void editor_process_keypress(void);
 
@@ -37,9 +38,39 @@ extern void editor_process_keypress(void);
  */
 int main(int argument_count, char *argument_values[])
 {
+	/* Detect if stdin is a pipe (not a terminal) */
+	bool stdin_is_pipe = !isatty(STDIN_FILENO);
+	char *stdin_content = NULL;
+	size_t stdin_size = 0;
+
+	if (stdin_is_pipe) {
+		/*
+		 * Only read stdin content if no file argument given.
+		 * When a file is specified, stdin content is discarded.
+		 */
+		if (argument_count < 2) {
+			stdin_content = stdin_read_all(&stdin_size);
+			if (stdin_content == NULL && stdin_size > 0) {
+				fprintf(stderr, "edit: failed to read stdin\n");
+				return 1;
+			}
+		}
+
+		/* Reopen stdin from /dev/tty for interactive input */
+		int tty_fd = open("/dev/tty", O_RDWR);
+		if (tty_fd < 0) {
+			fprintf(stderr, "edit: cannot open /dev/tty: %s\n", strerror(errno));
+			free(stdin_content);
+			return 1;
+		}
+		dup2(tty_fd, STDIN_FILENO);
+		close(tty_fd);
+	}
+
 	int ret = terminal_enable_raw_mode();
 	if (ret) {
 		fprintf(stderr, "edit: %s\n", edit_strerror(ret));
+		free(stdin_content);
 		return 1;
 	}
 
@@ -63,7 +94,21 @@ int main(int argument_count, char *argument_values[])
 	editor_init();
 	editor_update_screen_size();
 
-	if (argument_count >= 2) {
+	/* Load content from stdin pipe if available */
+	if (stdin_content != NULL) {
+		int ret = buffer_load_from_memory(&editor.buffer, stdin_content, stdin_size);
+		free(stdin_content);
+		stdin_content = NULL;
+
+		if (ret != 0) {
+			editor_set_status_message("Failed to load stdin: %s", edit_strerror(ret));
+		} else {
+			editor.buffer.filename = strdup("<stdin>");
+			editor.buffer.is_modified = true;
+			editor_set_status_message("Read %zu bytes from stdin", stdin_size);
+		}
+		autosave_update_path();
+	} else if (argument_count >= 2) {
 		const char *filename = argument_values[1];
 
 		/* Check for swap file (crash recovery) */

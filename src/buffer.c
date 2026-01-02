@@ -635,3 +635,80 @@ void buffer_swap_lines(struct buffer *buffer, uint32_t row1, uint32_t row2)
 	buffer->lines[row1] = buffer->lines[row2];
 	buffer->lines[row2] = temp;
 }
+/*
+ * Load buffer content from a memory block (for stdin pipe input).
+ * Content is parsed into HOT lines (fully in-memory, no mmap backing).
+ * The caller retains ownership of the content pointer.
+ *
+ * Returns 0 on success, -ENOMEM on allocation failure.
+ */
+int buffer_load_from_memory(struct buffer *buffer, const char *content, size_t size)
+{
+	buffer_init(buffer);
+	if (size == 0) {
+		/* Empty input - create single empty line */
+		int ret = buffer_ensure_capacity_checked(buffer, 1);
+		if (ret)
+			return ret;
+		line_init(&buffer->lines[0]);
+		buffer->line_count = 1;
+		return 0;
+	}
+	/* Count lines (number of '\n' characters, plus 1 for last line) */
+	size_t line_count = 1;
+	for (size_t i = 0; i < size; i++) {
+		if (content[i] == '\n')
+			line_count++;
+	}
+	/* Handle trailing newline - don't create empty line after it */
+	if (size > 0 && content[size - 1] == '\n')
+		line_count--;
+	if (line_count == 0)
+		line_count = 1;
+	int ret = buffer_ensure_capacity_checked(buffer, line_count);
+	if (ret)
+		return ret;
+	/* Parse lines and decode UTF-8 into cells */
+	const char *line_start = content;
+	uint32_t line_index = 0;
+	for (size_t i = 0; i <= size; i++) {
+		bool is_end = (i == size);
+		bool is_newline = (i < size && content[i] == '\n');
+		if (is_end || is_newline) {
+			size_t line_length = (content + i) - line_start;
+			/* Skip final empty line after trailing newline */
+			if (is_end && line_length == 0 && line_index > 0)
+				break;
+			struct line *line = &buffer->lines[line_index];
+			line_init(line);
+			/* Decode UTF-8 content into cells */
+			size_t offset = 0;
+			while (offset < line_length) {
+				uint32_t codepoint;
+				int bytes = utflite_decode(line_start + offset,
+				                           line_length - offset,
+				                           &codepoint);
+				ret = line_append_cell_checked(line, codepoint);
+				if (ret) {
+					/* Cleanup on failure */
+					for (uint32_t j = 0; j <= line_index; j++)
+						line_free(&buffer->lines[j]);
+					buffer->line_count = 0;
+					return ret;
+				}
+				offset += bytes;
+			}
+			/* Mark as HOT (no mmap backing) */
+			line_set_temperature(line, LINE_TEMPERATURE_HOT);
+			/* Compute neighbor data for word boundaries */
+			neighbor_compute_line(line);
+			line_start = content + i + 1;
+			line_index++;
+		}
+	}
+	buffer->line_count = line_index;
+	buffer->file_descriptor = -1;
+	buffer->mmap_base = NULL;
+	buffer->mmap_size = 0;
+	return 0;
+}
