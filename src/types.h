@@ -879,6 +879,7 @@ struct editor_state {
 
 	/* Visual display settings. */
 	bool show_whitespace;        /* Render whitespace characters visibly */
+	bool show_file_icons;        /* Show file/folder icons in dialogs */
 	uint32_t color_column;       /* Column to highlight (0 = off) */
 	enum color_column_style color_column_style;  /* Visual style for column */
 	enum theme_indicator theme_indicator;  /* Current theme marker style */

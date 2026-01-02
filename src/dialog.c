@@ -246,6 +246,16 @@ void dialog_draw_list_item(struct output_buffer *output,
 	output_buffer_append_char(output, ' ');
 	chars_written++;
 
+	/* Draw folder icon or matching indent for alignment */
+	if (editor.show_file_icons) {
+		if (is_directory) {
+			output_buffer_append_string(output, "🗁  ");
+		} else {
+			output_buffer_append_string(output, "   ");
+		}
+		chars_written += 3;  /* Icon/indent is 3 cells */
+	}
+
 	for (int i = 0; i < text_length && chars_written < dialog->panel_width - 1; i++) {
 		output_buffer_append_char(output, text[i]);
 		chars_written++;
@@ -879,7 +889,7 @@ static void open_file_draw(void)
 
 	/* Draw footer */
 	dialog_draw_footer(&output, &open_file.dialog,
-	                   "Enter:Open  Left:Parent  Esc:Cancel");
+	                   "Enter:Open  Left:Parent  Tab:Icons  Esc:Cancel");
 
 	/* Reset attributes, keep cursor hidden while dialog is active */
 	output_buffer_append_string(&output, ESCAPE_RESET);
@@ -983,6 +993,12 @@ char *open_file_dialog(void)
 			    open_file.items[open_file.dialog.selected_index].is_directory) {
 				open_file_select_item();
 			}
+			continue;
+		}
+
+		/* Tab toggles file/folder icons */
+		if (key == '\t') {
+			editor.show_file_icons = !editor.show_file_icons;
 			continue;
 		}
 

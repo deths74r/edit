@@ -74,6 +74,7 @@ void editor_init(void)
 	editor.wrap_mode = WRAP_WORD;
 	editor.wrap_indicator = WRAP_INDICATOR_RETURN;
 	editor.show_whitespace = false;
+	editor.show_file_icons = true;
 	editor.color_column = 0;
 	editor.color_column_style = COLOR_COLUMN_SOLID;
 	editor.theme_indicator = THEME_INDICATOR_CHECK;
