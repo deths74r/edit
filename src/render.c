@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * render.c - Screen rendering for edit
  *
  * Handles output buffering, screen refresh, status bar,

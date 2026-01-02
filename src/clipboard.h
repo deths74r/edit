@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * clipboard.h - System clipboard integration for edit
  *
  * Provides copy, cut, and paste with system clipboard.

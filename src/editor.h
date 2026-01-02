@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * editor.h - Core editor state and operations for edit
  *
  * Provides initialization, status messages, screen management,

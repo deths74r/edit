@@ -1,3 +1,8 @@
+/*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
 /*****************************************************************************
  * edit - A minimal terminal text editor
  * Phase 25A: Foundation Headers

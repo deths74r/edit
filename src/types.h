@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * types.h - Shared type definitions for edit
  *
  * This header contains all struct definitions, enums, and constants

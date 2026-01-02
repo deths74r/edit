@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * search.c - Search and replace for edit
  *
  * Provides async search and replace infrastructure

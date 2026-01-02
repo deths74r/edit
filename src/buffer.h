@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * buffer.h - Buffer and line management for edit
  *
  * Provides buffer initialization, file loading/saving,

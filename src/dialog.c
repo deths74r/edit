@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * dialog.c - Dialog panels for edit
  *
  * Provides modal dialog infrastructure, file browser,

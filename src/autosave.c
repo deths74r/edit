@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * autosave.c - Auto-save and crash recovery for edit
  *
  * Provides periodic automatic saves to swap files and

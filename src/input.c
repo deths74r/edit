@@ -1,4 +1,9 @@
 /*
+ * SPDX-License-Identifier: GPL-2.0-only
+ * Copyright (C) 2024-2025 Edward Edmonds
+ */
+
+/*
  * input.c - Input handling for edit
  *
  * Handles keyboard and mouse input parsing, including:
