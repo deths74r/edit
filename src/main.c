@@ -165,8 +165,12 @@ int main(int argument_count, char *argument_values[])
 	editor_update_gutter_width();
 	editor_set_status_message("HELP: Ctrl-S = save | Ctrl-Q = quit | F2 = toggle line numbers");
 
-	/* Track last autosave check time */
+	/* Track last check times */
 	static time_t last_autosave_check = 0;
+	static time_t last_filechange_check = 0;
+
+	/* How often to check for external file changes (seconds) */
+	#define FILECHANGE_CHECK_INTERVAL_SECONDS 2
 
 	while (1) {
 		int ret = render_refresh_screen();
@@ -179,11 +183,21 @@ int main(int argument_count, char *argument_values[])
 		editor_process_keypress();
 		worker_process_results();
 
-		/* Check auto-save periodically */
 		time_t now = time(NULL);
+
+		/* Check auto-save periodically */
 		if (now - last_autosave_check >= AUTOSAVE_CHECK_INTERVAL_SECONDS) {
 			autosave_check();
 			last_autosave_check = now;
+		}
+
+		/* Check for external file changes periodically */
+		if (now - last_filechange_check >= FILECHANGE_CHECK_INTERVAL_SECONDS) {
+			if (!reload_prompt_is_active() &&
+			    file_check_external_change(&editor.buffer)) {
+				reload_prompt_enter();
+			}
+			last_filechange_check = now;
 		}
 	}
 

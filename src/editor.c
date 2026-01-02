@@ -749,3 +749,95 @@ bool quit_prompt_handle_key(int key)
 	editor_set_status_message("Unsaved changes! Save before quitting? [y]es [n]o [c]ancel: ");
 	return true;
 }
+
+/*****************************************************************************
+ * Reload Prompt
+ *****************************************************************************/
+
+static struct reload_prompt_state reload_prompt = {0};
+
+/*
+ * Enter reload prompt mode when file changes on disk.
+ */
+void reload_prompt_enter(void)
+{
+	reload_prompt.active = true;
+	editor_set_status_message("File changed on disk. [R]eload [K]eep: ");
+}
+
+/*
+ * Check if reload prompt is currently active.
+ */
+bool reload_prompt_is_active(void)
+{
+	return reload_prompt.active;
+}
+
+/*
+ * Reload the current file from disk, preserving cursor position.
+ */
+void editor_reload_file(void)
+{
+	if (editor.buffer.filename == NULL)
+		return;
+
+	/* Save filename before freeing buffer */
+	char *filename = edit_strdup(editor.buffer.filename);
+	if (IS_ERR(filename)) {
+		editor_set_status_message("Reload failed: out of memory");
+		return;
+	}
+
+	/* Save cursor position for restoration */
+	uint32_t saved_row = editor.cursor_row;
+	uint32_t saved_column = editor.cursor_column;
+
+	/* Free current buffer and reload */
+	buffer_free(&editor.buffer);
+	buffer_init(&editor.buffer);
+
+	int ret = file_open(&editor.buffer, filename);
+	if (ret) {
+		editor_set_status_message("Reload failed: %s", edit_strerror(ret));
+		free(filename);
+		return;
+	}
+	free(filename);
+
+	/* Restore cursor position, clamped to new file bounds */
+	if (saved_row >= editor.buffer.line_count)
+		saved_row = editor.buffer.line_count > 0 ? editor.buffer.line_count - 1 : 0;
+	editor.cursor_row = saved_row;
+	editor.cursor_column = saved_column;
+
+	editor_set_status_message("File reloaded");
+}
+
+/*
+ * Handle input in reload prompt mode.
+ */
+bool reload_prompt_handle_key(int key)
+{
+	if (!reload_prompt.active)
+		return false;
+
+	if (key == 'r' || key == 'R') {
+		reload_prompt.active = false;
+		editor_reload_file();
+		return true;
+	}
+
+	if (key == 'k' || key == 'K' || key == '\x1b') {
+		reload_prompt.active = false;
+		/* Update stored mtime so we don't prompt again for this change */
+		struct stat st;
+		if (stat(editor.buffer.filename, &st) == 0)
+			editor.buffer.file_mtime = st.st_mtime;
+		editor_set_status_message("Keeping local version");
+		return true;
+	}
+
+	/* Repeat prompt for unrecognized keys */
+	editor_set_status_message("File changed on disk. [R]eload [K]eep: ");
+	return true;
+}

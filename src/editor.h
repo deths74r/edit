@@ -222,4 +222,45 @@ void quit_prompt_enter(void);
  */
 bool quit_prompt_handle_key(int key);
 
+/*****************************************************************************
+ * Reload Prompt
+ *****************************************************************************/
+
+/*
+ * Enter reload prompt mode when file changes externally.
+ */
+void reload_prompt_enter(void);
+
+/*
+ * Handle input in reload prompt mode.
+ * Returns true if key was handled.
+ */
+bool reload_prompt_handle_key(int key);
+
+/*
+ * Check if reload prompt is currently active.
+ */
+bool reload_prompt_is_active(void);
+
+/*
+ * Reload the current file from disk, preserving cursor position.
+ */
+void editor_reload_file(void);
+
+/*****************************************************************************
+ * External File Change Detection
+ *****************************************************************************/
+
+/*
+ * Check if the file on disk has been modified since we loaded it.
+ * Returns true if external changes detected.
+ */
+bool file_check_external_change(struct buffer *buffer);
+
+/*
+ * Open a file and load it into a buffer.
+ * Returns 0 on success, negative error code on failure.
+ */
+int __must_check file_open(struct buffer *buffer, const char *filename);
+
 #endif /* EDIT_EDITOR_H */

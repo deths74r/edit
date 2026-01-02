@@ -1211,6 +1211,7 @@ int __must_check file_open(struct buffer *buffer, const char *filename)
 	}
 	buffer->filename = name;
 	buffer->is_modified = false;
+	buffer->file_mtime = st.st_mtime;
 
 	/* Compute pairs across entire buffer (warms all lines) */
 	buffer_compute_pairs(buffer);
@@ -1221,6 +1222,23 @@ int __must_check file_open(struct buffer *buffer, const char *filename)
 	}
 
 	return 0;
+}
+
+/*
+ * Check if the file on disk has been modified externally since we loaded it.
+ * Returns true if the file's mtime differs from the stored mtime.
+ * Returns false for new files (no filename) or if the file cannot be stat'd.
+ */
+bool file_check_external_change(struct buffer *buffer)
+{
+	if (buffer->filename == NULL)
+		return false;
+
+	struct stat st;
+	if (stat(buffer->filename, &st) < 0)
+		return false;
+
+	return st.st_mtime != buffer->file_mtime;
 }
 
 /*
@@ -1287,6 +1305,12 @@ int __must_check file_save(struct buffer *buffer)
 		return -errno;
 
 	buffer->is_modified = false;
+
+	/* Update stored mtime to prevent false external change detection */
+	struct stat st;
+	if (stat(buffer->filename, &st) == 0)
+		buffer->file_mtime = st.st_mtime;
+
 	editor_set_status_message("%zu bytes written to disk", total_bytes);
 
 	/* Remove swap file after successful save */
@@ -6106,6 +6130,11 @@ void editor_process_keypress(void)
 
 	/* Handle quit prompt input */
 	if (quit_prompt_handle_key(key)) {
+		return;
+	}
+
+	/* Handle reload prompt input */
+	if (reload_prompt_handle_key(key)) {
 		return;
 	}
 

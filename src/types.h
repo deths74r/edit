@@ -773,6 +773,9 @@ struct buffer {
 	/* True if the buffer has unsaved changes. */
 	bool is_modified;
 
+	/* Modification time when file was loaded, for external change detection. */
+	time_t file_mtime;
+
 	/* File descriptor for mmap, or -1 if no file mapped. */
 	int file_descriptor;
 
@@ -1075,6 +1078,11 @@ struct save_as_state {
 
 /* Quit prompt state - shown when quitting with unsaved changes. */
 struct quit_prompt_state {
+	bool active;
+};
+
+/* Reload prompt state - shown when file changes externally. */
+struct reload_prompt_state {
 	bool active;
 };
 
