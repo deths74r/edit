@@ -58,6 +58,8 @@ cat somefile.txt | ./edit
 
 If edit crashes (or your SSH connection drops, or your laptop dies), it maintains a swap file. On restart, you'll be offered the chance to recover your work.
 
+If another process modifies the file while you're editing, edit detects the change and prompts you: `File changed on disk. [R]eload [K]eep:`. Reload discards your changes and loads the new version; Keep ignores the external change and continues with your version. This check runs every two seconds.
+
 ### Navigation
 
 Arrow keys move the cursor. Unlike simpler editors, edit moves by *grapheme cluster*—the thing humans think of as "one character"—not by byte or codepoint. This means emoji, combining accents, and complex scripts work correctly.
