@@ -1330,7 +1330,8 @@ static void help_draw(void)
 	/* Calculate dimensions to fit all content */
 	int content_rows = help_item_count;
 	int panel_height = content_rows + 2;  /* +2 for header and footer */
-	int panel_width = 50;  /* Wide enough for longest keybinding line */
+	int key_column_width = 24;  /* Fits "Ctrl+Shift+Left/Right" */
+	int panel_width = 60;  /* Wide enough for key + description */
 
 	/* Center the panel */
 	int panel_top = ((int)editor.screen_rows - panel_height) / 2;
@@ -1373,9 +1374,9 @@ static void help_draw(void)
 				         panel_width - padding - desc_len, "");
 			}
 		} else {
-			/* Keybinding entry: "  Key              Description" */
-			snprintf(line, sizeof(line), "  %-18s %s",
-			         item->key, item->description);
+			/* Keybinding entry: "  Key                    Description" */
+			snprintf(line, sizeof(line), "  %-*s %s",
+			         key_column_width, item->key, item->description);
 			/* Pad to panel width */
 			int line_len = (int)strlen(line);
 			if (line_len < panel_width) {
