@@ -130,19 +130,144 @@ The theme picker shows a live preview as you navigate. Press Enter to select, Es
 
 ### Custom Themes
 
-Place `.ini` files in `~/.edit/themes/`. Format:
+Place `.ini` files in `~/.edit/themes/`. Edit scans this directory on startup.
+
+#### Format
+
+Theme files use a simple `key=value` format (no INI section headers needed):
 
 ```ini
-[theme]
-name = My Theme
-background = #1a1a1a
-foreground = #d4d4d4
+# Comments start with #
+name=My Custom Theme
 
-[syntax]
-keyword = #569cd6
-string = #ce9178
-comment = #6a9955
+# Colors are hex RGB
+background=#1a1a1a
+foreground=#d4d4d4
+
+# Most elements support _fg, _bg, and _attr suffixes
+syntax_keyword=#569cd6
+syntax_keyword_attr=bold
+
+# Combine attributes with +
+syntax_comment_attr=italic+dim
 ```
+
+**Color values**: `#RRGGBB` hex format
+
+**Attributes**: `bold`, `dim`, `italic`, `underline`, `reverse`, `strike`, `curly`, `overline`
+
+#### Theme Keys Reference
+
+**Core UI**
+| Key | Description |
+|-----|-------------|
+| `name` | Theme display name |
+| `background` | Main background color |
+| `foreground` | Default text color |
+| `cursor_line` | Current line highlight |
+| `selection` | Selected text background |
+| `search_match` | Search match highlight |
+| `search_current` | Current search match |
+| `color_column` | Column guide background |
+| `color_column_line` | Column guide line color |
+| `trailing_ws` | Trailing whitespace highlight |
+
+**Line Numbers** — each supports `_fg`, `_bg`, `_attr` suffixes
+| Base Key | Description |
+|----------|-------------|
+| `line_number` | Inactive line numbers |
+| `line_number_active` | Current line number |
+
+**Gutter**
+| Base Key | Description |
+|----------|-------------|
+| `gutter` | Gutter background |
+| `gutter_active` | Active line gutter |
+
+**Status Bar**
+| Base Key | Description |
+|----------|-------------|
+| `status` | Status bar base |
+| `status_filename` | Filename display |
+| `status_modified` | Modified indicator |
+| `status_position` | Line:column display |
+
+**Message Bar**
+| Base Key | Description |
+|----------|-------------|
+| `message` | Message/prompt area |
+
+**Prompt Components**
+| Base Key | Description |
+|----------|-------------|
+| `prompt_label` | "Search:", "Replace:" labels |
+| `prompt_input` | User input field |
+| `prompt_bracket` | Decorative brackets |
+| `prompt_warning` | Warning messages |
+
+**Search Feedback**
+| Base Key | Description |
+|----------|-------------|
+| `search_options` | [C]ase [W]hole [R]egex indicators |
+| `search_nomatch` | "No matches" message |
+| `search_error` | Regex error message |
+
+**Whitespace Indicators**
+| Base Key | Description |
+|----------|-------------|
+| `whitespace` | General whitespace |
+| `whitespace_tab` | Tab characters (→) |
+| `whitespace_space` | Space characters (·) |
+
+**Other UI Elements**
+| Base Key | Description |
+|----------|-------------|
+| `wrap_indicator` | Line continuation marker |
+| `empty_line` | Empty line marker (~) |
+| `welcome` | Welcome screen text |
+| `bracket_match` | Matching bracket highlight |
+| `multicursor` | Additional cursors |
+
+**Dialogs** (file browser, theme picker)
+| Base Key | Description |
+|----------|-------------|
+| `dialog` | Dialog background |
+| `dialog_header` | Dialog title bar |
+| `dialog_footer` | Dialog footer/help |
+| `dialog_highlight` | Selected item |
+| `dialog_directory` | Directory entries |
+
+**Syntax Highlighting**
+| Base Key | Description |
+|----------|-------------|
+| `syntax_normal` | Default code |
+| `syntax_keyword` | `if`, `for`, `return`, etc. |
+| `syntax_type` | `int`, `char`, `void`, etc. |
+| `syntax_string` | String literals |
+| `syntax_number` | Numeric literals |
+| `syntax_comment` | Comments |
+| `syntax_preprocessor` | `#include`, `#define` |
+| `syntax_function` | Function names |
+| `syntax_operator` | `+`, `-`, `=`, etc. |
+| `syntax_bracket` | `()`, `[]`, `{}` |
+| `syntax_escape` | Escape sequences (`\n`) |
+
+#### Minimal Example
+
+A minimal dark theme:
+
+```ini
+name=Minimal Dark
+background=#0d0d0d
+foreground=#c0c0c0
+cursor_line=#1a1a1a
+selection=#264f78
+syntax_keyword=#c586c0
+syntax_string=#ce9178
+syntax_comment=#6a9955
+```
+
+Unspecified keys inherit from the built-in default theme.
 
 ### Configuration
 
