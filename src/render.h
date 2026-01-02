@@ -103,4 +103,15 @@ void editor_cycle_wrap_indicator(void);
  */
 const char *wrap_indicator_string(enum wrap_indicator indicator);
 
+/*****************************************************************************
+ * Screen Refresh
+ *****************************************************************************/
+
+/*
+ * Refresh the screen.
+ * Calculates gutter width, scrolls to keep cursor visible, and redraws
+ * all rows, status bar, and message bar.
+ */
+int render_refresh_screen(void);
+
 #endif /* EDIT_RENDER_H */

@@ -28,16 +28,6 @@ static pthread_mutex_t snapshot_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Access to editor state (defined in edit.c) */
 extern struct editor_state editor;
 
-/* Forward declarations for dialog functions (defined in edit.c, will move to dialog.c) */
-extern void dialog_goto(struct output_buffer *output, int row, int column);
-extern void dialog_set_style(struct output_buffer *output, const struct style *style);
-extern void dialog_draw_header(struct output_buffer *output,
-			       struct dialog_state *dialog,
-			       const char *title);
-extern void dialog_draw_footer(struct output_buffer *output,
-			       struct dialog_state *dialog,
-			       const char *hint);
-
 /*****************************************************************************
  * Autosave Configuration
  *****************************************************************************/

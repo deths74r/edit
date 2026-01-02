@@ -46,6 +46,7 @@
 #include "worker.h"
 #include "search.h"
 #include "autosave.h"
+#include "dialog.h"
 
 /*
  * Module headers will be added as modules are extracted:
@@ -58,8 +59,8 @@
  * (worker.h already included above)
  * (search.h already included above)
  * (autosave.h already included above)
+ * (dialog.h already included above)
  * #include "clipboard.h"
- * #include "dialog.h"
  * #include "editor.h"
  */
 
