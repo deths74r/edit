@@ -1365,13 +1365,15 @@ static void help_draw(void)
 				/* Blank line */
 				snprintf(line, sizeof(line), "%*s", panel_width, "");
 			} else {
-				/* Category header - centered */
+				/* Category header - left justified, bold */
+				output_buffer_append_string(&output, "\x1b[1m");  /* Bold */
 				int desc_len = (int)strlen(item->description);
-				int padding = (panel_width - desc_len) / 2;
-				if (padding < 1) padding = 1;
-				snprintf(line, sizeof(line), "%*s%s%*s",
-				         padding, "", item->description,
-				         panel_width - padding - desc_len, "");
+				snprintf(line, sizeof(line), "  %s%*s",
+				         item->description,
+				         panel_width - 2 - desc_len, "");
+				output_buffer_append_string(&output, line);
+				output_buffer_append_string(&output, "\x1b[22m");  /* Normal weight */
+				continue;  /* Skip the normal append below */
 			}
 		} else {
 			/* Keybinding entry: "  Key                    Description" */
