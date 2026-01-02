@@ -116,14 +116,14 @@ double color_contrast_ratio(struct syntax_color c1, struct syntax_color c2);
  * Build escape sequence for text attributes only.
  * Returns the number of characters written to buf.
  */
-int attr_to_escape(text_attr_t attr, char *buf, size_t buf_size);
+int attr_to_escape(text_attr_t attr, char *buffer, size_t buffer_size);
 
 /*
  * Build complete escape sequence for a style (fg, bg, and attributes).
  * Resets attributes first, then applies colors and attributes.
  * Returns the number of characters written to buf.
  */
-int style_to_escape(const struct style *style, char *buf, size_t buf_size);
+int style_to_escape(const struct style *style, char *buffer, size_t buffer_size);
 
 /*
  * Build escape sequence for a style with custom background override.
@@ -132,7 +132,7 @@ int style_to_escape(const struct style *style, char *buf, size_t buf_size);
  */
 int style_to_escape_with_bg(const struct style *style,
                             struct syntax_color bg_override,
-                            char *buf, size_t buf_size);
+                            char *buffer, size_t buffer_size);
 
 /*****************************************************************************
  * Configuration Persistence

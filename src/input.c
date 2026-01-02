@@ -88,21 +88,21 @@ struct mouse_input input_parse_sgr_mouse(void)
 {
 	struct mouse_input mouse = {.event = MOUSE_NONE, .row = 0, .column = 0};
 	char buffer[32];
-	int len = 0;
+	int length = 0;
 
 	/* Read until 'M' (press) or 'm' (release) */
-	while (len < 31) {
-		if (read(STDIN_FILENO, &buffer[len], 1) != 1) {
+	while (length < 31) {
+		if (read(STDIN_FILENO, &buffer[length], 1) != 1) {
 			return mouse;
 		}
-		if (buffer[len] == 'M' || buffer[len] == 'm') {
+		if (buffer[length] == 'M' || buffer[length] == 'm') {
 			break;
 		}
-		len++;
+		length++;
 	}
 
-	char final = buffer[len];
-	buffer[len] = '\0';
+	char final = buffer[length];
+	buffer[length] = '\0';
 
 	/* Parse button;column;row */
 	int button, col, row;

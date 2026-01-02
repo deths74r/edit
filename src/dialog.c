@@ -136,8 +136,8 @@ void dialog_set_bg(struct output_buffer *output, struct syntax_color color)
 void dialog_set_style(struct output_buffer *output, const struct style *style)
 {
 	char escape[128];
-	int len = style_to_escape(style, escape, sizeof(escape));
-	output_buffer_append(output, escape, len);
+	int length = style_to_escape(style, escape, sizeof(escape));
+	output_buffer_append(output, escape, length);
 }
 
 /*
@@ -263,25 +263,25 @@ void dialog_draw_list_item(struct output_buffer *output,
  */
 void dialog_calculate_dimensions(struct dialog_state *dialog)
 {
-	const int minimum_width = 40;
-	const int minimum_height = 10;
+	const int minimum_width = DIALOG_MIN_WIDTH;
+	const int minimum_height = DIALOG_MIN_HEIGHT;
 
 	/* 70% of screen width, at least minimum */
-	dialog->panel_width = (editor.screen_columns * 70) / 100;
+	dialog->panel_width = (editor.screen_columns * DIALOG_WIDTH_PERCENT) / 100;
 	if (dialog->panel_width < minimum_width) {
 		dialog->panel_width = minimum_width;
 	}
-	if (dialog->panel_width > (int)editor.screen_columns - 2) {
-		dialog->panel_width = (int)editor.screen_columns - 2;
+	if (dialog->panel_width > (int)editor.screen_columns - DIALOG_SCREEN_MARGIN) {
+		dialog->panel_width = (int)editor.screen_columns - DIALOG_SCREEN_MARGIN;
 	}
 
 	/* 50% of screen height, at least minimum */
-	dialog->panel_height = (editor.screen_rows * 50) / 100;
+	dialog->panel_height = (editor.screen_rows * DIALOG_HEIGHT_PERCENT) / 100;
 	if (dialog->panel_height < minimum_height) {
 		dialog->panel_height = minimum_height;
 	}
-	if (dialog->panel_height > (int)editor.screen_rows - 2) {
-		dialog->panel_height = (int)editor.screen_rows - 2;
+	if (dialog->panel_height > (int)editor.screen_rows - DIALOG_SCREEN_MARGIN) {
+		dialog->panel_height = (int)editor.screen_rows - DIALOG_SCREEN_MARGIN;
 	}
 
 	/* Center on screen */
@@ -334,7 +334,7 @@ void dialog_close(struct dialog_state *dialog)
 	input_set_dialog_mouse_mode(false);
 
 	/* Show cursor again now that dialog is closed */
-	write(STDOUT_FILENO, "\x1b[?25h", 6);
+	write(STDOUT_FILENO, ESCAPE_CURSOR_SHOW, ESCAPE_CURSOR_SHOW_LENGTH);
 }
 
 /*****************************************************************************
@@ -836,7 +836,7 @@ static void open_file_draw(void)
 	struct output_buffer output = {0};
 
 	/* Hide cursor during drawing */
-	output_buffer_append_string(&output, "\x1b[?25l");
+	output_buffer_append_string(&output, ESCAPE_CURSOR_HIDE);
 
 	/* Calculate dimensions */
 	dialog_calculate_dimensions(&open_file.dialog);
@@ -877,7 +877,7 @@ static void open_file_draw(void)
 	                   "Enter:Open  Left:Parent  Esc:Cancel");
 
 	/* Reset attributes, keep cursor hidden while dialog is active */
-	output_buffer_append_string(&output, "\x1b[0m");
+	output_buffer_append_string(&output, ESCAPE_RESET);
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
@@ -1017,7 +1017,7 @@ static void theme_picker_draw(void)
 	struct output_buffer output = {0};
 
 	/* Hide cursor during drawing */
-	output_buffer_append_string(&output, "\x1b[?25l");
+	output_buffer_append_string(&output, ESCAPE_CURSOR_HIDE);
 
 	/* Calculate dimensions (narrower than file browser) */
 	dialog_calculate_dimensions(&theme_picker.dialog);
@@ -1117,7 +1117,7 @@ static void theme_picker_draw(void)
 	                   "Enter:Select  Tab:Marker  Esc:Cancel");
 
 	/* Reset attributes, keep cursor hidden while dialog is active */
-	output_buffer_append_string(&output, "\x1b[0m");
+	output_buffer_append_string(&output, ESCAPE_RESET);
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);

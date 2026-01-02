@@ -95,7 +95,8 @@ void undo_begin_group(struct buffer *buffer, uint32_t cursor_row, uint32_t curso
 		struct undo_group *new_groups = realloc(history->groups,
 		                                        new_capacity * sizeof(struct undo_group));
 		if (new_groups == NULL) {
-			WARN_ON_ONCE(1);  /* Undo recording disabled due to OOM */
+			/* Undo recording disabled due to OOM */
+			WARN_ON_ONCE(1);
 			return;
 		}
 		history->groups = new_groups;
@@ -166,7 +167,8 @@ static void undo_record_operation(struct buffer *buffer, struct edit_operation *
 		struct edit_operation *new_ops = realloc(group->operations,
 		                                         new_capacity * sizeof(struct edit_operation));
 		if (new_ops == NULL) {
-			WARN_ON_ONCE(1);  /* Undo operation lost due to OOM */
+			/* Undo operation lost due to OOM */
+			WARN_ON_ONCE(1);
 			return;
 		}
 		group->operations = new_ops;

@@ -195,7 +195,7 @@ char *clipboard_paste(size_t *out_length)
 	}
 
 	/* Read clipboard contents dynamically */
-	size_t capacity = 4096;
+	size_t capacity = CLIPBOARD_INITIAL_CAPACITY;
 	size_t length = 0;
 	char *buffer = malloc(capacity);
 	if (buffer == NULL) {
@@ -205,7 +205,7 @@ char *clipboard_paste(size_t *out_length)
 	}
 
 	while (!feof(pipe)) {
-		if (length + 1024 > capacity) {
+		if (length + CLIPBOARD_READ_CHUNK_SIZE > capacity) {
 			capacity *= 2;
 			char *new_buffer = realloc(buffer, capacity);
 			if (new_buffer == NULL) {
@@ -217,7 +217,7 @@ char *clipboard_paste(size_t *out_length)
 			buffer = new_buffer;
 		}
 
-		size_t read_count = fread(buffer + length, 1, 1024, pipe);
+		size_t read_count = fread(buffer + length, 1, CLIPBOARD_READ_CHUNK_SIZE, pipe);
 		length += read_count;
 
 		if (read_count == 0) {

@@ -101,11 +101,13 @@ struct syntax_color color_ensure_contrast(struct syntax_color fg,
 	/* Determine whether to lighten or darken the foreground.
 	 * Choose the direction that increases contrast with the background. */
 	double bg_lum = color_luminance(bg);
-	bool make_lighter = bg_lum < 0.5;  /* Dark bg = lighter text */
+	/* Dark backgrounds need lighter text, light backgrounds need darker text */
+	bool make_lighter = bg_lum < 0.5;
 
 	struct syntax_color adjusted = fg;
 	int iterations = 0;
-	const int max_iterations = 20;  /* Prevent infinite loops */
+	/* Limit iterations to prevent infinite loops */
+	const int max_iterations = MAX_CONTRAST_ITERATIONS;
 
 	while (ratio < WCAG_MIN_CONTRAST && iterations < max_iterations) {
 		adjusted.red = color_adjust_channel(adjusted.red, make_lighter);
@@ -135,9 +137,11 @@ struct syntax_color color_ensure_contrast(struct syntax_color fg,
 	/* Last resort: use pure black or white */
 	if (ratio < WCAG_MIN_CONTRAST) {
 		if (bg_lum < 0.5) {
-			adjusted = (struct syntax_color){0xff, 0xff, 0xff};  /* White */
+			/* White */
+			adjusted = (struct syntax_color){0xff, 0xff, 0xff};
 		} else {
-			adjusted = (struct syntax_color){0x00, 0x00, 0x00};  /* Black */
+			/* Black */
+			adjusted = (struct syntax_color){0x00, 0x00, 0x00};
 		}
 	}
 
@@ -160,12 +164,12 @@ bool color_parse_hex(const char *hex, struct syntax_color *out)
 	}
 
 	/* Must be exactly 6 hex digits */
-	if (strlen(hex) != 6) {
+	if (strlen(hex) != HEX_COLOR_LENGTH) {
 		return false;
 	}
 
 	/* Validate all characters are hex */
-	for (int i = 0; i < 6; i++) {
+	for (int i = 0; i < HEX_COLOR_LENGTH; i++) {
 		if (!isxdigit((unsigned char)hex[i])) {
 			return false;
 		}
@@ -253,60 +257,60 @@ static text_attr_t attr_parse(const char *str)
  * Build escape sequence for text attributes.
  * Returns the number of characters written to buf.
  */
-int attr_to_escape(text_attr_t attr, char *buf, size_t buf_size)
+int attr_to_escape(text_attr_t attr, char *buffer, size_t buffer_size)
 {
 	if (attr == ATTR_NONE) {
 		return 0;
 	}
 
-	int len = 0;
+	int length = 0;
 
 	if (attr & ATTR_BOLD) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[1m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[1m");
 	}
 	if (attr & ATTR_DIM) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[2m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[2m");
 	}
 	if (attr & ATTR_ITALIC) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[3m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[3m");
 	}
 	if (attr & ATTR_UNDERLINE) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[4m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[4m");
 	}
 	if (attr & ATTR_REVERSE) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[7m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[7m");
 	}
 	if (attr & ATTR_STRIKE) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[9m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[9m");
 	}
 	if (attr & ATTR_CURLY) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[4:3m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[4:3m");
 	}
 	if (attr & ATTR_OVERLINE) {
-		len += snprintf(buf + len, buf_size - len, "\x1b[53m");
+		length += snprintf(buffer + length, buffer_size - length, "\x1b[53m");
 	}
 
-	return len;
+	return length;
 }
 
 /*
  * Build complete escape sequence for a style (fg, bg, and attributes).
  * Resets attributes first, then applies colors and attributes.
- * Returns the number of characters written to buf.
+ * Returns the number of characters written to buffer.
  */
-int style_to_escape(const struct style *style, char *buf, size_t buf_size)
+int style_to_escape(const struct style *style, char *buffer, size_t buffer_size)
 {
-	int len = 0;
+	int length = 0;
 
 	/* Reset attributes and set colors */
-	len = snprintf(buf, buf_size, "\x1b[0;38;2;%d;%d;%d;48;2;%d;%d;%dm",
+	length = snprintf(buffer, buffer_size, "\x1b[0;38;2;%d;%d;%d;48;2;%d;%d;%dm",
 	               style->fg.red, style->fg.green, style->fg.blue,
 	               style->bg.red, style->bg.green, style->bg.blue);
 
 	/* Append text attributes */
-	len += attr_to_escape(style->attr, buf + len, buf_size - len);
+	length += attr_to_escape(style->attr, buffer + length, buffer_size - length);
 
-	return len;
+	return length;
 }
 
 /*
@@ -316,19 +320,19 @@ int style_to_escape(const struct style *style, char *buf, size_t buf_size)
  */
 int style_to_escape_with_bg(const struct style *style,
                             struct syntax_color bg_override,
-                            char *buf, size_t buf_size)
+                            char *buffer, size_t buffer_size)
 {
-	int len = 0;
+	int length = 0;
 
 	/* Reset attributes and set colors with overridden background */
-	len = snprintf(buf, buf_size, "\x1b[0;38;2;%d;%d;%d;48;2;%d;%d;%dm",
+	length = snprintf(buffer, buffer_size, "\x1b[0;38;2;%d;%d;%d;48;2;%d;%d;%dm",
 	               style->fg.red, style->fg.green, style->fg.blue,
 	               bg_override.red, bg_override.green, bg_override.blue);
 
 	/* Append text attributes */
-	len += attr_to_escape(style->attr, buf + len, buf_size - len);
+	length += attr_to_escape(style->attr, buffer + length, buffer_size - length);
 
-	return len;
+	return length;
 }
 
 /*****************************************************************************

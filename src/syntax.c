@@ -303,7 +303,7 @@ void buffer_compute_pairs(struct buffer *buffer)
 				line->cells[col].context = context_encode(pair_id, type,
 					PAIR_ROLE_OPENER);
 
-				if (stack_top < 256) {
+				if (stack_top < BRACKET_STACK_SIZE) {
 					stack[stack_top].row = row;
 					stack[stack_top].col = col;
 					stack[stack_top].pair_id = pair_id;

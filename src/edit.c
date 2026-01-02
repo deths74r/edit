@@ -4141,8 +4141,8 @@ static int search_match_type(uint32_t row, uint32_t column)
 static void render_set_syntax_style(struct output_buffer *output, enum syntax_token type)
 {
 	char escape[128];
-	int len = style_to_escape(&active_theme.syntax[type], escape, sizeof(escape));
-	output_buffer_append(output, escape, len);
+	int length = style_to_escape(&active_theme.syntax[type], escape, sizeof(escape));
+	output_buffer_append(output, escape, length);
 }
 
 /*
@@ -4223,12 +4223,12 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		char escape[128];
 		struct style *style = &active_theme.syntax[current_syntax];
 		struct syntax_color bg = is_cursor_line ? active_theme.cursor_line : style->bg;
-		int len = snprintf(escape, sizeof(escape),
+		int length = snprintf(escape, sizeof(escape),
 		         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm",
 		         bg.red, bg.green, bg.blue,
 		         style->fg.red, style->fg.green, style->fg.blue);
-		len += attr_to_escape(style->attr, escape + len, sizeof(escape) - len);
-		output_buffer_append(output, escape, len);
+		length += attr_to_escape(style->attr, escape + length, sizeof(escape) - length);
+		output_buffer_append(output, escape, length);
 	}
 
 	/* Render visible content up to end_cell or max_width */
@@ -4285,15 +4285,15 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			/* Ensure foreground has sufficient contrast with background */
 			struct syntax_color adjusted_fg = color_ensure_contrast(style->fg, bg);
 
-			int len = snprintf(escape, sizeof(escape),
+			int length = snprintf(escape, sizeof(escape),
 			         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm",
 			         bg.red, bg.green, bg.blue,
 			         adjusted_fg.red, adjusted_fg.green, adjusted_fg.blue);
 
 			/* Add text attributes */
-			len += attr_to_escape(style->attr, escape + len, sizeof(escape) - len);
+			length += attr_to_escape(style->attr, escape + length, sizeof(escape) - length);
 
-			output_buffer_append(output, escape, len);
+			output_buffer_append(output, escape, length);
 			current_syntax = syntax;
 			current_highlight = highlight;
 		}
@@ -4482,7 +4482,7 @@ static void render_draw_rows(struct output_buffer *output)
 	}
 
 	for (uint32_t screen_row = 0; screen_row < editor.screen_rows; screen_row++) {
-		output_buffer_append_string(output, "\x1b[2K");
+		output_buffer_append_string(output, ESCAPE_CLEAR_LINE);
 
 		bool is_empty_buffer_first_line = (editor.buffer.line_count == 0 && file_row == 0);
 
@@ -4822,7 +4822,7 @@ static void render_draw_status_bar(struct output_buffer *output)
 	}
 
 	/* Reset attributes */
-	output_buffer_append_string(output, "\x1b[m");
+	output_buffer_append_string(output, ESCAPE_RESET);
 	output_buffer_append_string(output, "\r\n");
 }
 
@@ -4833,8 +4833,8 @@ static void message_bar_set_style(struct output_buffer *output,
                                   const struct style *style)
 {
 	char escape[128];
-	int len = style_to_escape(style, escape, sizeof(escape));
-	output_buffer_append(output, escape, len);
+	int length = style_to_escape(style, escape, sizeof(escape));
+	output_buffer_append(output, escape, length);
 }
 
 /*
@@ -4848,7 +4848,7 @@ static void render_draw_message_bar(struct output_buffer *output)
 	message_bar_set_style(output, &active_theme.message);
 
 	/* Clear line with message bar background color */
-	output_buffer_append_string(output, "\x1b[K");
+	output_buffer_append_string(output, ESCAPE_CLEAR_TO_EOL);
 
 	if (save_as_is_active()) {
 		if (save_as_is_confirm_overwrite()) {
@@ -4993,9 +4993,9 @@ int __must_check render_refresh_screen(void)
 		return ret;
 
 	/* Hide cursor */
-	output_buffer_append_string(&output, "\x1b[?25l");
+	output_buffer_append_string(&output, ESCAPE_CURSOR_HIDE);
 	/* Move cursor to home */
-	output_buffer_append_string(&output, "\x1b[H");
+	output_buffer_append_string(&output, ESCAPE_CURSOR_HOME);
 
 	/* Set background color for the entire screen */
 	char bg_escape[32];
@@ -5055,7 +5055,7 @@ int __must_check render_refresh_screen(void)
 	output_buffer_append_string(&output, cursor_position);
 
 	/* Show cursor */
-	output_buffer_append_string(&output, "\x1b[?25h");
+	output_buffer_append_string(&output, ESCAPE_CURSOR_SHOW);
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);

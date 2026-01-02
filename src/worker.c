@@ -79,11 +79,11 @@ static int task_queue_pop(struct task *out, int timeout_ms)
 		if (timeout_ms > 0) {
 			struct timespec ts;
 			clock_gettime(CLOCK_REALTIME, &ts);
-			ts.tv_sec += timeout_ms / 1000;
-			ts.tv_nsec += (timeout_ms % 1000) * 1000000;
-			if (ts.tv_nsec >= 1000000000) {
+			ts.tv_sec += timeout_ms / MSEC_PER_SEC;
+			ts.tv_nsec += (timeout_ms % MSEC_PER_SEC) * NSEC_PER_MSEC;
+			if (ts.tv_nsec >= NSEC_PER_SEC) {
 				ts.tv_sec++;
-				ts.tv_nsec -= 1000000000;
+				ts.tv_nsec -= NSEC_PER_SEC;
 			}
 
 			int err = pthread_cond_timedwait(&worker.task_cond, &worker.task_mutex, &ts);
@@ -236,7 +236,8 @@ static void *worker_thread_main(void *arg)
 
 	while (1) {
 		struct task task;
-		int err = task_queue_pop(&task, 100);  /* 100ms timeout */
+		/* Wait for task with 100ms timeout */
+		int err = task_queue_pop(&task, 100);
 
 		if (err == -ETIMEDOUT) {
 			/* No task, check shutdown and loop */

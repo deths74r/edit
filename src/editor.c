@@ -144,16 +144,16 @@ void editor_update_gutter_width(void)
 	/* Calculate digits needed for largest line number */
 	uint32_t max_line = editor.buffer.line_count;
 	uint32_t digits = 1;
-	while (max_line >= 10) {
-		max_line /= 10;
+	while (max_line >= DECIMAL_BASE) {
+		max_line /= DECIMAL_BASE;
 		digits++;
 	}
 
 	/* Minimum 3 digits, plus 2 for padding */
-	if (digits < 3) {
-		digits = 3;
+	if (digits < MINIMUM_GUTTER_DIGITS) {
+		digits = MINIMUM_GUTTER_DIGITS;
 	}
-	editor.gutter_width = digits + 2;
+	editor.gutter_width = digits + GUTTER_PADDING;
 }
 
 /*
@@ -163,7 +163,8 @@ void editor_update_screen_size(void)
 {
 	uint32_t rows, cols;
 	if (terminal_get_window_size(&rows, &cols) == 0) {
-		editor.screen_rows = rows - 2;  /* Reserve 2 for status/message bars */
+		/* Reserve rows for status and message bars */
+		editor.screen_rows = rows - STATUS_BAR_ROWS;
 		editor.screen_columns = cols;
 	}
 	editor_update_gutter_width();

@@ -648,12 +648,15 @@ bool autosave_prompt_recovery(const char *filename, const char *swap_path)
 
 	/* Clear screen and draw dialog */
 	struct output_buffer output = {0};
-	output_buffer_append_string(&output, "\x1b[2J\x1b[H");  /* Clear screen, home cursor */
-	output_buffer_append_string(&output, "\x1b[?25l");     /* Hide cursor */
+	/* Clear screen and position cursor at home */
+	output_buffer_append_string(&output, ESCAPE_CLEAR_SCREEN_HOME);
+	/* Hide cursor during dialog display */
+	output_buffer_append_string(&output, ESCAPE_CURSOR_HIDE);
 
 	swap_recovery_draw(&output, &dialog, filename, swap_path, time_str, swap_size);
 
-	output_buffer_append_string(&output, "\x1b[0m");       /* Reset attributes */
+	/* Reset text attributes */
+	output_buffer_append_string(&output, ESCAPE_RESET);
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
 

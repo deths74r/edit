@@ -122,7 +122,7 @@ int main(int argument_count, char *argument_values[])
 		int ret = render_refresh_screen();
 		if (ret) {
 			/* Minimal recovery on render failure */
-			write(STDOUT_FILENO, "\x1b[2J\x1b[H", 7);
+			write(STDOUT_FILENO, ESCAPE_CLEAR_SCREEN_HOME, ESCAPE_CLEAR_SCREEN_HOME_LENGTH);
 			fprintf(stderr, "Render error: %s\n", edit_strerror(ret));
 			usleep(100000);
 		}
@@ -131,7 +131,7 @@ int main(int argument_count, char *argument_values[])
 
 		/* Check auto-save periodically */
 		time_t now = time(NULL);
-		if (now - last_autosave_check >= 5) {
+		if (now - last_autosave_check >= AUTOSAVE_CHECK_INTERVAL_SECONDS) {
 			autosave_check();
 			last_autosave_check = now;
 		}

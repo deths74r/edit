@@ -110,7 +110,7 @@ int terminal_get_window_size(uint32_t *rows, uint32_t *columns)
 	 * When stdout is a pipe (not a TTY), ioctl may succeed but
 	 * return garbage values. Minimum usable size is 10x10.
 	 */
-	if (window_size.ws_col < 10 || window_size.ws_row < 10)
+	if (window_size.ws_col < MINIMUM_WINDOW_SIZE || window_size.ws_row < MINIMUM_WINDOW_SIZE)
 		return -EEDIT_TERMSIZE;
 
 	*columns = window_size.ws_col;
@@ -125,27 +125,27 @@ int terminal_get_window_size(uint32_t *rows, uint32_t *columns)
  */
 int terminal_get_cursor_position(int *row, int *col)
 {
-	char buf[32];
+	char buffer[32];
 	unsigned int i = 0;
 
 	/* Send cursor position query */
-	if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4)
+	if (write(STDOUT_FILENO, ESCAPE_CURSOR_POSITION_QUERY, ESCAPE_CURSOR_POSITION_QUERY_LENGTH) != ESCAPE_CURSOR_POSITION_QUERY_LENGTH)
 		return -EEDIT_TERMSIZE;
 
 	/* Read response: ESC [ rows ; cols R */
-	while (i < sizeof(buf) - 1) {
-		if (read(STDIN_FILENO, &buf[i], 1) != 1)
+	while (i < sizeof(buffer) - 1) {
+		if (read(STDIN_FILENO, &buffer[i], 1) != 1)
 			break;
-		if (buf[i] == 'R')
+		if (buffer[i] == 'R')
 			break;
 		i++;
 	}
-	buf[i] = '\0';
+	buffer[i] = '\0';
 
 	/* Parse response */
-	if (buf[0] != '\x1b' || buf[1] != '[')
+	if (buffer[0] != '\x1b' || buffer[1] != '[')
 		return -EEDIT_TERMSIZE;
-	if (sscanf(&buf[2], "%d;%d", row, col) != 2)
+	if (sscanf(&buffer[2], "%d;%d", row, col) != 2)
 		return -EEDIT_TERMSIZE;
 
 	return 0;
@@ -160,8 +160,8 @@ int terminal_get_cursor_position(int *row, int *col)
  */
 void terminal_clear_screen(void)
 {
-	write(STDOUT_FILENO, "\x1b[2J", 4);
-	write(STDOUT_FILENO, "\x1b[H", 3);
+	write(STDOUT_FILENO, ESCAPE_CLEAR_SCREEN, ESCAPE_CLEAR_SCREEN_LENGTH);
+	write(STDOUT_FILENO, ESCAPE_CURSOR_HOME, ESCAPE_CURSOR_HOME_LENGTH);
 }
 
 /*****************************************************************************
@@ -174,9 +174,12 @@ void terminal_clear_screen(void)
  */
 void terminal_enable_mouse(void)
 {
-	write(STDOUT_FILENO, "\x1b[?1000h", 8);  /* Enable button events */
-	write(STDOUT_FILENO, "\x1b[?1002h", 8);  /* Enable button + drag events */
-	write(STDOUT_FILENO, "\x1b[?1006h", 8);  /* Enable SGR extended mode */
+	/* Enable button events */
+	write(STDOUT_FILENO, ESCAPE_MOUSE_BUTTON_ENABLE, ESCAPE_MOUSE_SEQUENCE_LENGTH);
+	/* Enable button + drag events */
+	write(STDOUT_FILENO, ESCAPE_MOUSE_DRAG_ENABLE, ESCAPE_MOUSE_SEQUENCE_LENGTH);
+	/* Enable SGR extended mode */
+	write(STDOUT_FILENO, ESCAPE_MOUSE_SGR_ENABLE, ESCAPE_MOUSE_SEQUENCE_LENGTH);
 }
 
 /*
@@ -184,9 +187,10 @@ void terminal_enable_mouse(void)
  */
 void terminal_disable_mouse(void)
 {
-	write(STDOUT_FILENO, "\x1b[?1006l", 8);
-	write(STDOUT_FILENO, "\x1b[?1002l", 8);
-	write(STDOUT_FILENO, "\x1b[?1000l", 8);
+	/* Disable in reverse order */
+	write(STDOUT_FILENO, ESCAPE_MOUSE_SGR_DISABLE, ESCAPE_MOUSE_SEQUENCE_LENGTH);
+	write(STDOUT_FILENO, ESCAPE_MOUSE_DRAG_DISABLE, ESCAPE_MOUSE_SEQUENCE_LENGTH);
+	write(STDOUT_FILENO, ESCAPE_MOUSE_BUTTON_DISABLE, ESCAPE_MOUSE_SEQUENCE_LENGTH);
 }
 
 /*****************************************************************************

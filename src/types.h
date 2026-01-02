@@ -94,6 +94,77 @@
 
 /* Minimum contrast ratio for WCAG AA compliance (normal text). */
 #define WCAG_MIN_CONTRAST 4.5
+/*****************************************************************************
+ * Terminal Escape Sequences
+ *
+ * Named constants for ANSI escape sequences used throughout the editor.
+ * Using constants instead of inline strings improves readability and
+ * makes it easier to verify correct sequence lengths.
+ *****************************************************************************/
+/* Screen control */
+#define ESCAPE_CLEAR_SCREEN "\x1b[2J"
+#define ESCAPE_CLEAR_SCREEN_LENGTH 4
+#define ESCAPE_CURSOR_HOME "\x1b[H"
+#define ESCAPE_CURSOR_HOME_LENGTH 3
+#define ESCAPE_CLEAR_SCREEN_HOME "\x1b[2J\x1b[H"
+#define ESCAPE_CLEAR_SCREEN_HOME_LENGTH 7
+/* Cursor visibility */
+#define ESCAPE_CURSOR_SHOW "\x1b[?25h"
+#define ESCAPE_CURSOR_SHOW_LENGTH 6
+#define ESCAPE_CURSOR_HIDE "\x1b[?25l"
+#define ESCAPE_CURSOR_HIDE_LENGTH 6
+#define ESCAPE_CURSOR_POSITION_QUERY "\x1b[6n"
+#define ESCAPE_CURSOR_POSITION_QUERY_LENGTH 4
+/* Mouse tracking enable sequences */
+#define ESCAPE_MOUSE_BUTTON_ENABLE "\x1b[?1000h"
+#define ESCAPE_MOUSE_DRAG_ENABLE "\x1b[?1002h"
+#define ESCAPE_MOUSE_SGR_ENABLE "\x1b[?1006h"
+#define ESCAPE_MOUSE_SEQUENCE_LENGTH 8
+/* Mouse tracking disable sequences */
+#define ESCAPE_MOUSE_SGR_DISABLE "\x1b[?1006l"
+#define ESCAPE_MOUSE_DRAG_DISABLE "\x1b[?1002l"
+#define ESCAPE_MOUSE_BUTTON_DISABLE "\x1b[?1000l"
+/* Text attribute reset */
+#define ESCAPE_RESET "\x1b[0m"
+#define ESCAPE_RESET_LENGTH 4
+/* Line clearing */
+#define ESCAPE_CLEAR_LINE "\x1b[2K"
+#define ESCAPE_CLEAR_LINE_LENGTH 4
+#define ESCAPE_CLEAR_TO_EOL "\x1b[K"
+#define ESCAPE_CLEAR_TO_EOL_LENGTH 3
+/*****************************************************************************
+ * Numeric Constants
+ *
+ * Named constants for magic numbers used throughout the codebase.
+ * Per CODING_STANDARDS.md, all numeric literals should be named constants.
+ *****************************************************************************/
+/* Time intervals */
+#define AUTOSAVE_CHECK_INTERVAL_SECONDS 5
+/* Window constraints */
+#define MINIMUM_WINDOW_SIZE 10
+#define STATUS_BAR_ROWS 2
+/* Gutter (line number column) */
+#define MINIMUM_GUTTER_DIGITS 3
+#define GUTTER_PADDING 2
+#define DECIMAL_BASE 10
+/* Dialog dimensions */
+#define DIALOG_MIN_WIDTH 40
+#define DIALOG_MIN_HEIGHT 10
+#define DIALOG_WIDTH_PERCENT 70
+#define DIALOG_HEIGHT_PERCENT 50
+#define DIALOG_SCREEN_MARGIN 2
+/* Clipboard buffer sizes */
+#define CLIPBOARD_INITIAL_CAPACITY 4096
+#define CLIPBOARD_READ_CHUNK_SIZE 1024
+/* Syntax parsing */
+#define BRACKET_STACK_SIZE 256
+/* Color parsing */
+#define HEX_COLOR_LENGTH 6
+#define MAX_CONTRAST_ITERATIONS 20
+/* Time conversion (nanoseconds) */
+#define NSEC_PER_MSEC 1000000
+#define NSEC_PER_SEC 1000000000
+#define MSEC_PER_SEC 1000
 
 /*****************************************************************************
  * Neighbor Layer Bit Field Layout
