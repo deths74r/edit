@@ -1,6 +1,6 @@
-# Edit
+# edit
 
-*A terminal text editor for people who know what they want to type*
+*Enter. Delete. Insert. Type.* — Fast terminal text editor in C with lazy loading, background search, multiple cursors, soft wrap, and themes. Single binary. Zero dependencies.
 
 ---
 
