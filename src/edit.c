@@ -12283,8 +12283,18 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	enum syntax_token current_syntax = SYNTAX_NORMAL;
 	int current_highlight = 0;  /* 0=normal, 1=selected, 2=search_other, 3=search_current */
 
-	/* Set initial style */
-	render_set_syntax_style(output, current_syntax);
+	/* Set initial style with cursor line background if applicable */
+	{
+		char escape[128];
+		struct style *style = &active_theme.syntax[current_syntax];
+		struct syntax_color bg = is_cursor_line ? active_theme.cursor_line : style->bg;
+		int len = snprintf(escape, sizeof(escape),
+		         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm",
+		         bg.red, bg.green, bg.blue,
+		         style->fg.red, style->fg.green, style->fg.blue);
+		len += attr_to_escape(style->attr, escape + len, sizeof(escape) - len);
+		output_buffer_append(output, escape, len);
+	}
 
 	/* Render visible content up to end_cell or max_width */
 	int rendered_width = 0;
@@ -12358,10 +12368,13 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
 			/* Render tab with optional visible indicator */
 			if (editor.show_whitespace) {
-				/* Show → with tab colors followed by spaces */
+				/* Show → with tab colors, using cursor_line bg if applicable */
 				char ws_escape[128];
-				int ws_len = style_to_escape(&active_theme.whitespace_tab,
-				                             ws_escape, sizeof(ws_escape));
+				struct syntax_color ws_bg = is_cursor_line
+					? active_theme.cursor_line
+					: active_theme.whitespace_tab.bg;
+				int ws_len = style_to_escape_with_bg(&active_theme.whitespace_tab,
+				                                     ws_bg, ws_escape, sizeof(ws_escape));
 				output_buffer_append(output, ws_escape, ws_len);
 				output_buffer_append_string(output, "→");
 				rendered_width++;
@@ -12369,8 +12382,18 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 					output_buffer_append_string(output, " ");
 					rendered_width++;
 				}
-				/* Restore syntax style */
-				render_set_syntax_style(output, current_syntax);
+				/* Restore syntax style with cursor_line bg if applicable */
+				struct style *restore_style = &active_theme.syntax[current_syntax];
+				struct syntax_color restore_bg = is_cursor_line
+					? active_theme.cursor_line : restore_style->bg;
+				char restore_escape[128];
+				int restore_len = snprintf(restore_escape, sizeof(restore_escape),
+				         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm",
+				         restore_bg.red, restore_bg.green, restore_bg.blue,
+				         restore_style->fg.red, restore_style->fg.green, restore_style->fg.blue);
+				restore_len += attr_to_escape(restore_style->attr, restore_escape + restore_len,
+				                              sizeof(restore_escape) - restore_len);
+				output_buffer_append(output, restore_escape, restore_len);
 			} else {
 				/* Render spaces for tab */
 				for (int i = 0; i < width && rendered_width < max_width; i++) {
@@ -12379,13 +12402,27 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				}
 			}
 		} else if (codepoint == ' ' && editor.show_whitespace) {
-			/* Show space as middle dot with space colors */
+			/* Show space as middle dot, using cursor_line bg if applicable */
 			char ws_escape[128];
-			int ws_len = style_to_escape(&active_theme.whitespace_space,
-			                             ws_escape, sizeof(ws_escape));
+			struct syntax_color ws_bg = is_cursor_line
+				? active_theme.cursor_line
+				: active_theme.whitespace_space.bg;
+			int ws_len = style_to_escape_with_bg(&active_theme.whitespace_space,
+			                                     ws_bg, ws_escape, sizeof(ws_escape));
 			output_buffer_append(output, ws_escape, ws_len);
 			output_buffer_append_string(output, "·");
-			render_set_syntax_style(output, current_syntax);
+			/* Restore syntax style with cursor_line bg if applicable */
+			struct style *restore_style = &active_theme.syntax[current_syntax];
+			struct syntax_color restore_bg = is_cursor_line
+				? active_theme.cursor_line : restore_style->bg;
+			char restore_escape[128];
+			int restore_len = snprintf(restore_escape, sizeof(restore_escape),
+			         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm",
+			         restore_bg.red, restore_bg.green, restore_bg.blue,
+			         restore_style->fg.red, restore_style->fg.green, restore_style->fg.blue);
+			restore_len += attr_to_escape(restore_style->attr, restore_escape + restore_len,
+			                              sizeof(restore_escape) - restore_len);
+			output_buffer_append(output, restore_escape, restore_len);
 			rendered_width++;
 			width = 1;
 		} else {
@@ -12413,13 +12450,21 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		cell_index++;
 	}
 
-	/* Reset background - use cursor line color if on cursor line */
-	struct syntax_color reset_bg = is_cursor_line ? active_theme.cursor_line : active_theme.background;
-	char reset[32];
-	snprintf(reset, sizeof(reset), "\x1b[48;2;%d;%d;%dm",
-	         reset_bg.red, reset_bg.green, reset_bg.blue);
-	output_buffer_append_string(output, reset);
-	render_set_syntax_style(output, SYNTAX_NORMAL);
+	/*
+	 * Fill remaining space with appropriate background color.
+	 * Use cursor_line background if on cursor line for highlight effect.
+	 */
+	struct syntax_color fill_bg = is_cursor_line ? active_theme.cursor_line : active_theme.background;
+	char bg_escape[48];
+	snprintf(bg_escape, sizeof(bg_escape), "\x1b[48;2;%d;%d;%dm",
+	         fill_bg.red, fill_bg.green, fill_bg.blue);
+	output_buffer_append_string(output, bg_escape);
+
+	/* Fill to max_width with spaces */
+	while (rendered_width < max_width) {
+		output_buffer_append_string(output, " ");
+		rendered_width++;
+	}
 }
 
 /*
