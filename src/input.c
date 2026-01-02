@@ -242,11 +242,14 @@ int input_read_key(void)
 								case 'D': return KEY_SHIFT_ARROW_LEFT;
 								case 'H': return KEY_SHIFT_HOME;
 								case 'F': return KEY_SHIFT_END;
+								case 'R': return KEY_SHIFT_F3;
 							}
 						} else if (modifier == '5') {  /* Ctrl */
 							switch (final) {
 								case 'C': return KEY_CTRL_ARROW_RIGHT;
 								case 'D': return KEY_CTRL_ARROW_LEFT;
+								case 'H': return KEY_CTRL_HOME;
+								case 'F': return KEY_CTRL_END;
 							}
 						} else if (modifier == '6') {  /* Ctrl+Shift */
 							switch (final) {
@@ -292,6 +295,7 @@ int input_read_key(void)
 			switch (sequence[1]) {
 				case 'H': return KEY_HOME;
 				case 'F': return KEY_END;
+				case 'R': return KEY_F3;  /* F3 in xterm */
 			}
 		}
 
@@ -333,12 +337,15 @@ int input_read_key(void)
 		return (int)codepoint;
 	}
 
-	/* Handle Ctrl+O and Ctrl+T for open file and theme picker */
+	/* Handle Ctrl+key combinations for file operations */
 	if (character == CONTROL_KEY('o')) {
 		return KEY_CTRL_O;
 	}
 	if (character == CONTROL_KEY('t')) {
 		return KEY_CTRL_T;
+	}
+	if (character == CONTROL_KEY('n')) {
+		return KEY_CTRL_N;
 	}
 
 	return character;

@@ -250,6 +250,13 @@ enum key_code {
 	KEY_ALT_SHIFT_S = -64,
 	KEY_CTRL_O = -63,
 	KEY_CTRL_T = -62,
+	KEY_CTRL_N = -61,
+	KEY_CTRL_HOME = -50,
+	KEY_CTRL_END = -49,
+
+	/* Function keys. */
+	KEY_F3 = -48,
+	KEY_SHIFT_F3 = -47,
 
 	/* Alt key combinations. */
 	KEY_ALT_L = -91,

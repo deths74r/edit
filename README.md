@@ -33,14 +33,17 @@ make clean        # removes build artifacts
 
 | Action | Key |
 |--------|-----|
+| New file | Ctrl+N |
 | Save | Ctrl+S |
 | Open file | Ctrl+O |
 | Quit | Ctrl+Q |
 | Undo / Redo | Ctrl+Z / Ctrl+Y |
 | Copy / Cut / Paste | Ctrl+C / Ctrl+X / Ctrl+V |
 | Find | Ctrl+F |
-| Find & Replace | Ctrl+R |
+| Find & Replace | Ctrl+H |
+| Find next / previous | F3 / Shift+F3 |
 | Go to line | Ctrl+G |
+| Go to file start / end | Ctrl+Home / Ctrl+End |
 | Select all | Ctrl+A |
 
 If you've used any text editor in the last thirty years, you already know how to use edit.
@@ -49,7 +52,7 @@ If you've used any text editor in the last thirty years, you already know how to
 
 ### File Operations
 
-**Ctrl+S** saves the current file. **Ctrl+O** opens a file browser dialog—arrow keys to navigate, Enter to select, Escape to cancel. **Ctrl+Q** quits; if you have unsaved changes, you'll be asked to confirm.
+**Ctrl+N** creates a new file (clears the buffer). **Ctrl+S** saves the current file. **Ctrl+O** opens a file browser dialog—arrow keys to navigate, Enter to select, Escape to cancel. **Ctrl+Q** quits; if you have unsaved changes, you'll be asked to confirm.
 
 Edit can read from stdin:
 ```bash
@@ -70,7 +73,7 @@ Arrow keys move the cursor. Unlike simpler editors, edit moves by *grapheme clus
 
 **Ctrl+]** jumps to the matching bracket. If you're on a `{`, it finds the corresponding `}`. This works across lines and handles nested brackets correctly—not by scanning the file, but by looking up precomputed metadata.
 
-**Home/End** go to line boundaries. In wrap mode, they go to the wrap segment boundaries; press again to reach the actual line start/end.
+**Home/End** go to line boundaries. In wrap mode, they go to the wrap segment boundaries; press again to reach the actual line start/end. **Ctrl+Home** jumps to the beginning of the file, **Ctrl+End** to the end.
 
 **Page Up/Down** scroll by screenful, keeping the cursor visible.
 
@@ -100,11 +103,11 @@ Arrow keys move the cursor. Unlike simpler editors, edit moves by *grapheme clus
 
 ### Search & Replace
 
-**Ctrl+F** enters search mode. Type your query; matches highlight in real-time as you type. **Alt+N** jumps to the next match, **Alt+P** to the previous.
+**Ctrl+F** enters search mode. Type your query; matches highlight in real-time as you type. **F3** (or **Alt+N**) jumps to the next match, **Shift+F3** (or **Alt+P**) to the previous.
 
 **Alt+C** toggles case sensitivity. **Alt+W** toggles whole-word matching. **Alt+R** toggles regex mode (POSIX extended regular expressions).
 
-**Ctrl+R** enters find-and-replace mode. **Tab** switches between the search and replace fields. **Enter** replaces the current match and jumps to the next. **Alt+A** replaces all matches.
+**Ctrl+H** enters find-and-replace mode. **Tab** switches between the search and replace fields. **Enter** replaces the current match and jumps to the next. **Alt+A** replaces all matches.
 
 For files larger than 5,000 lines, search runs in a background thread so the UI stays responsive.
 

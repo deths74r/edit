@@ -5286,7 +5286,6 @@ static bool search_handle_key(int key)
 			return true;
 
 		case KEY_BACKSPACE:
-		case CONTROL_KEY('h'):
 			if (search.replace_mode && search.editing_replace) {
 				/* Delete from replace field */
 				if (search.replace_length > 0) {
@@ -5312,6 +5311,7 @@ static bool search_handle_key(int key)
 			return true;
 
 		case KEY_ALT_N:
+		case KEY_F3:
 		case KEY_ARROW_DOWN:
 		case KEY_ARROW_RIGHT:
 			/* Find next match */
@@ -5328,6 +5328,7 @@ static bool search_handle_key(int key)
 			return true;
 
 		case KEY_ALT_P:
+		case KEY_SHIFT_F3:
 		case KEY_ARROW_UP:
 		case KEY_ARROW_LEFT:
 			/* Find previous match */
@@ -6169,6 +6170,42 @@ void editor_process_keypress(void)
 			editor_command_theme_picker();
 			break;
 
+		case KEY_CTRL_N:
+			/* New file - prompt to save if modified, then clear buffer */
+			if (editor.buffer.is_modified) {
+				editor_set_status_message("Save changes? (y/n)");
+				/* TODO: implement save prompt before new file */
+			}
+			buffer_free(&editor.buffer);
+			buffer_init(&editor.buffer);
+			editor.cursor_row = 0;
+			editor.cursor_column = 0;
+			editor.row_offset = 0;
+			editor.column_offset = 0;
+			selection_clear();
+			editor_set_status_message("New file");
+			break;
+
+		case KEY_CTRL_HOME:
+			/* Go to beginning of file */
+			editor.cursor_row = 0;
+			editor.cursor_column = 0;
+			editor.row_offset = 0;
+			editor.column_offset = 0;
+			selection_clear();
+			break;
+
+		case KEY_CTRL_END:
+			/* Go to end of file */
+			if (editor.buffer.line_count > 0) {
+				editor.cursor_row = editor.buffer.line_count - 1;
+				struct line *last_line = &editor.buffer.lines[editor.cursor_row];
+				line_warm(last_line, &editor.buffer);
+				editor.cursor_column = last_line->cell_count;
+			}
+			selection_clear();
+			break;
+
 		case CONTROL_KEY('c'):
 			editor_copy();
 			break;
@@ -6296,8 +6333,12 @@ void editor_process_keypress(void)
 			break;
 
 		case KEY_BACKSPACE:
-		case CONTROL_KEY('h'):
 			multicursor_backspace();
+			break;
+
+		case CONTROL_KEY('h'):
+			/* CUA: Ctrl+H opens find & replace */
+			replace_enter();
 			break;
 
 		case KEY_DELETE:
