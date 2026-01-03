@@ -1391,8 +1391,21 @@ static void help_draw(void)
 		output_buffer_append_string(&output, line);
 	}
 
-	/* Draw footer */
-	dialog_draw_footer(&output, &help_state.dialog, "Press any key to close");
+	/* Draw footer with centered text */
+	const char *hint = "Press any key to close";
+	int hint_len = (int)strlen(hint);
+	int footer_row = panel_top + panel_height;
+	dialog_goto(&output, footer_row, panel_left + 1);
+	dialog_set_style(&output, &active_theme.dialog_footer);
+
+	int padding_left = (panel_width - hint_len) / 2;
+	if (padding_left < 0) padding_left = 0;
+
+	for (int i = 0; i < padding_left; i++)
+		output_buffer_append_char(&output, ' ');
+	output_buffer_append_string(&output, hint);
+	for (int i = padding_left + hint_len; i < panel_width; i++)
+		output_buffer_append_char(&output, ' ');
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
