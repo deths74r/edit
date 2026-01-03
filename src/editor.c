@@ -39,6 +39,9 @@ extern int file_save(struct buffer *buffer);
 /* Functions from input.c */
 extern int input_read_key(void);
 
+/* Functions from render.c */
+extern int render_refresh_screen(void);
+
 /*****************************************************************************
  * Internal State
  *****************************************************************************/
@@ -80,7 +83,7 @@ void editor_init(void)
 	editor.show_whitespace = false;
 	editor.show_file_icons = true;
 	editor.show_hidden_files = false;
-	editor.tab_width = TAB_STOP_WIDTH;
+	editor.tab_width = 4;
 	editor.color_column = 0;
 	editor.color_column_style = COLOR_COLUMN_SOLID;
 	editor.theme_indicator = THEME_INDICATOR_CHECK;
@@ -864,9 +867,9 @@ void editor_check_for_updates(void)
 {
 	/* If we already know an update is available, ask to install */
 	if (editor.update_available) {
-		editor_set_status_message("Update v%s available. Press Alt+U to check again, or install? [y/n]: ",
+		editor_set_status_message("Update v%s available. Install? [y/n]: ",
 		                          editor.update_version);
-		/* Wait for user response */
+		render_refresh_screen();
 		int key = input_read_key();
 		if (key == 'y' || key == 'Y') {
 			if (update_install(editor.update_version)) {
@@ -881,6 +884,10 @@ void editor_check_for_updates(void)
 		return;
 	}
 
+	/* Show checking message and refresh screen */
+	editor_set_status_message("Checking for updates...");
+	render_refresh_screen();
+
 	/* Check for updates */
 	update_check();
 
@@ -888,9 +895,11 @@ void editor_check_for_updates(void)
 	if (editor.update_available) {
 		editor_set_status_message("Update v%s available (current: v%s). Install? [y/n]: ",
 		                          editor.update_version, EDIT_VERSION);
-		/* Wait for user response */
+		render_refresh_screen();
 		int key = input_read_key();
 		if (key == 'y' || key == 'Y') {
+			editor_set_status_message("Downloading v%s...", editor.update_version);
+			render_refresh_screen();
 			if (update_install(editor.update_version)) {
 				editor.update_available = false;
 			}
