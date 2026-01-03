@@ -27,6 +27,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdatomic.h>
 #include <limits.h>
 #include <pthread.h>

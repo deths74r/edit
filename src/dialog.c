@@ -1399,7 +1399,7 @@ char *open_file_dialog(void)
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
 			}
-			int __unused = render_refresh_screen(); (void)__unused;
+			{ int ret_ignored = render_refresh_screen(); (void)ret_ignored; }
 			continue;
 		}
 
@@ -1674,7 +1674,7 @@ int theme_picker_dialog(void)
 			last_preview_index = theme_picker.dialog.selected_index;
 
 			/* Redraw entire screen with new theme, then overlay dialog */
-			int __unused = render_refresh_screen(); (void)__unused;
+			{ int ret_ignored = render_refresh_screen(); (void)ret_ignored; }
 		}
 
 		theme_picker_draw();
@@ -1692,7 +1692,7 @@ int theme_picker_dialog(void)
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
 			}
-			int __unused = render_refresh_screen(); (void)__unused;
+			{ int ret_ignored = render_refresh_screen(); (void)ret_ignored; }
 			continue;
 		}
 
@@ -1946,7 +1946,7 @@ void help_dialog(void)
 				editor.screen_rows = 24;
 				editor.screen_columns = 80;
 			}
-			int __unused = render_refresh_screen(); (void)__unused;
+			{ int ret_ignored = render_refresh_screen(); (void)ret_ignored; }
 			continue;
 		}
 

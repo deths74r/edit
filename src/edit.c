@@ -793,7 +793,7 @@ void worker_process_results(void)
 		processed++;
 
 		if (result.error && result.error != -EEDIT_CANCELLED) {
-			log_warn("Task %lu (type %d) failed: %s",
+			log_warn("Task %" PRIu64 " (type %d) failed: %s",
 			         result.task_id, result.type, edit_strerror(result.error));
 		}
 
@@ -5226,7 +5226,7 @@ static void editor_command_open_file(void)
 	char *path = open_file_dialog();
 
 	/* Redraw screen after dialog closes */
-	int __unused = render_refresh_screen(); (void)__unused;
+	{ int ret_ignored = render_refresh_screen(); (void)ret_ignored; }
 
 	if (path) {
 		editor_open_file(path);
@@ -5244,7 +5244,7 @@ static void editor_command_theme_picker(void)
 	int selected = theme_picker_dialog();
 
 	/* Redraw screen after dialog closes */
-	int __unused = render_refresh_screen(); (void)__unused;
+	{ int ret_ignored = render_refresh_screen(); (void)ret_ignored; }
 
 	if (selected >= 0) {
 		editor_set_status_message("Switched to %s theme", active_theme.name);
