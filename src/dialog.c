@@ -443,11 +443,12 @@ enum dialog_result dialog_handle_mouse(struct dialog_state *dialog,
 {
 	/*
 	 * Mouse coordinates are 0-based (parsed from 1-based terminal coords).
-	 * Dialog panel_top is 0-based. Drawing uses panel_top + 1 for ANSI
-	 * escape sequences (which are 1-based), so first content row is at
-	 * ANSI row (panel_top + 2), which equals 0-based row (panel_top + 1).
+	 * Dialog panel_top is 0-based. content_offset indicates how many rows
+	 * from panel_top the list content starts (default 1 for header only,
+	 * 2 for header + extra row like query input).
 	 */
-	int content_top = dialog->panel_top + 1;
+	int offset = dialog->content_offset > 0 ? dialog->content_offset : 1;
+	int content_top = dialog->panel_top + offset;
 	int content_bottom = dialog->panel_top + dialog->panel_height - 1;
 	int content_left = dialog->panel_left + 1;
 	int content_right = dialog->panel_left + dialog->panel_width;
@@ -757,21 +758,362 @@ char *path_join(const char *directory, const char *filename)
 }
 
 /*****************************************************************************
+ * Fuzzy Matching
+ *****************************************************************************/
+
+/*
+ * Calculate fuzzy match score between pattern and text.
+ * Returns score (higher = better), or -1 if no match.
+ *
+ * Scoring:
+ *   - Each matched character: +1
+ *   - Consecutive matches: +5 bonus
+ *   - Match at start of word (after /, _, -, .): +10 bonus
+ *   - Match at start of string: +15 bonus
+ */
+static int fuzzy_score(const char *pattern, const char *text, bool case_sensitive)
+{
+	if (pattern == NULL || pattern[0] == '\0') {
+		return 0;  /* Empty pattern matches everything with score 0 */
+	}
+	if (text == NULL || text[0] == '\0') {
+		return -1;
+	}
+
+	const char *pattern_ptr = pattern;
+	const char *text_ptr = text;
+	int score = 0;
+	bool previous_matched = false;
+	const char *prev_char = NULL;
+
+	while (*pattern_ptr != '\0') {
+		/* Find next occurrence of pattern character in text */
+		bool found = false;
+
+		while (*text_ptr != '\0') {
+			char pattern_char = *pattern_ptr;
+			char text_char = *text_ptr;
+
+			/* Case insensitive comparison if requested */
+			if (!case_sensitive) {
+				if (pattern_char >= 'A' && pattern_char <= 'Z') {
+					pattern_char = pattern_char + ('a' - 'A');
+				}
+				if (text_char >= 'A' && text_char <= 'Z') {
+					text_char = text_char + ('a' - 'A');
+				}
+			}
+
+			if (pattern_char == text_char) {
+				/* Match found */
+				score += 1;
+
+				/* Consecutive match bonus */
+				if (previous_matched) {
+					score += 5;
+				}
+
+				/* Start of word bonus */
+				if (prev_char == NULL) {
+					score += 15;  /* Start of string */
+				} else if (*prev_char == '/' || *prev_char == '_' ||
+				           *prev_char == '-' || *prev_char == '.') {
+					score += 10;  /* Start of word */
+				}
+
+				previous_matched = true;
+				prev_char = text_ptr;
+				text_ptr++;
+				found = true;
+				break;
+			}
+
+			previous_matched = false;
+			prev_char = text_ptr;
+			text_ptr++;
+		}
+
+		if (!found) {
+			return -1;  /* Pattern character not found */
+		}
+
+		pattern_ptr++;
+	}
+
+	return score;
+}
+
+/*
+ * State for recursive directory scanning.
+ */
+struct recursive_scan_state {
+	struct file_list_item *items;
+	int count;
+	int capacity;
+	int max_files;
+	int max_depth;
+	char *base_path;
+	int base_path_length;
+};
+
+/*
+ * Recursively scan a directory and add files to the scan state.
+ * Returns 0 on success, -1 on error or if max_files reached.
+ */
+static int file_list_scan_recursive(struct recursive_scan_state *state,
+                                    const char *path, int depth)
+{
+	if (depth > state->max_depth) {
+		return 0;
+	}
+
+	if (state->count >= state->max_files) {
+		return -1;  /* Reached file limit */
+	}
+
+	DIR *directory = opendir(path);
+	if (directory == NULL) {
+		return 0;  /* Skip inaccessible directories */
+	}
+
+	struct dirent *entry;
+	while ((entry = readdir(directory)) != NULL) {
+		/* Skip . and .. */
+		if (entry->d_name[0] == '.') {
+			if (entry->d_name[1] == '\0' ||
+			    (entry->d_name[1] == '.' && entry->d_name[2] == '\0')) {
+				continue;
+			}
+			/* Skip hidden files/dirs if not showing them */
+			if (!editor.show_hidden_files) {
+				continue;
+			}
+		}
+
+		/* Build full path */
+		char *full_path = path_join(path, entry->d_name);
+		if (full_path == NULL) {
+			continue;
+		}
+
+		/* Check if it's a directory */
+		struct stat statistic;
+		bool is_directory = false;
+		if (stat(full_path, &statistic) == 0) {
+			is_directory = S_ISDIR(statistic.st_mode);
+		}
+
+		/* Expand array if needed */
+		if (state->count >= state->capacity) {
+			int new_capacity = state->capacity * 2;
+			struct file_list_item *new_items = realloc(
+				state->items,
+				new_capacity * sizeof(struct file_list_item));
+			if (new_items == NULL) {
+				free(full_path);
+				closedir(directory);
+				return -1;
+			}
+			state->items = new_items;
+			state->capacity = new_capacity;
+		}
+
+		/* Create relative path from base */
+		const char *relative_path = full_path + state->base_path_length;
+		if (*relative_path == '/') {
+			relative_path++;
+		}
+
+		/* Add item */
+		struct file_list_item *item = &state->items[state->count];
+
+		if (is_directory) {
+			/* For directories, add trailing slash to display name */
+			size_t name_length = strlen(relative_path);
+			item->display_name = malloc(name_length + 2);
+			if (item->display_name) {
+				memcpy(item->display_name, relative_path, name_length);
+				item->display_name[name_length] = '/';
+				item->display_name[name_length + 1] = '\0';
+			}
+		} else {
+			item->display_name = strdup(relative_path);
+		}
+
+		item->actual_name = strdup(full_path);
+		item->is_directory = is_directory;
+
+		if (item->display_name == NULL || item->actual_name == NULL) {
+			free(item->display_name);
+			free(item->actual_name);
+			free(full_path);
+			continue;
+		}
+
+		state->count++;
+
+		/* Recurse into directories */
+		if (is_directory && state->count < state->max_files) {
+			file_list_scan_recursive(state, full_path, depth + 1);
+		}
+
+		free(full_path);
+
+		if (state->count >= state->max_files) {
+			break;
+		}
+	}
+
+	closedir(directory);
+	return 0;
+}
+
+/*
+ * Read directory contents recursively.
+ * Caller must free the returned array with file_list_free().
+ * Returns NULL on error and sets count to 0.
+ */
+static struct file_list_item *file_list_read_recursive(const char *path,
+                                                       int max_depth,
+                                                       int max_files,
+                                                       int *count)
+{
+	*count = 0;
+
+	/* Resolve to absolute path */
+	char resolved[PATH_MAX];
+	if (realpath(path, resolved) == NULL) {
+		return NULL;
+	}
+
+	struct recursive_scan_state state = {0};
+	state.capacity = 256;
+	state.max_files = max_files;
+	state.max_depth = max_depth;
+	state.base_path = resolved;
+	state.base_path_length = strlen(resolved);
+
+	state.items = malloc(state.capacity * sizeof(struct file_list_item));
+	if (state.items == NULL) {
+		return NULL;
+	}
+
+	file_list_scan_recursive(&state, resolved, 0);
+
+	/* Sort: directories first, then alphabetically by display name */
+	if (state.count > 0) {
+		qsort(state.items, state.count, sizeof(struct file_list_item),
+		      file_list_compare);
+	}
+
+	*count = state.count;
+	return state.items;
+}
+
+/*****************************************************************************
  * Open File Dialog
  *****************************************************************************/
 
 /*
- * Load directory contents into the open file dialog.
+ * Comparison function for sorting filtered items by score (descending).
+ */
+static int *fuzzy_sort_scores = NULL;  /* Used by comparison function */
+
+static int fuzzy_score_compare(const void *first, const void *second)
+{
+	int index_first = *(const int *)first;
+	int index_second = *(const int *)second;
+	/* Higher score comes first */
+	return fuzzy_sort_scores[index_second] - fuzzy_sort_scores[index_first];
+}
+
+/*
+ * Apply fuzzy filter to items based on current query.
+ * Updates filtered_indices, filtered_scores, and filtered_count.
+ */
+static void open_file_apply_filter(void)
+{
+	/* Free existing filter arrays */
+	free(open_file.filtered_indices);
+	free(open_file.filtered_scores);
+	open_file.filtered_indices = NULL;
+	open_file.filtered_scores = NULL;
+	open_file.filtered_count = 0;
+
+	if (open_file.item_count == 0) {
+		open_file.dialog.item_count = 0;
+		return;
+	}
+
+	/* Allocate filter arrays */
+	open_file.filtered_indices = malloc(open_file.item_count * sizeof(int));
+	open_file.filtered_scores = malloc(open_file.item_count * sizeof(int));
+	if (open_file.filtered_indices == NULL || open_file.filtered_scores == NULL) {
+		free(open_file.filtered_indices);
+		free(open_file.filtered_scores);
+		open_file.filtered_indices = NULL;
+		open_file.filtered_scores = NULL;
+		return;
+	}
+
+	/* If no query, show all items */
+	if (open_file.query_length == 0) {
+		for (int i = 0; i < open_file.item_count; i++) {
+			open_file.filtered_indices[i] = i;
+			open_file.filtered_scores[i] = 0;
+		}
+		open_file.filtered_count = open_file.item_count;
+	} else {
+		/* Filter items by fuzzy matching */
+		int count = 0;
+		for (int i = 0; i < open_file.item_count; i++) {
+			int score = fuzzy_score(open_file.query,
+			                        open_file.items[i].display_name,
+			                        editor.fuzzy_case_sensitive);
+			if (score >= 0) {
+				open_file.filtered_indices[count] = i;
+				open_file.filtered_scores[count] = score;
+				count++;
+			}
+		}
+		open_file.filtered_count = count;
+
+		/* Sort by score (descending) */
+		if (count > 1) {
+			fuzzy_sort_scores = open_file.filtered_scores;
+			qsort(open_file.filtered_indices, count, sizeof(int),
+			      fuzzy_score_compare);
+			fuzzy_sort_scores = NULL;
+		}
+	}
+
+	/* Update dialog state */
+	open_file.dialog.item_count = open_file.filtered_count;
+	open_file.dialog.selected_index = 0;
+	open_file.dialog.scroll_offset = 0;
+}
+
+/*
+ * Load directory contents recursively into the open file dialog.
  * Returns true on success.
  */
 static bool open_file_load_directory(const char *path)
 {
-	/* Free existing items */
+	/* Free existing items and filter arrays */
 	if (open_file.items) {
 		file_list_free(open_file.items, open_file.item_count);
 		open_file.items = NULL;
 		open_file.item_count = 0;
 	}
+	free(open_file.filtered_indices);
+	free(open_file.filtered_scores);
+	open_file.filtered_indices = NULL;
+	open_file.filtered_scores = NULL;
+	open_file.filtered_count = 0;
+
+	/* Clear query */
+	open_file.query[0] = '\0';
+	open_file.query_length = 0;
 
 	/* Resolve to absolute path */
 	char resolved[PATH_MAX];
@@ -779,9 +1121,13 @@ static bool open_file_load_directory(const char *path)
 		return false;
 	}
 
-	/* Load directory contents */
+	/* Load directory contents recursively */
 	int count;
-	struct file_list_item *items = file_list_read_directory(resolved, &count);
+	struct file_list_item *items = file_list_read_recursive(
+		resolved,
+		editor.fuzzy_max_depth,
+		editor.fuzzy_max_files,
+		&count);
 	if (items == NULL) {
 		return false;
 	}
@@ -792,10 +1138,8 @@ static bool open_file_load_directory(const char *path)
 	open_file.items = items;
 	open_file.item_count = count;
 
-	/* Update dialog state */
-	open_file.dialog.item_count = count;
-	open_file.dialog.selected_index = 0;
-	open_file.dialog.scroll_offset = 0;
+	/* Apply initial filter (shows all items) */
+	open_file_apply_filter();
 
 	return true;
 }
@@ -815,6 +1159,26 @@ static void open_file_go_parent(void)
 }
 
 /*
+ * Get the item at the current selection (through filtered indices).
+ * Returns NULL if no valid selection.
+ */
+static struct file_list_item *open_file_get_selected_item(void)
+{
+	if (open_file.dialog.selected_index < 0 ||
+	    open_file.dialog.selected_index >= open_file.filtered_count ||
+	    open_file.filtered_indices == NULL) {
+		return NULL;
+	}
+
+	int item_index = open_file.filtered_indices[open_file.dialog.selected_index];
+	if (item_index < 0 || item_index >= open_file.item_count) {
+		return NULL;
+	}
+
+	return &open_file.items[item_index];
+}
+
+/*
  * Navigate into selected directory or return selected file path.
  * Returns:
  *   - Allocated string with file path if file was selected (caller must free)
@@ -823,27 +1187,21 @@ static void open_file_go_parent(void)
  */
 static char *open_file_select_item(void)
 {
-	if (open_file.dialog.selected_index < 0 ||
-	    open_file.dialog.selected_index >= open_file.item_count) {
+	struct file_list_item *item = open_file_get_selected_item();
+	if (item == NULL) {
 		return NULL;
 	}
 
-	struct file_list_item *item = &open_file.items[open_file.dialog.selected_index];
-
 	if (item->is_directory) {
-		/* Navigate into directory */
-		char *new_path = path_join(open_file.current_path, item->actual_name);
-		if (new_path) {
-			if (!open_file_load_directory(new_path)) {
-				editor_set_status_message("Cannot open directory: %s", new_path);
-			}
-			free(new_path);
+		/* Navigate into directory - actual_name is full path for recursive */
+		if (!open_file_load_directory(item->actual_name)) {
+			editor_set_status_message("Cannot open directory: %s",
+			                          item->display_name);
 		}
 		return NULL;
 	} else {
-		/* Return file path */
-		char *file_path = path_join(open_file.current_path, item->actual_name);
-		return file_path;
+		/* Return file path - actual_name is full path */
+		return strdup(item->actual_name);
 	}
 }
 
@@ -875,28 +1233,104 @@ static void open_file_draw(void)
 
 	dialog_draw_header(&output, &open_file.dialog, header);
 
-	/* Draw file list */
-	for (int row = 0; row < open_file.dialog.visible_rows; row++) {
-		int item_index = open_file.dialog.scroll_offset + row;
+	/* Draw query input line */
+	int query_row = open_file.dialog.panel_top + 2;
+	dialog_goto(&output, query_row, open_file.dialog.panel_left + 1);
+	dialog_set_style(&output, &active_theme.dialog);
 
-		if (item_index < open_file.item_count) {
+	/* Draw prompt and query with leading padding */
+	int chars_written = 0;
+	output_buffer_append_string(&output, " \xE2\x9D\xAF ");  /* space + ❯ + space */
+	chars_written += 3;  /* chevron is 1 display column */
+
+	/* Draw query text */
+	for (int i = 0; i < open_file.query_length &&
+	     chars_written < open_file.dialog.panel_width - 1; i++) {
+		output_buffer_append_char(&output, open_file.query[i]);
+		chars_written++;
+	}
+
+	/* Remember cursor position for later */
+	int cursor_col = open_file.dialog.panel_left + 1 + chars_written;
+
+	/* Pad to full width */
+	while (chars_written < open_file.dialog.panel_width) {
+		output_buffer_append_char(&output, ' ');
+		chars_written++;
+	}
+
+	/* Draw file list (offset by 1 for query line) */
+	int visible_rows = open_file.dialog.visible_rows - 1;  /* Account for query line */
+	if (visible_rows < 0) visible_rows = 0;
+
+	for (int row = 0; row < visible_rows; row++) {
+		int filtered_index = open_file.dialog.scroll_offset + row;
+
+		/* Position at row + 1 to account for query input line */
+		int screen_row = open_file.dialog.panel_top + 3 + row;
+		dialog_goto(&output, screen_row, open_file.dialog.panel_left + 1);
+
+		int row_chars = 0;
+
+		if (filtered_index < open_file.filtered_count &&
+		    open_file.filtered_indices != NULL) {
+			int item_index = open_file.filtered_indices[filtered_index];
 			struct file_list_item *item = &open_file.items[item_index];
-			bool is_selected = (item_index == open_file.dialog.selected_index);
+			bool is_selected = (filtered_index == open_file.dialog.selected_index);
 
-			dialog_draw_list_item(&output, &open_file.dialog, row,
-			                      item->display_name, is_selected,
-			                      item->is_directory);
+			/* Set style based on selection */
+			if (is_selected) {
+				dialog_set_style(&output, &active_theme.dialog_highlight);
+			} else {
+				dialog_set_style(&output, &active_theme.dialog);
+			}
+
+			/* Leading space for padding */
+			output_buffer_append_char(&output, ' ');
+			row_chars++;
+
+			/* Draw icon if enabled */
+			if (editor.show_file_icons) {
+				if (item->is_directory) {
+					output_buffer_append_string(&output, "\xF0\x9F\x97\x81  ");
+					row_chars += 3;
+				} else {
+					output_buffer_append_string(&output, "   ");
+					row_chars += 3;
+				}
+			}
+
+			/* Draw display name, truncating if necessary */
+			int name_len = strlen(item->display_name);
+			for (int i = 0; i < name_len &&
+			     row_chars < open_file.dialog.panel_width - 1; i++) {
+				output_buffer_append_char(&output, item->display_name[i]);
+				row_chars++;
+			}
+
+			/* Pad to full width */
+			while (row_chars < open_file.dialog.panel_width) {
+				output_buffer_append_char(&output, ' ');
+				row_chars++;
+			}
 		} else {
-			dialog_draw_empty_row(&output, &open_file.dialog, row);
+			/* Empty row */
+			dialog_set_style(&output, &active_theme.dialog);
+			while (row_chars < open_file.dialog.panel_width) {
+				output_buffer_append_char(&output, ' ');
+				row_chars++;
+			}
 		}
 	}
 
 	/* Draw footer */
 	dialog_draw_footer(&output, &open_file.dialog,
-	                   "Enter:Open  Left:Parent  Tab:Icons  Esc:Cancel");
+	                   "Tab:Hidden  Shift+Tab:Icons  Enter:Open  Esc:Cancel");
 
-	/* Reset attributes, keep cursor hidden while dialog is active */
+	/* Position cursor in query area and show it */
 	output_buffer_append_string(&output, ESCAPE_RESET);
+	dialog_goto(&output, query_row, cursor_col);
+	output_buffer_append_string(&output, ESCAPE_CURSOR_SHOW);
 
 	output_buffer_flush(&output);
 	output_buffer_free(&output);
@@ -912,6 +1346,7 @@ char *open_file_dialog(void)
 	/* Initialize state */
 	memset(&open_file, 0, sizeof(open_file));
 	open_file.dialog.active = true;
+	open_file.dialog.content_offset = 2;  /* Query row shifts file list down */
 
 	/* Start in directory of current file, or current working directory */
 	char start_path[PATH_MAX];
@@ -984,6 +1419,30 @@ char *open_file_dialog(void)
 			continue;
 		}
 
+		/* Handle backspace - delete from query */
+		if (key == KEY_BACKSPACE || key == 8) {  /* 8 = Ctrl+H */
+			if (open_file.query_length > 0) {
+				open_file.query_length--;
+				open_file.query[open_file.query_length] = '\0';
+				open_file_apply_filter();
+			}
+			continue;
+		}
+
+		/* Handle Escape - clear query first, then cancel */
+		if (key == 27) {  /* Escape */
+			if (open_file.query_length > 0) {
+				/* Clear query */
+				open_file.query[0] = '\0';
+				open_file.query_length = 0;
+				open_file_apply_filter();
+			} else {
+				/* Cancel dialog */
+				open_file.dialog.active = false;
+			}
+			continue;
+		}
+
 		/* Handle special keys for file browser */
 		if (key == KEY_ARROW_LEFT) {
 			open_file_go_parent();
@@ -992,21 +1451,53 @@ char *open_file_dialog(void)
 
 		if (key == KEY_ARROW_RIGHT) {
 			/* Enter directory if selected item is a directory */
-			if (open_file.dialog.selected_index >= 0 &&
-			    open_file.dialog.selected_index < open_file.item_count &&
-			    open_file.items[open_file.dialog.selected_index].is_directory) {
+			struct file_list_item *item = open_file_get_selected_item();
+			if (item != NULL && item->is_directory) {
 				open_file_select_item();
 			}
 			continue;
 		}
 
-		/* Tab toggles file/folder icons */
+		/* Tab toggles hidden files */
 		if (key == '\t') {
-			editor.show_file_icons = !editor.show_file_icons;
+			editor.show_hidden_files = !editor.show_hidden_files;
+			config_save();
+			/* Rescan directory with new setting */
+			char current[PATH_MAX];
+			strncpy(current, open_file.current_path, PATH_MAX - 1);
+			current[PATH_MAX - 1] = '\0';
+			open_file_load_directory(current);
 			continue;
 		}
 
-		/* Handle generic dialog keys */
+		/* Shift+Tab toggles file icons */
+		if (key == KEY_SHIFT_TAB) {
+			editor.show_file_icons = !editor.show_file_icons;
+			config_save();
+			continue;
+		}
+
+		/* Handle Enter - select item */
+		if (key == '\r' || key == '\n') {
+			result = open_file_select_item();
+			if (result) {
+				open_file.dialog.active = false;
+			}
+			continue;
+		}
+
+		/* Handle printable characters - add to query */
+		if (key >= 32 && key < 127) {
+			if (open_file.query_length < (int)sizeof(open_file.query) - 1) {
+				open_file.query[open_file.query_length] = (char)key;
+				open_file.query_length++;
+				open_file.query[open_file.query_length] = '\0';
+				open_file_apply_filter();
+			}
+			continue;
+		}
+
+		/* Handle arrow keys for navigation */
 		enum dialog_result dr = dialog_handle_key(&open_file.dialog, key);
 
 		if (dr == DIALOG_CONFIRM) {
@@ -1024,6 +1515,10 @@ char *open_file_dialog(void)
 		file_list_free(open_file.items, open_file.item_count);
 		open_file.items = NULL;
 	}
+	free(open_file.filtered_indices);
+	free(open_file.filtered_scores);
+	open_file.filtered_indices = NULL;
+	open_file.filtered_scores = NULL;
 
 	dialog_close(&open_file.dialog);
 

@@ -75,11 +75,15 @@ void editor_init(void)
 	editor.wrap_indicator = WRAP_INDICATOR_RETURN;
 	editor.show_whitespace = false;
 	editor.show_file_icons = true;
+	editor.show_hidden_files = false;
 	editor.color_column = 0;
 	editor.color_column_style = COLOR_COLUMN_SOLID;
 	editor.theme_indicator = THEME_INDICATOR_CHECK;
 	editor.cursor_count = 0;
 	editor.primary_cursor = 0;
+	editor.fuzzy_max_depth = 10;
+	editor.fuzzy_max_files = 10000;
+	editor.fuzzy_case_sensitive = false;
 
 	/* Initialize theme system */
 	themes_load();

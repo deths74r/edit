@@ -577,6 +577,7 @@ struct dialog_state {
 	int scroll_offset;              /* First visible item index */
 	int item_count;                 /* Total number of items */
 	int visible_rows;               /* Number of visible list rows */
+	int content_offset;             /* Rows from panel_top to list (default 1) */
 
 	/* Panel dimensions (calculated on draw) */
 	int panel_top;
@@ -617,6 +618,13 @@ struct open_file_state {
 	char current_path[PATH_MAX];
 	struct file_list_item *items;
 	int item_count;
+
+	/* Fuzzy filter state. */
+	char query[256];             /* Search query (UTF-8) */
+	int query_length;            /* Length of query in bytes */
+	int *filtered_indices;       /* Indices into items[] that match query */
+	int *filtered_scores;        /* Score for each filtered item */
+	int filtered_count;          /* Number of matching items */
 };
 
 /*
@@ -886,9 +894,15 @@ struct editor_state {
 	/* Visual display settings. */
 	bool show_whitespace;        /* Render whitespace characters visibly */
 	bool show_file_icons;        /* Show file/folder icons in dialogs */
+	bool show_hidden_files;      /* Show hidden files in file dialogs */
 	uint32_t color_column;       /* Column to highlight (0 = off) */
 	enum color_column_style color_column_style;  /* Visual style for column */
 	enum theme_indicator theme_indicator;  /* Current theme marker style */
+
+	/* Fuzzy finder settings for file open dialog. */
+	int fuzzy_max_depth;         /* Max directory recursion depth (default: 10) */
+	int fuzzy_max_files;         /* Max files to index (default: 10000) */
+	bool fuzzy_case_sensitive;   /* Case-sensitive matching (default: false) */
 
 	/* Multi-cursor support. When cursor_count > 0, cursors[] is used
 	 * instead of cursor_row/cursor_column/selection_* fields. */

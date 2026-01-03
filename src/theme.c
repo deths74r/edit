@@ -11,6 +11,8 @@
 #include "edit.h"
 #include "theme.h"
 
+extern struct editor_state editor;
+
 /*****************************************************************************
  * Global State
  *****************************************************************************/
@@ -1719,8 +1721,13 @@ static char *config_get_path(void)
 
 /*
  * Load configuration from ~/.editrc.
- * Currently supports:
+ * Supports:
  *   theme=<theme_name>
+ *   fuzzy_max_depth=<int>
+ *   fuzzy_max_files=<int>
+ *   fuzzy_case_sensitive=<true|false>
+ *   show_file_icons=<true|false>
+ *   show_hidden_files=<true|false>
  */
 void config_load(void)
 {
@@ -1743,22 +1750,54 @@ void config_load(void)
 			continue;
 		}
 
+		/* Trim trailing whitespace/newline */
+		size_t line_len = strlen(line);
+		while (line_len > 0 && (line[line_len - 1] == '\n' ||
+		       line[line_len - 1] == '\r' ||
+		       isspace((unsigned char)line[line_len - 1]))) {
+			line[--line_len] = '\0';
+		}
+
 		/* Parse theme=<name> */
 		if (strncmp(line, "theme=", 6) == 0) {
 			char *name = line + 6;
-
-			/* Trim trailing whitespace/newline */
-			size_t len = strlen(name);
-			while (len > 0 && (name[len - 1] == '\n' ||
-			       name[len - 1] == '\r' ||
-			       isspace((unsigned char)name[len - 1]))) {
-				name[--len] = '\0';
-			}
-
 			int index = theme_find_by_name(name);
 			if (index >= 0) {
 				current_theme_index = index;
 			}
+		}
+		/* Parse fuzzy_max_depth=<int> */
+		else if (strncmp(line, "fuzzy_max_depth=", 16) == 0) {
+			int value = atoi(line + 16);
+			if (value > 0) {
+				editor.fuzzy_max_depth = value;
+			}
+		}
+		/* Parse fuzzy_max_files=<int> */
+		else if (strncmp(line, "fuzzy_max_files=", 16) == 0) {
+			int value = atoi(line + 16);
+			if (value > 0) {
+				editor.fuzzy_max_files = value;
+			}
+		}
+		/* Parse fuzzy_case_sensitive=<true|false> */
+		else if (strncmp(line, "fuzzy_case_sensitive=", 21) == 0) {
+			char *value = line + 21;
+			if (strcmp(value, "true") == 0) {
+				editor.fuzzy_case_sensitive = true;
+			} else if (strcmp(value, "false") == 0) {
+				editor.fuzzy_case_sensitive = false;
+			}
+		}
+		/* Parse show_file_icons=<true|false> */
+		else if (strncmp(line, "show_file_icons=", 16) == 0) {
+			char *value = line + 16;
+			editor.show_file_icons = (strcmp(value, "true") == 0);
+		}
+		/* Parse show_hidden_files=<true|false> */
+		else if (strncmp(line, "show_hidden_files=", 18) == 0) {
+			char *value = line + 18;
+			editor.show_hidden_files = (strcmp(value, "true") == 0);
 		}
 	}
 
@@ -1786,6 +1825,18 @@ void config_save(void)
 	if (active_theme.name != NULL) {
 		fprintf(file, "theme=%s\n", active_theme.name);
 	}
+
+	/* Fuzzy finder settings */
+	fprintf(file, "fuzzy_max_depth=%d\n", editor.fuzzy_max_depth);
+	fprintf(file, "fuzzy_max_files=%d\n", editor.fuzzy_max_files);
+	fprintf(file, "fuzzy_case_sensitive=%s\n",
+	        editor.fuzzy_case_sensitive ? "true" : "false");
+
+	/* File dialog settings */
+	fprintf(file, "show_file_icons=%s\n",
+	        editor.show_file_icons ? "true" : "false");
+	fprintf(file, "show_hidden_files=%s\n",
+	        editor.show_hidden_files ? "true" : "false");
 
 	fclose(file);
 }
