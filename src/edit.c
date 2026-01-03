@@ -1720,7 +1720,7 @@ static uint32_t line_get_visual_column_in_segment(struct line *line,
 		uint32_t cp = line->cells[i].codepoint;
 		int width;
 		if (cp == '\t') {
-			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+			width = editor.tab_width - (absolute_visual % editor.tab_width);
 		} else {
 			width = utflite_codepoint_width(cp);
 			if (width < 0) width = 1;
@@ -1733,7 +1733,7 @@ static uint32_t line_get_visual_column_in_segment(struct line *line,
 		uint32_t cp = line->cells[i].codepoint;
 		int width;
 		if (cp == '\t') {
-			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+			width = editor.tab_width - (absolute_visual % editor.tab_width);
 		} else {
 			width = utflite_codepoint_width(cp);
 			if (width < 0) width = 1;
@@ -1766,7 +1766,7 @@ static uint32_t line_find_column_at_visual(struct line *line,
 		uint32_t cp = line->cells[i].codepoint;
 		int width;
 		if (cp == '\t') {
-			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+			width = editor.tab_width - (absolute_visual % editor.tab_width);
 		} else {
 			width = utflite_codepoint_width(cp);
 			if (width < 0) width = 1;
@@ -1785,7 +1785,7 @@ static uint32_t line_find_column_at_visual(struct line *line,
 		uint32_t cp = line->cells[col].codepoint;
 		int width;
 		if (cp == '\t') {
-			width = TAB_STOP_WIDTH - (absolute_visual % TAB_STOP_WIDTH);
+			width = editor.tab_width - (absolute_visual % editor.tab_width);
 		} else {
 			width = utflite_codepoint_width(cp);
 			if (width < 0) width = 1;
@@ -2695,7 +2695,7 @@ static uint32_t screen_column_to_cell(uint32_t row, uint32_t target_visual_colum
 		int width;
 
 		if (cp == '\t') {
-			width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
+			width = editor.tab_width - (visual_column % editor.tab_width);
 		} else {
 			width = utflite_codepoint_width(cp);
 			if (width < 0) {
@@ -4254,7 +4254,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			uint32_t codepoint = line->cells[cell_index].codepoint;
 			int width;
 			if (codepoint == '\t') {
-				width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
+				width = editor.tab_width - (visual_column % editor.tab_width);
 			} else {
 				width = utflite_codepoint_width(codepoint);
 				if (width < 0) width = 1;
@@ -4269,7 +4269,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			uint32_t codepoint = line->cells[i].codepoint;
 			int width;
 			if (codepoint == '\t') {
-				width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
+				width = editor.tab_width - (visual_column % editor.tab_width);
 			} else {
 				width = utflite_codepoint_width(codepoint);
 				if (width < 0) width = 1;
@@ -4368,7 +4368,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 
 		int width;
 		if (codepoint == '\t') {
-			width = TAB_STOP_WIDTH - (visual_column % TAB_STOP_WIDTH);
+			width = editor.tab_width - (visual_column % editor.tab_width);
 			/* Render tab with optional visible indicator */
 			if (editor.show_whitespace) {
 				/* Show → with tab colors, using cursor_line bg if applicable */
@@ -4704,8 +4704,8 @@ static void render_draw_rows(struct output_buffer *output)
 					for (uint32_t i = 0; i < line->cell_count; i++) {
 						uint32_t cp = line->cells[i].codepoint;
 						if (cp == '\t') {
-							line_visual_width += TAB_STOP_WIDTH -
-								(line_visual_width % TAB_STOP_WIDTH);
+							line_visual_width += editor.tab_width -
+								(line_visual_width % editor.tab_width);
 						} else {
 							int w = utflite_codepoint_width(cp);
 							line_visual_width += (w > 0) ? w : 1;
@@ -4788,8 +4788,8 @@ static void render_draw_rows(struct output_buffer *output)
 				for (uint32_t i = 0; i < line->cell_count; i++) {
 					uint32_t cp = line->cells[i].codepoint;
 					if (cp == '\t') {
-						line_visual_width += TAB_STOP_WIDTH -
-							(line_visual_width % TAB_STOP_WIDTH);
+						line_visual_width += editor.tab_width -
+							(line_visual_width % editor.tab_width);
 					} else {
 						int w = utflite_codepoint_width(cp);
 						line_visual_width += (w > 0) ? w : 1;
@@ -6067,8 +6067,8 @@ static void editor_outdent_lines(void)
 		if (line->cells[0].codepoint == '\t') {
 			chars_to_remove = 1;
 		} else if (line->cells[0].codepoint == ' ') {
-			/* Remove up to TAB_STOP_WIDTH spaces */
-			while (chars_to_remove < (uint32_t)TAB_STOP_WIDTH &&
+			/* Remove up to editor.tab_width spaces */
+			while (chars_to_remove < (uint32_t)editor.tab_width &&
 			       chars_to_remove < line->cell_count &&
 			       line->cells[chars_to_remove].codepoint == ' ') {
 				chars_to_remove++;

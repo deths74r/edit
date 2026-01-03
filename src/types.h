@@ -896,6 +896,7 @@ struct editor_state {
 	bool show_whitespace;        /* Render whitespace characters visibly */
 	bool show_file_icons;        /* Show file/folder icons in dialogs */
 	bool show_hidden_files;      /* Show hidden files in file dialogs */
+	int tab_width;               /* Tab stop width in columns (default: 8) */
 	uint32_t color_column;       /* Column to highlight (0 = off) */
 	enum color_column_style color_column_style;  /* Visual style for column */
 	enum theme_indicator theme_indicator;  /* Current theme marker style */

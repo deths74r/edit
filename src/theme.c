@@ -1799,6 +1799,13 @@ void config_load(void)
 			char *value = line + 18;
 			editor.show_hidden_files = (strcmp(value, "true") == 0);
 		}
+		/* Parse tab_width=<int> */
+		else if (strncmp(line, "tab_width=", 10) == 0) {
+			int value = atoi(line + 10);
+			if (value >= 1 && value <= 16) {
+				editor.tab_width = value;
+			}
+		}
 	}
 
 	fclose(file);
@@ -1837,6 +1844,9 @@ void config_save(void)
 	        editor.show_file_icons ? "true" : "false");
 	fprintf(file, "show_hidden_files=%s\n",
 	        editor.show_hidden_files ? "true" : "false");
+
+	/* Editor settings */
+	fprintf(file, "tab_width=%d\n", editor.tab_width);
 
 	fclose(file);
 }

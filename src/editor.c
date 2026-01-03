@@ -80,6 +80,7 @@ void editor_init(void)
 	editor.show_whitespace = false;
 	editor.show_file_icons = true;
 	editor.show_hidden_files = false;
+	editor.tab_width = TAB_STOP_WIDTH;
 	editor.color_column = 0;
 	editor.color_column_style = COLOR_COLUMN_SOLID;
 	editor.theme_indicator = THEME_INDICATOR_CHECK;

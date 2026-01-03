@@ -112,7 +112,7 @@ uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
 		int width;
 
 		if (cp == '\t') {
-			width = TAB_STOP_WIDTH - ((visual_width) % TAB_STOP_WIDTH);
+			width = editor.tab_width - ((visual_width) % editor.tab_width);
 		} else {
 			width = utflite_codepoint_width(cp);
 			if (width < 0) width = 1;
@@ -354,7 +354,7 @@ uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 	uint32_t render_column = 0;
 	for (uint32_t i = 0; i < column && i < line->cell_count; i++) {
 		if (line->cells[i].codepoint == '\t') {
-			render_column += TAB_STOP_WIDTH - (render_column % TAB_STOP_WIDTH);
+			render_column += editor.tab_width - (render_column % editor.tab_width);
 		} else {
 			int width = utflite_codepoint_width(line->cells[i].codepoint);
 			render_column += (width > 0) ? (uint32_t)width : 1;
