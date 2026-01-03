@@ -2260,6 +2260,40 @@ static void editor_move_cursor(int key)
 	if (editor.cursor_column > line_length) {
 		editor.cursor_column = line_length;
 	}
+	/*
+	 * Sync multi-cursor positions with primary cursor movement.
+	 * Calculate the delta from the primary cursor's old position and
+	 * apply it to all cursors in the array.
+	 */
+	if (editor.cursor_count > 0) {
+		struct cursor *primary = &editor.cursors[editor.primary_cursor];
+		int32_t row_delta = (int32_t)editor.cursor_row - (int32_t)primary->row;
+		int32_t col_delta = (int32_t)editor.cursor_column - (int32_t)primary->column;
+		for (uint32_t i = 0; i < editor.cursor_count; i++) {
+			struct cursor *cursor = &editor.cursors[i];
+			/* Calculate new position with bounds checking */
+			int32_t new_row = (int32_t)cursor->row + row_delta;
+			int32_t new_col = (int32_t)cursor->column + col_delta;
+			/* Clamp row to valid bounds */
+			if (new_row < 0) {
+				new_row = 0;
+			}
+			if (new_row >= (int32_t)editor.buffer.line_count) {
+				new_row = editor.buffer.line_count - 1;
+			}
+			cursor->row = (uint32_t)new_row;
+			/* Clamp column to line length */
+			uint32_t cursor_line_len = editor_get_line_length(cursor->row);
+			if (new_col < 0) {
+				new_col = 0;
+			}
+			if ((uint32_t)new_col > cursor_line_len) {
+				new_col = cursor_line_len;
+			}
+			cursor->column = (uint32_t)new_col;
+		}
+		multicursor_normalize();
+	}
 }
 
 /*
