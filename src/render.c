@@ -12,7 +12,7 @@
 
 #include <stdio.h>
 #include "edit.h"
-#include "../lib/utflite-1.5.1/single_include/utflite.h"
+#include "../lib/utflite-1.5.2/single_include/utflite.h"
 
 /* Access to global editor state (defined in edit.c) */
 extern struct editor_state editor;

@@ -13,7 +13,7 @@
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
-#include "../lib/utflite-1.5.1/single_include/utflite.h"
+#include "../lib/utflite-1.5.2/single_include/utflite.h"
 #include "edit.h"
 
 /*****************************************************************************

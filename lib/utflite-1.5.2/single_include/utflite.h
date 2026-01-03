@@ -44,8 +44,8 @@ extern "C" {
 /* Library version: major.minor.patch */
 #define UTFLITE_VERSION_MAJOR 1
 #define UTFLITE_VERSION_MINOR 5
-#define UTFLITE_VERSION_PATCH 1
-#define UTFLITE_VERSION_STRING "1.5.1"
+#define UTFLITE_VERSION_PATCH 2
+#define UTFLITE_VERSION_STRING "1.5.2"
 
 #define UTFLITE_UNICODE_VERSION 170  /* Unicode 17.0 */
 
@@ -766,14 +766,14 @@ static const struct utflite__unicode_range UTFLITE__DOUBLE_WIDTH_RANGES[] = {
     {0x1F17E, 0x1F17F},
     {0x1F18E, 0x1F18E},
     {0x1F191, 0x1F19A},
-    {0x1F1AE, 0x1F1FF},  /* Extended to include Regional Indicators */
+    {0x1F1AE, 0x1F1FF},  /* Includes Regional Indicators U+1F1E6-U+1F1FF */
     {0x1F200, 0x1F321},
     {0x1F324, 0x1F393},
     {0x1F396, 0x1F397},
     {0x1F399, 0x1F39B},
     {0x1F39E, 0x1F3F0},
     {0x1F3F3, 0x1F3F5},
-    {0x1F3F7, 0x1F3FA},  /* Split to exclude skin tone modifiers U+1F3FB-U+1F3FF */
+    {0x1F3F7, 0x1F3FA},  /* Split: excludes skin tone modifiers U+1F3FB-U+1F3FF */
     {0x1F400, 0x1F4FD},
     {0x1F4FF, 0x1F53D},
     {0x1F549, 0x1F54E},
