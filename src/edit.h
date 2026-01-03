@@ -54,6 +54,7 @@
 #include "dialog.h"
 #include "clipboard.h"
 #include "editor.h"
+#include "update.h"
 
 /*
  * Module headers will be added as modules are extracted:

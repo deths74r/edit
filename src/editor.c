@@ -16,6 +16,7 @@
 
 #include "../third_party/utflite/single_include/utflite.h"
 #include "edit.h"
+#include "update.h"
 
 /*****************************************************************************
  * External Dependencies
@@ -34,6 +35,9 @@ extern int current_theme_index;
 /* Functions from edit.c that we call */
 extern void editor_save(void);
 extern int file_save(struct buffer *buffer);
+
+/* Functions from input.c */
+extern int input_read_key(void);
 
 /*****************************************************************************
  * Internal State
@@ -845,4 +849,55 @@ bool reload_prompt_handle_key(int key)
 	/* Repeat prompt for unrecognized keys */
 	editor_set_status_message("File changed on disk. [R]eload [K]eep: ");
 	return true;
+}
+
+/*****************************************************************************
+ * Update Check
+ *****************************************************************************/
+
+/*
+ * Check for updates and handle the full update flow.
+ * Called when user presses Alt+U.
+ */
+void editor_check_for_updates(void)
+{
+	/* If we already know an update is available, ask to install */
+	if (editor.update_available) {
+		editor_set_status_message("Update v%s available. Press Alt+U to check again, or install? [y/n]: ",
+		                          editor.update_version);
+		/* Wait for user response */
+		int key = input_read_key();
+		if (key == 'y' || key == 'Y') {
+			if (update_install(editor.update_version)) {
+				editor.update_available = false;
+			}
+		} else if (key == 'n' || key == 'N') {
+			editor.update_available = false;
+			editor_set_status_message("Update skipped");
+		} else {
+			editor_set_status_message("Update cancelled");
+		}
+		return;
+	}
+
+	/* Check for updates */
+	update_check();
+
+	/* If an update was found, prompt immediately */
+	if (editor.update_available) {
+		editor_set_status_message("Update v%s available (current: v%s). Install? [y/n]: ",
+		                          editor.update_version, EDIT_VERSION);
+		/* Wait for user response */
+		int key = input_read_key();
+		if (key == 'y' || key == 'Y') {
+			if (update_install(editor.update_version)) {
+				editor.update_available = false;
+			}
+		} else if (key == 'n' || key == 'N') {
+			editor.update_available = false;
+			editor_set_status_message("Update skipped");
+		} else {
+			editor_set_status_message("Update cancelled");
+		}
+	}
 }

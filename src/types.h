@@ -38,7 +38,7 @@
  *****************************************************************************/
 
 /* Current version of the editor, displayed in welcome message and status. */
-#define EDIT_VERSION "0.2.0"
+#define EDIT_VERSION "0.2.1"
 
 /* Number of spaces a tab character expands to when rendered. */
 #define TAB_STOP_WIDTH 8
@@ -277,6 +277,7 @@ enum key_code {
 	KEY_ALT_C = -68,
 	KEY_ALT_W = -67,
 	KEY_ALT_R = -66,
+	KEY_ALT_U = -65,
 
 	/* Shift+Tab (backtab). */
 	KEY_SHIFT_TAB = -78,
@@ -903,6 +904,10 @@ struct editor_state {
 	int fuzzy_max_depth;         /* Max directory recursion depth (default: 10) */
 	int fuzzy_max_files;         /* Max files to index (default: 10000) */
 	bool fuzzy_case_sensitive;   /* Case-sensitive matching (default: false) */
+
+	/* Update check state. */
+	bool update_available;       /* True if a newer version was found */
+	char update_version[32];     /* Latest version string (e.g., "0.3.0") */
 
 	/* Multi-cursor support. When cursor_count > 0, cursors[] is used
 	 * instead of cursor_row/cursor_column/selection_* fields. */

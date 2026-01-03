@@ -6275,6 +6275,10 @@ void editor_process_keypress(void)
 			}
 			break;
 
+		case KEY_ALT_U:
+			editor_check_for_updates();
+			break;
+
 		case KEY_ALT_Z:
 			editor_cycle_wrap_mode();
 			break;

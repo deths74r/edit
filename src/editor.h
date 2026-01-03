@@ -263,4 +263,10 @@ bool file_check_external_change(struct buffer *buffer);
  */
 int __must_check file_open(struct buffer *buffer, const char *filename);
 
+/*
+ * Check for updates and handle the full update flow.
+ * Called when user presses Alt+U.
+ */
+void editor_check_for_updates(void);
+
 #endif /* EDIT_EDITOR_H */
