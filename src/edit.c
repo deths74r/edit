@@ -2562,6 +2562,9 @@ static void multicursor_insert_character(uint32_t codepoint)
 		return;
 	}
 
+	/* Sort cursors so reverse iteration processes bottom-to-top */
+	multicursor_normalize();
+
 	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
 	/* Process in reverse order (bottom to top) so positions stay valid */
@@ -2582,8 +2585,13 @@ static void multicursor_insert_character(uint32_t codepoint)
 		cursor->anchor_column = cursor->column;
 		cursor->has_selection = false;
 
-		/* Adjust all earlier cursors on the same line */
-		for (int j = i - 1; j >= 0; j--) {
+		/*
+		 * Adjust later cursors on the same line.
+		 * We process in reverse (high to low index). After ascending sort,
+		 * j > i means higher column positions already processed.
+		 * They need to shift right because we just inserted before them.
+		 */
+		for (int j = i + 1; j < (int)editor.cursor_count; j++) {
 			if (editor.cursors[j].row == cursor->row) {
 				editor.cursors[j].column++;
 				if (editor.cursors[j].anchor_row == cursor->row) {
@@ -2612,6 +2620,9 @@ static void multicursor_backspace(void)
 		editor_handle_backspace();
 		return;
 	}
+
+	/* Sort cursors so reverse iteration processes bottom-to-top */
+	multicursor_normalize();
 
 	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
 
@@ -2645,8 +2656,8 @@ static void multicursor_backspace(void)
 			syntax_highlight_line(line, &editor.buffer, cursor->row);
 			line_invalidate_wrap_cache(line);
 
-			/* Adjust earlier cursors on same line */
-			for (int j = i - 1; j >= 0; j--) {
+			/* Adjust later cursors on same line (already processed) */
+			for (int j = i + 1; j < (int)editor.cursor_count; j++) {
 				if (editor.cursors[j].row == cursor->row &&
 				    editor.cursors[j].column > delete_column) {
 					editor.cursors[j].column--;
