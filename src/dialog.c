@@ -1329,7 +1329,7 @@ static void help_draw(void)
 
 	/* Calculate dimensions to fit all content */
 	int content_rows = help_item_count;
-	int panel_height = content_rows + 2;  /* +2 for header and footer */
+	int panel_height = content_rows + 3;  /* +1 top padding, +1 blank before footer, +1 footer */
 	int key_column_width = 24;  /* Fits "Ctrl+Shift+Left/Right" */
 	int panel_width = 60;  /* Wide enough for key + description */
 
@@ -1346,10 +1346,13 @@ static void help_draw(void)
 	help_state.dialog.panel_height = panel_height;
 	help_state.dialog.visible_rows = content_rows;
 
-	/* Draw header */
-	dialog_draw_header(&output, &help_state.dialog, "Help");
+	/* Draw top padding row (no title) */
+	dialog_goto(&output, panel_top + 1, panel_left + 1);
+	dialog_set_style(&output, &active_theme.dialog);
+	for (int i = 0; i < panel_width; i++)
+		output_buffer_append_char(&output, ' ');
 
-	/* Draw content rows (start at panel_top + 2, after header) */
+	/* Draw content rows (start at panel_top + 2, after top padding) */
 	for (int row = 0; row < content_rows; row++) {
 		int screen_row = panel_top + 2 + row;
 		const struct help_item *item = &help_items[row];
@@ -1390,6 +1393,12 @@ static void help_draw(void)
 
 		output_buffer_append_string(&output, line);
 	}
+
+	/* Draw blank line before footer */
+	dialog_goto(&output, panel_top + content_rows + 2, panel_left + 1);
+	dialog_set_style(&output, &active_theme.dialog);
+	for (int i = 0; i < panel_width; i++)
+		output_buffer_append_char(&output, ' ');
 
 	/* Draw footer with centered text */
 	const char *hint = "Press any key to close";
