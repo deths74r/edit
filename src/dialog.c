@@ -1329,7 +1329,7 @@ static void help_draw(void)
 
 	/* Calculate dimensions to fit all content */
 	int content_rows = help_item_count;
-	int panel_height = content_rows + 3;  /* +1 top padding, +1 blank before footer, +1 footer */
+	int panel_height = content_rows + 4;  /* +1 top, +1 blank before footer, +1 footer, +1 bottom */
 	int key_column_width = 24;  /* Fits "Ctrl+Shift+Left/Right" */
 	int panel_width = 60;  /* Wide enough for key + description */
 
@@ -1403,13 +1403,19 @@ static void help_draw(void)
 	/* Draw footer with left-aligned text */
 	const char *hint = "Press any key to close";
 	int hint_len = (int)strlen(hint);
-	int footer_row = panel_top + panel_height;
+	int footer_row = panel_top + content_rows + 3;
 	dialog_goto(&output, footer_row, panel_left + 1);
 	dialog_set_style(&output, &active_theme.dialog_footer);
 
 	output_buffer_append_string(&output, "  ");  /* Match content indent */
 	output_buffer_append_string(&output, hint);
 	for (int i = 2 + hint_len; i < panel_width; i++)
+		output_buffer_append_char(&output, ' ');
+
+	/* Draw bottom padding row */
+	dialog_goto(&output, panel_top + panel_height, panel_left + 1);
+	dialog_set_style(&output, &active_theme.dialog);
+	for (int i = 0; i < panel_width; i++)
 		output_buffer_append_char(&output, ' ');
 
 	output_buffer_flush(&output);
