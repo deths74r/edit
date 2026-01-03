@@ -2961,6 +2961,14 @@ static void editor_select_next_occurrence(void)
 		return;
 	}
 
+	/* Set search query to selected text for matching */
+	if (text_length < sizeof(search.query)) {
+		memcpy(search.query, text, text_length);
+		search.query[text_length] = '\0';
+		search.query_length = text_length;
+		search.case_sensitive = true;  /* Exact match for Ctrl+D */
+	}
+
 	/* Get current selection range */
 	uint32_t selection_start_row, selection_start_column;
 	uint32_t selection_end_row, selection_end_column;
