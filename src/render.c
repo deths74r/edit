@@ -10,6 +10,7 @@
  * message bar, and soft-wrap rendering.
  */
 
+#include <stdio.h>
 #include "edit.h"
 #include "../lib/utflite-1.5.1/single_include/utflite.h"
 
@@ -96,26 +97,38 @@ void output_buffer_free(struct output_buffer *output)
  * Soft Wrap
  *****************************************************************************/
 
-uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
+uint32_t line_find_wrap_point(struct line *line, struct buffer *buffer,
+                              uint32_t start_col,
                               uint32_t max_width, enum wrap_mode mode)
 {
 	if (mode == WRAP_NONE) {
 		return line->cell_count;
 	}
 
-	/* Calculate visual width from start_col */
+	/*
+	 * Calculate visual width from start_col, iterating by grapheme
+	 * to correctly handle multi-codepoint clusters like ZWJ sequences.
+	 */
 	uint32_t visual_width = 0;
 	uint32_t col = start_col;
 
 	while (col < line->cell_count) {
+		uint32_t grapheme_end = cursor_next_grapheme(line, buffer, col);
+
+		/* Calculate width of this grapheme */
 		uint32_t cp = line->cells[col].codepoint;
 		int width;
 
 		if (cp == '\t') {
 			width = editor.tab_width - ((visual_width) % editor.tab_width);
 		} else {
-			width = utflite_codepoint_width(cp);
-			if (width < 0) width = 1;
+			/* Find first non-zero-width codepoint in grapheme */
+			width = 0;
+			for (uint32_t j = col; j < grapheme_end && j < line->cell_count; j++) {
+				width = utflite_codepoint_width(line->cells[j].codepoint);
+				if (width > 0) break;
+			}
+			if (width <= 0) width = 1;
 		}
 
 		if (visual_width + (uint32_t)width > max_width) {
@@ -123,7 +136,7 @@ uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
 		}
 
 		visual_width += (uint32_t)width;
-		col++;
+		col = grapheme_end;
 	}
 
 	/* If we fit the whole line, no wrap needed */
@@ -133,9 +146,9 @@ uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
 
 	uint32_t hard_break = col;
 
-	/* For character wrap, just break at the edge */
+	/* For character wrap, just break at the edge (grapheme boundary) */
 	if (mode == WRAP_CHAR) {
-		return (hard_break > start_col) ? hard_break : start_col + 1;
+		return (hard_break > start_col) ? hard_break : cursor_next_grapheme(line, buffer, start_col);
 	}
 
 	/* For word wrap, search backward for a good break point */
@@ -179,7 +192,7 @@ uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
 
 	/* Safety: never return start_col (infinite loop) */
 	if (best_break <= start_col) {
-		best_break = start_col + 1;
+		best_break = cursor_next_grapheme(line, buffer, start_col);
 	}
 
 	return best_break;
@@ -222,7 +235,7 @@ void line_compute_wrap_points(struct line *line, struct buffer *buffer,
 	uint32_t column = 0;
 
 	while (column < line->cell_count) {
-		uint32_t wrap_point = line_find_wrap_point(line, column,
+		uint32_t wrap_point = line_find_wrap_point(line, buffer, column,
 		                                           text_width, mode);
 		if (wrap_point >= line->cell_count) {
 			break;
@@ -242,7 +255,7 @@ void line_compute_wrap_points(struct line *line, struct buffer *buffer,
 	column = 0;
 
 	for (uint16_t segment = 1; segment < segment_count; segment++) {
-		uint32_t wrap_point = line_find_wrap_point(line, column,
+		uint32_t wrap_point = line_find_wrap_point(line, buffer, column,
 		                                           text_width, mode);
 		line->wrap_columns[segment] = wrap_point;
 		column = wrap_point;
@@ -351,14 +364,38 @@ uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 	struct line *line = &editor.buffer.lines[row];
 	line_warm(line, &editor.buffer);
 
+	/*
+	 * Iterate by grapheme cluster to correctly handle multi-codepoint
+	 * characters like emoji with skin tone modifiers and ZWJ sequences.
+	 */
 	uint32_t render_column = 0;
-	for (uint32_t i = 0; i < column && i < line->cell_count; i++) {
-		if (line->cells[i].codepoint == '\t') {
+	uint32_t i = 0;
+
+	while (i < column && i < line->cell_count) {
+		uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, i);
+
+		/* Don't count grapheme if cursor is in the middle of it */
+		if (grapheme_end > column) {
+			break;
+		}
+
+		/* Get width of first codepoint (base character) */
+		uint32_t cp = line->cells[i].codepoint;
+		if (cp == '\t') {
 			render_column += editor.tab_width - (render_column % editor.tab_width);
 		} else {
-			int width = utflite_codepoint_width(line->cells[i].codepoint);
+			/* Find first non-zero-width codepoint in grapheme */
+			int width = 0;
+			for (uint32_t j = i; j < grapheme_end && j < line->cell_count; j++) {
+				width = utflite_codepoint_width(line->cells[j].codepoint);
+				if (width > 0) {
+					break;
+				}
+			}
 			render_column += (width > 0) ? (uint32_t)width : 1;
 		}
+
+		i = grapheme_end;
 	}
 
 	return render_column;

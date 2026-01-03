@@ -73,7 +73,8 @@ void output_buffer_free(struct output_buffer *output);
  * Find the best column to break a line for wrapping.
  * Returns the column where the segment should end.
  */
-uint32_t line_find_wrap_point(struct line *line, uint32_t start_col,
+uint32_t line_find_wrap_point(struct line *line, struct buffer *buffer,
+                              uint32_t start_col,
                               uint32_t max_width, enum wrap_mode mode);
 
 /*

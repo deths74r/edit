@@ -8,6 +8,7 @@
  */
 
 #define _GNU_SOURCE
+#include <stdio.h>
 #include "../lib/utflite-1.5.1/single_include/utflite.h"
 
 #include "edit.h"

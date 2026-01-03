@@ -1689,9 +1689,47 @@ static uint32_t line_get_segment_end(struct line *line,
 }
 
 /*
- * Calculate the visual column within a segment for a given cell column.
- * Returns the rendered width from segment start to the cell.
+ * Get the display width of a grapheme cluster.
+ * Handles emoji presentation (VS16), keycap sequences, ZWJ sequences, etc.
  */
+static int grapheme_display_width(struct line *line, uint32_t start, uint32_t end,
+                                  uint32_t absolute_visual)
+{
+	if (start >= end || start >= line->cell_count) {
+		return 0;
+	}
+
+	uint32_t first_cp = line->cells[start].codepoint;
+
+	/* Handle tabs specially */
+	if (first_cp == '\t') {
+		return editor.tab_width - (absolute_visual % editor.tab_width);
+	}
+
+	/*
+	 * Check for Variation Selector-16 (U+FE0F) which indicates emoji
+	 * presentation. Emoji presentation is always width 2. This handles
+	 * keycap sequences like 1️⃣, #️⃣, *️⃣ where base char is width 1
+	 * but the emoji renders as width 2.
+	 */
+	for (uint32_t i = start; i < end && i < line->cell_count; i++) {
+		if (line->cells[i].codepoint == 0xFE0F) {
+			return 2;
+		}
+	}
+
+	/* For grapheme clusters, use width of first non-zero-width codepoint */
+	for (uint32_t i = start; i < end && i < line->cell_count; i++) {
+		int w = utflite_codepoint_width(line->cells[i].codepoint);
+		if (w > 0) {
+			return w;
+		}
+	}
+
+	/* Fallback: control chars or all zero-width */
+	return 1;
+}
+
 static uint32_t line_get_visual_column_in_segment(struct line *line,
                                                    struct buffer *buffer,
                                                    uint16_t segment,
@@ -1716,30 +1754,26 @@ static uint32_t line_get_visual_column_in_segment(struct line *line,
 	uint32_t absolute_visual = 0;
 
 	/* First calculate visual column at segment start (for tab alignment) */
-	for (uint32_t i = 0; i < segment_start && i < line->cell_count; i++) {
-		uint32_t cp = line->cells[i].codepoint;
-		int width;
-		if (cp == '\t') {
-			width = editor.tab_width - (absolute_visual % editor.tab_width);
-		} else {
-			width = utflite_codepoint_width(cp);
-			if (width < 0) width = 1;
-		}
+	uint32_t i = 0;
+	while (i < segment_start && i < line->cell_count) {
+		uint32_t grapheme_end = cursor_next_grapheme(line, buffer, i);
+		int width = grapheme_display_width(line, i, grapheme_end, absolute_visual);
 		absolute_visual += width;
+		i = grapheme_end;
 	}
 
-	/* Now calculate visual width within segment */
-	for (uint32_t i = segment_start; i < cell_column && i < line->cell_count; i++) {
-		uint32_t cp = line->cells[i].codepoint;
-		int width;
-		if (cp == '\t') {
-			width = editor.tab_width - (absolute_visual % editor.tab_width);
-		} else {
-			width = utflite_codepoint_width(cp);
-			if (width < 0) width = 1;
+	/* Now calculate visual width within segment, iterating by grapheme */
+	i = segment_start;
+	while (i < cell_column && i < line->cell_count) {
+		uint32_t grapheme_end = cursor_next_grapheme(line, buffer, i);
+		/* Don't go past cell_column */
+		if (grapheme_end > cell_column) {
+			break;
 		}
+		int width = grapheme_display_width(line, i, grapheme_end, absolute_visual);
 		visual_col += width;
 		absolute_visual += width;
+		i = grapheme_end;
 	}
 
 	return visual_col;
@@ -1760,21 +1794,23 @@ static uint32_t line_find_column_at_visual(struct line *line,
 	uint32_t segment_start = line_get_segment_start(line, buffer, segment);
 	uint32_t segment_end = line_get_segment_end(line, buffer, segment);
 
-	/* Calculate visual column at segment start (for tab alignment) */
+	/*
+	 * Calculate visual column at segment start (for tab alignment).
+	 * Iterate by grapheme to handle multi-codepoint clusters.
+	 */
 	uint32_t absolute_visual = 0;
-	for (uint32_t i = 0; i < segment_start && i < line->cell_count; i++) {
-		uint32_t cp = line->cells[i].codepoint;
-		int width;
-		if (cp == '\t') {
-			width = editor.tab_width - (absolute_visual % editor.tab_width);
-		} else {
-			width = utflite_codepoint_width(cp);
-			if (width < 0) width = 1;
-		}
+	uint32_t i = 0;
+	while (i < segment_start && i < line->cell_count) {
+		uint32_t grapheme_end = cursor_next_grapheme(line, buffer, i);
+		int width = grapheme_display_width(line, i, grapheme_end, absolute_visual);
 		absolute_visual += width;
+		i = grapheme_end;
 	}
 
-	/* Find the column at target_visual within the segment */
+	/*
+	 * Find the column at target_visual within the segment.
+	 * Iterate by grapheme to correctly position within ZWJ sequences etc.
+	 */
 	uint32_t visual_col = 0;
 	uint32_t col = segment_start;
 
@@ -1782,17 +1818,11 @@ static uint32_t line_find_column_at_visual(struct line *line,
 		if (visual_col >= target_visual) {
 			break;
 		}
-		uint32_t cp = line->cells[col].codepoint;
-		int width;
-		if (cp == '\t') {
-			width = editor.tab_width - (absolute_visual % editor.tab_width);
-		} else {
-			width = utflite_codepoint_width(cp);
-			if (width < 0) width = 1;
-		}
+		uint32_t grapheme_end = cursor_next_grapheme(line, buffer, col);
+		int width = grapheme_display_width(line, col, grapheme_end, absolute_visual);
 		visual_col += width;
 		absolute_visual += width;
-		col++;
+		col = grapheme_end;
 	}
 
 	return col;
@@ -2677,6 +2707,7 @@ void editor_save(void)
 /*
  * Convert a visual screen column to a cell index within a line. Accounts
  * for tab expansion and character widths. Used for mouse click positioning.
+ * Iterates by grapheme cluster to correctly handle multi-codepoint characters.
  */
 static uint32_t screen_column_to_cell(uint32_t row, uint32_t target_visual_column)
 {
@@ -2691,28 +2722,19 @@ static uint32_t screen_column_to_cell(uint32_t row, uint32_t target_visual_colum
 	uint32_t cell_index = 0;
 
 	while (cell_index < line->cell_count && visual_column < target_visual_column) {
-		uint32_t cp = line->cells[cell_index].codepoint;
-		int width;
-
-		if (cp == '\t') {
-			width = editor.tab_width - (visual_column % editor.tab_width);
-		} else {
-			width = utflite_codepoint_width(cp);
-			if (width < 0) {
-				width = 1;
-			}
-		}
+		uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, cell_index);
+		int width = grapheme_display_width(line, cell_index, grapheme_end, visual_column);
 
 		/* If clicking in the middle of a wide character, round to nearest */
 		if (visual_column + width > target_visual_column) {
 			if (target_visual_column - visual_column > (uint32_t)width / 2) {
-				cell_index++;
+				cell_index = grapheme_end;
 			}
 			break;
 		}
 
 		visual_column += width;
-		cell_index++;
+		cell_index = grapheme_end;
 	}
 
 	return cell_index;
@@ -4246,35 +4268,28 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	 * Handle the two modes differently:
 	 * - Scroll mode (UINT32_MAX): skip cells until we reach the visual column
 	 * - Segment mode: jump directly to start_cell, computing visual column
+	 *
+	 * Both modes iterate by grapheme cluster to correctly handle
+	 * multi-codepoint characters like emoji with skin tone modifiers.
 	 */
 	if (end_cell == UINT32_MAX) {
 		/* Scroll mode: start_cell is actually a visual column offset */
 		uint32_t column_offset = start_cell;
 		while (cell_index < line->cell_count && visual_column < (int)column_offset) {
-			uint32_t codepoint = line->cells[cell_index].codepoint;
-			int width;
-			if (codepoint == '\t') {
-				width = editor.tab_width - (visual_column % editor.tab_width);
-			} else {
-				width = utflite_codepoint_width(codepoint);
-				if (width < 0) width = 1;
-			}
+			uint32_t grapheme_end = cursor_next_grapheme(line, buffer, cell_index);
+			int width = grapheme_display_width(line, cell_index, grapheme_end, visual_column);
 			visual_column += width;
-			cell_index++;
+			cell_index = grapheme_end;
 		}
 		end_cell = line->cell_count;
 	} else {
 		/* Segment mode: compute visual column at start of segment */
-		for (uint32_t i = 0; i < start_cell && i < line->cell_count; i++) {
-			uint32_t codepoint = line->cells[i].codepoint;
-			int width;
-			if (codepoint == '\t') {
-				width = editor.tab_width - (visual_column % editor.tab_width);
-			} else {
-				width = utflite_codepoint_width(codepoint);
-				if (width < 0) width = 1;
-			}
+		uint32_t i = 0;
+		while (i < start_cell && i < line->cell_count) {
+			uint32_t grapheme_end = cursor_next_grapheme(line, buffer, i);
+			int width = grapheme_display_width(line, i, grapheme_end, visual_column);
 			visual_column += width;
+			i = grapheme_end;
 		}
 		cell_index = start_cell;
 		if (end_cell > line->cell_count) {
@@ -4429,16 +4444,21 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			rendered_width++;
 			width = 1;
 		} else {
-			width = utflite_codepoint_width(codepoint);
-			if (width < 0) {
-				width = 1;  /* Control characters */
-			}
+			/*
+			 * Handle grapheme cluster: get all codepoints that form
+			 * a single visual character (emoji + modifiers, ZWJ sequences, etc.)
+			 */
+			uint32_t grapheme_end = cursor_next_grapheme(line, buffer, cell_index);
+			width = grapheme_display_width(line, cell_index, grapheme_end, visual_column);
 
-			/* Only render if we have room for the full character width */
+			/* Only render if we have room for the full grapheme width */
 			if (rendered_width + width <= max_width) {
-				char utf8_buffer[UTFLITE_MAX_BYTES];
-				int bytes = utflite_encode(codepoint, utf8_buffer);
-				output_buffer_append(output, utf8_buffer, bytes);
+				/* Output all codepoints in the grapheme cluster */
+				for (uint32_t gi = cell_index; gi < grapheme_end && gi < line->cell_count; gi++) {
+					char utf8_buffer[UTFLITE_MAX_BYTES];
+					int bytes = utflite_encode(line->cells[gi].codepoint, utf8_buffer);
+					output_buffer_append(output, utf8_buffer, bytes);
+				}
 				rendered_width += width;
 			} else {
 				/* Not enough room for wide character, fill with spaces */
@@ -4447,6 +4467,10 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 					rendered_width++;
 				}
 			}
+
+			visual_column += width;
+			cell_index = grapheme_end;
+			continue;  /* Skip the cell_index++ at end of loop */
 		}
 
 		visual_column += width;
@@ -4701,15 +4725,12 @@ static void render_draw_rows(struct output_buffer *output)
 					 * and draw the column marker with cursor line background.
 					 */
 					uint32_t line_visual_width = 0;
-					for (uint32_t i = 0; i < line->cell_count; i++) {
-						uint32_t cp = line->cells[i].codepoint;
-						if (cp == '\t') {
-							line_visual_width += editor.tab_width -
-								(line_visual_width % editor.tab_width);
-						} else {
-							int w = utflite_codepoint_width(cp);
-							line_visual_width += (w > 0) ? w : 1;
-						}
+					uint32_t idx = 0;
+					while (idx < line->cell_count) {
+						uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, idx);
+						int w = grapheme_display_width(line, idx, grapheme_end, line_visual_width);
+						line_visual_width += w;
+						idx = grapheme_end;
 					}
 					uint32_t col_pos = editor.color_column - 1;
 					if (col_pos >= line_visual_width &&
@@ -4785,15 +4806,12 @@ static void render_draw_rows(struct output_buffer *output)
 				 */
 				uint32_t line_visual_width = 0;
 				line_warm(line, &editor.buffer);
-				for (uint32_t i = 0; i < line->cell_count; i++) {
-					uint32_t cp = line->cells[i].codepoint;
-					if (cp == '\t') {
-						line_visual_width += editor.tab_width -
-							(line_visual_width % editor.tab_width);
-					} else {
-						int w = utflite_codepoint_width(cp);
-						line_visual_width += (w > 0) ? w : 1;
-					}
+				uint32_t idx = 0;
+				while (idx < line->cell_count) {
+					uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, idx);
+					int w = grapheme_display_width(line, idx, grapheme_end, line_visual_width);
+					line_visual_width += w;
+					idx = grapheme_end;
 				}
 				uint32_t col_pos = editor.color_column - 1;
 				if (col_pos >= line_visual_width &&
