@@ -1504,6 +1504,21 @@ static bool multicursor_selection_contains(uint32_t row, uint32_t column)
 	return false;
 }
 
+/*
+ * Check if a position is a cursor position.
+ * Returns cursor index (0+) or -1 if not a cursor.
+ */
+static int multicursor_cursor_at(uint32_t row, uint32_t column)
+{
+	for (uint32_t i = 0; i < editor.cursor_count; i++) {
+		if (editor.cursors[i].row == row &&
+		    editor.cursors[i].column == column) {
+			return (int)i;
+		}
+	}
+	return -1;
+}
+
 /*****************************************************************************
  * Selection Range Functions
  *****************************************************************************/
@@ -4341,19 +4356,24 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 
 		/*
 		 * Determine highlight type with priority:
-		 * search current > search other > selection > trailing ws > cursor line
+		 * secondary cursor > search current > search other > selection > trailing ws > cursor line
 		 */
 		int highlight = 0;
-		int match_type = search_match_type(file_row, cell_index);
-		if (match_type == 2) {
-			highlight = 3;  /* Current search match */
-		} else if (match_type == 1) {
-			highlight = 2;  /* Other search match */
-		} else if (selection_contains(file_row, cell_index) ||
-		           multicursor_selection_contains(file_row, cell_index)) {
-			highlight = 1;  /* Selection */
-		} else if (is_trailing_whitespace(line, cell_index)) {
-			highlight = 4;  /* Trailing whitespace */
+		int cursor_idx = multicursor_cursor_at(file_row, cell_index);
+		if (cursor_idx >= 0 && (uint32_t)cursor_idx != editor.primary_cursor) {
+			highlight = 5;  /* Secondary cursor - inverted colors */
+		} else {
+			int match_type = search_match_type(file_row, cell_index);
+			if (match_type == 2) {
+				highlight = 3;  /* Current search match */
+			} else if (match_type == 1) {
+				highlight = 2;  /* Other search match */
+			} else if (selection_contains(file_row, cell_index) ||
+			           multicursor_selection_contains(file_row, cell_index)) {
+				highlight = 1;  /* Selection */
+			} else if (is_trailing_whitespace(line, cell_index)) {
+				highlight = 4;  /* Trailing whitespace */
+			}
 		}
 
 		/* Change colors if syntax or highlight changed */
@@ -4361,8 +4381,18 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			char escape[128];
 			struct style *style = &active_theme.syntax[syntax];
 			struct syntax_color bg;
+			struct syntax_color fg;
+			bool inverted = false;
 
 			switch (highlight) {
+				case 5:  /* Secondary cursor - inverted colors */
+					inverted = true;
+					if (is_cursor_line) {
+						bg = active_theme.cursor_line;
+					} else {
+						bg = style->bg;
+					}
+					break;
 				case 4:  /* Trailing whitespace - warning red */
 					bg = active_theme.trailing_ws;
 					break;
@@ -4384,13 +4414,19 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 					break;
 			}
 
-			/* Ensure foreground has sufficient contrast with background */
-			struct syntax_color adjusted_fg = color_ensure_contrast(style->fg, bg);
+			/* For secondary cursor, swap foreground and background */
+			if (inverted) {
+				fg = bg;
+				bg = style->fg;
+			} else {
+				/* Ensure foreground has sufficient contrast with background */
+				fg = color_ensure_contrast(style->fg, bg);
+			}
 
 			int length = snprintf(escape, sizeof(escape),
 			         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm",
 			         bg.red, bg.green, bg.blue,
-			         adjusted_fg.red, adjusted_fg.green, adjusted_fg.blue);
+			         fg.red, fg.green, fg.blue);
 
 			/* Add text attributes */
 			length += attr_to_escape(style->attr, escape + length, sizeof(escape) - length);
@@ -4494,6 +4530,27 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 
 		visual_column += width;
 		cell_index++;
+	}
+	/*
+	 * Check for secondary cursors at end of line.
+	 * These are cursors positioned at cell_count (after the last character).
+	 */
+	if (rendered_width < max_width) {
+		int cursor_idx = multicursor_cursor_at(file_row, line->cell_count);
+		if (cursor_idx >= 0 && (uint32_t)cursor_idx != editor.primary_cursor) {
+			/* Render secondary cursor at end of line with inverted space */
+			struct style *style = &active_theme.syntax[SYNTAX_NORMAL];
+			struct syntax_color fg_color = is_cursor_line
+				? active_theme.cursor_line : style->bg;
+			struct syntax_color bg_color = style->fg;
+			char escape[128];
+			int length = snprintf(escape, sizeof(escape),
+			         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm ",
+			         bg_color.red, bg_color.green, bg_color.blue,
+			         fg_color.red, fg_color.green, fg_color.blue);
+			output_buffer_append(output, escape, length);
+			rendered_width++;
+		}
 	}
 
 	/*
