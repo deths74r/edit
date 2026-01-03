@@ -11,7 +11,7 @@
  */
 
 #include "edit.h"
-#include "../third_party/utflite/single_include/utflite.h"
+#include "../lib/utflite-1.5.1/single_include/utflite.h"
 
 /* Access to global editor state (defined in edit.c) */
 extern struct editor_state editor;

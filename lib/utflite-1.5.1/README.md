@@ -4,6 +4,10 @@ A lightweight, zero-dependency UTF-8 library for C. See [UTF-8 Everywhere](https
 
 ## News
 
+### v1.5.1 (December 2025)
+- **Breaking fix**: `utflite_decode()` now returns 0 (not 1) for empty/null input, preventing infinite loops
+- Added `UTFLITE_UNICODE_VERSION` macro (value: 170 for Unicode 17.0)
+
 ### v1.5.0 (December 2025)
 - Added detailed documentation for `utflite__is_extended_pictographic()` explaining GB11 behavior
 - Added complexity documentation for `utflite_prev_grapheme()` (O(k) where k ≤ 128)
@@ -412,12 +416,13 @@ int main(void) {
 ```c
 #define UTFLITE_REPLACEMENT_CHAR 0xFFFD  // Returned on decode errors
 #define UTFLITE_MAX_BYTES 4              // Max bytes per codepoint
+#define UTFLITE_UNICODE_VERSION 170      // Unicode 17.0
 ```
 
 ### Core Functions
 
 ```c
-// Decode UTF-8 to codepoint. Returns bytes consumed (1-4).
+// Decode UTF-8 to codepoint. Returns bytes consumed (1-4), or 0 for empty/null input.
 int utflite_decode(const char *bytes, int length, uint32_t *codepoint);
 
 // Encode codepoint to UTF-8. Returns bytes written (1-4), 0 on error.

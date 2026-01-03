@@ -23,9 +23,11 @@ extern "C" {
 
 /* Library version: major.minor.patch */
 #define UTFLITE_VERSION_MAJOR 1
-#define UTFLITE_VERSION_MINOR 4
-#define UTFLITE_VERSION_PATCH 0
-#define UTFLITE_VERSION_STRING "1.4.0"
+#define UTFLITE_VERSION_MINOR 5
+#define UTFLITE_VERSION_PATCH 1
+#define UTFLITE_VERSION_STRING "1.5.1"
+
+#define UTFLITE_UNICODE_VERSION 170  /* Unicode 17.0 */
 
 /* Unicode replacement character (returned on decode errors) */
 #define UTFLITE_REPLACEMENT_CHAR 0xFFFD
@@ -46,7 +48,7 @@ extern "C" {
  *   codepoint - Output: decoded codepoint (U+FFFD on error)
  *
  * Returns:
- *   Number of bytes consumed (1-4), always at least 1 for forward progress.
+ *   Number of bytes consumed (1-4), or 0 for empty/null input.
  *
  * Error handling:
  *   - Invalid sequences set *codepoint to U+FFFD

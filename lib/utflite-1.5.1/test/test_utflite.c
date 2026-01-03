@@ -112,7 +112,7 @@ TEST(decode_surrogate) {
 TEST(decode_null_input) {
     uint32_t cp;
     int bytes = utflite_decode(NULL, 0, &cp);
-    ASSERT_EQ(bytes, 1);
+    ASSERT_EQ(bytes, 0);  /* EOF/empty: no bytes to consume */
     ASSERT_EQ(cp, UTFLITE_REPLACEMENT_CHAR);
 }
 

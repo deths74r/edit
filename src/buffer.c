@@ -8,7 +8,7 @@
  */
 
 #define _GNU_SOURCE
-#include "../third_party/utflite/single_include/utflite.h"
+#include "../lib/utflite-1.5.1/single_include/utflite.h"
 
 #include "edit.h"
 #include "buffer.h"
@@ -268,27 +268,14 @@ uint32_t line_get_cell_count(struct line *line, struct buffer *buffer)
  *****************************************************************************/
 
 /*
- * Check if a codepoint is a combining mark (zero-width character
- * that modifies the previous base character, like accents).
+ * Maximum codepoints to encode when finding grapheme boundaries.
+ * Covers the longest possible grapheme cluster (complex emoji sequences).
  */
-bool codepoint_is_combining_mark(uint32_t codepoint)
-{
-	/* Combining Diacritical Marks: U+0300-U+036F */
-	if (codepoint >= 0x0300 && codepoint <= 0x036F) return true;
-	/* Combining Diacritical Marks Extended: U+1AB0-U+1AFF */
-	if (codepoint >= 0x1AB0 && codepoint <= 0x1AFF) return true;
-	/* Combining Diacritical Marks Supplement: U+1DC0-U+1DFF */
-	if (codepoint >= 0x1DC0 && codepoint <= 0x1DFF) return true;
-	/* Combining Diacritical Marks for Symbols: U+20D0-U+20FF */
-	if (codepoint >= 0x20D0 && codepoint <= 0x20FF) return true;
-	/* Combining Half Marks: U+FE20-U+FE2F */
-	if (codepoint >= 0xFE20 && codepoint <= 0xFE2F) return true;
-	return false;
-}
+#define GRAPHEME_LOOKAHEAD 32
 
 /*
- * Move cursor left to previous grapheme cluster,
- * skipping over any combining marks. Warms the line if cold.
+ * Move cursor left to previous grapheme cluster using UAX #29 rules.
+ * Handles emoji sequences, combining marks, flags, and Hangul.
  */
 uint32_t cursor_prev_grapheme(struct line *line, struct buffer *buffer, uint32_t column)
 {
@@ -298,17 +285,38 @@ uint32_t cursor_prev_grapheme(struct line *line, struct buffer *buffer, uint32_t
 		return 0;
 	}
 
-	column--;
-	while (column > 0 && codepoint_is_combining_mark(line->cells[column].codepoint)) {
-		column--;
+	/*
+	 * Encode cells from start (or limited lookback) to current position
+	 * into UTF-8 buffer for grapheme boundary detection.
+	 */
+	char utf8_buf[512];
+	int byte_len = 0;
+	uint32_t lookback = (column < 128) ? column : 128;
+	uint32_t start_column = column - lookback;
+
+	for (uint32_t i = start_column; i < column; i++) {
+		int bytes = utflite_encode(line->cells[i].codepoint, utf8_buf + byte_len);
+		byte_len += bytes;
 	}
 
-	return column;
+	/* Find previous grapheme boundary in UTF-8 */
+	int prev_byte = utflite_prev_grapheme(utf8_buf, byte_len);
+
+	/* Count codepoints from boundary to end of buffer */
+	int offset = prev_byte;
+	int codepoints_after = 0;
+	while (offset < byte_len) {
+		uint32_t cp;
+		offset += utflite_decode(utf8_buf + offset, byte_len - offset, &cp);
+		codepoints_after++;
+	}
+
+	return column - codepoints_after;
 }
 
 /*
- * Move cursor right to next grapheme cluster,
- * skipping over any combining marks. Warms the line if cold.
+ * Move cursor right to next grapheme cluster using UAX #29 rules.
+ * Handles emoji sequences, combining marks, flags, and Hangul.
  */
 uint32_t cursor_next_grapheme(struct line *line, struct buffer *buffer, uint32_t column)
 {
@@ -318,12 +326,33 @@ uint32_t cursor_next_grapheme(struct line *line, struct buffer *buffer, uint32_t
 		return line->cell_count;
 	}
 
-	column++;
-	while (column < line->cell_count && codepoint_is_combining_mark(line->cells[column].codepoint)) {
-		column++;
+	/*
+	 * Encode cells from current position into UTF-8 buffer
+	 * for grapheme boundary detection.
+	 */
+	char utf8_buf[128];
+	int byte_len = 0;
+	int codepoints_encoded = 0;
+
+	for (uint32_t i = column; i < line->cell_count && codepoints_encoded < GRAPHEME_LOOKAHEAD; i++) {
+		int bytes = utflite_encode(line->cells[i].codepoint, utf8_buf + byte_len);
+		byte_len += bytes;
+		codepoints_encoded++;
 	}
 
-	return column;
+	/* Find next grapheme boundary in UTF-8 */
+	int next_byte = utflite_next_grapheme(utf8_buf, byte_len, 0);
+
+	/* Count codepoints consumed to reach that boundary */
+	int offset = 0;
+	int codepoints_in_grapheme = 0;
+	while (offset < next_byte) {
+		uint32_t cp;
+		offset += utflite_decode(utf8_buf + offset, byte_len - offset, &cp);
+		codepoints_in_grapheme++;
+	}
+
+	return column + codepoints_in_grapheme;
 }
 
 /*****************************************************************************

@@ -14,7 +14,7 @@
 #define _BSD_SOURCE
 #define _GNU_SOURCE
 
-#include "../third_party/utflite/single_include/utflite.h"
+#include "../lib/utflite-1.5.1/single_include/utflite.h"
 #include "edit.h"
 #include "update.h"
 
