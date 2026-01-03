@@ -10,7 +10,7 @@
  * for background search on large files.
  */
 
-#include "../lib/utflite-1.5.2/single_include/utflite.h"
+#include "../third_party/utflite-1.5.2/single_include/utflite.h"
 #include "edit.h"
 
 /*****************************************************************************

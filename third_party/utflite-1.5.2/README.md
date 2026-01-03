@@ -4,6 +4,12 @@ A lightweight, zero-dependency UTF-8 library for C. See [UTF-8 Everywhere](https
 
 ## News
 
+### v1.5.2 (January 2026)
+- **Fix**: Skin tone modifiers (U+1F3FB-U+1F3FF) now correctly zero-width
+- **Fix**: Regional Indicators (U+1F1E6-U+1F1FF) now correctly double-width for flag emoji
+- **Fix**: Split double-width range to exclude skin tone modifiers
+- Enables correct cursor positioning for emoji like 👋🏻 and flags like 🇨🇦
+
 ### v1.5.1 (December 2025)
 - **Breaking fix**: `utflite_decode()` now returns 0 (not 1) for empty/null input, preventing infinite loops
 - Added `UTFLITE_UNICODE_VERSION` macro (value: 170 for Unicode 17.0)
