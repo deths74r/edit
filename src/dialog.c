@@ -1366,8 +1366,8 @@ char *open_file_dialog(void)
 	}
 
 	if (!open_file_load_directory(start_path)) {
-		/* Fall back to home directory */
-		const char *home = getenv("HOME");
+		/* Fall back to home directory (validated) */
+		const char *home = safe_get_home();
 		if (!home || !open_file_load_directory(home)) {
 			/* Fall back to root */
 			if (!open_file_load_directory("/")) {

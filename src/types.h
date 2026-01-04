@@ -85,6 +85,9 @@
 /* Maximum matches to store (prevent memory explosion on huge files) */
 #define MAX_SEARCH_MATCHES 100000
 
+/* Maximum regex pattern length (mitigates ReDoS with complex patterns) */
+#define MAX_REGEX_PATTERN_LENGTH 256
+
 /* Threshold: use async search for files larger than this many lines */
 #define ASYNC_SEARCH_THRESHOLD 5000
 

@@ -1468,8 +1468,8 @@ void themes_load(void)
 	loaded_themes[0] = theme_create_default();
 	loaded_themes[1] = theme_create_mono_white();
 
-	/* Get home directory */
-	const char *home = getenv("HOME");
+	/* Get home directory (validated) */
+	const char *home = safe_get_home();
 	if (home == NULL) {
 		return;
 	}
@@ -1706,7 +1706,7 @@ int theme_get_active_index(void)
  */
 static char *config_get_path(void)
 {
-	const char *home = getenv("HOME");
+	const char *home = safe_get_home();
 	if (home == NULL) {
 		return NULL;
 	}

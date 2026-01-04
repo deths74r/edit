@@ -20,6 +20,8 @@
 #include <unistd.h>
 #include <limits.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <ctype.h>
 
 #include "update.h"
@@ -79,17 +81,88 @@ int update_version_compare(const char *version_a, const char *version_b)
 
 /*
  * Check if curl is available on the system.
+ * Uses fork/exec instead of system() to avoid shell interpretation.
  */
 static bool curl_is_available(void)
 {
-	int result = system("which curl > /dev/null 2>&1");
-	return (result == 0);
+	pid_t pid = fork();
+	if (pid < 0) {
+		return false;
+	}
+	if (pid == 0) {
+		/* Child: redirect stdout/stderr to /dev/null */
+		int devnull = open("/dev/null", O_WRONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDOUT_FILENO);
+			dup2(devnull, STDERR_FILENO);
+			close(devnull);
+		}
+		execlp("curl", "curl", "--version", (char *)NULL);
+		_exit(127);
+	}
+	/* Parent: wait for child */
+	int status;
+	waitpid(pid, &status, 0);
+	return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+/*
+ * Download a file using curl via fork/exec (no shell interpretation).
+ * Returns 0 on success, -1 on error.
+ */
+static int safe_curl_download(const char *url, const char *output_path)
+{
+	pid_t pid = fork();
+	if (pid < 0) {
+		return -1;
+	}
+	if (pid == 0) {
+		/* Child: redirect stderr to /dev/null */
+		int devnull = open("/dev/null", O_WRONLY);
+		if (devnull >= 0) {
+			dup2(devnull, STDERR_FILENO);
+			close(devnull);
+		}
+		execlp("curl", "curl",
+		       "-sL",              /* silent, follow redirects */
+		       "--max-time", "60", /* timeout */
+		       "-o", output_path,  /* output file */
+		       url,                /* URL to download */
+		       (char *)NULL);
+		_exit(127);
+	}
+	/* Parent: wait for child */
+	int status;
+	waitpid(pid, &status, 0);
+	if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+		return 0;
+	}
+	return -1;
+}
+
+/*
+ * Validate that a version string contains only safe characters.
+ * Allows alphanumeric, dots, and hyphens (e.g., "0.2.6", "1.0.0-beta").
+ * This prevents command injection when the version is used in shell commands.
+ */
+static bool is_valid_version(const char *version)
+{
+	if (version == NULL || version[0] == '\0')
+		return false;
+	for (const char *p = version; *p; p++) {
+		if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-') {
+			return false;
+		}
+	}
+	return true;
 }
 
 /*
  * Extract version string from GitHub API JSON response.
  * Looks for "tag_name": "v0.3.0" and extracts "0.3.0".
- * Returns true on success.
+ * Validates the version contains only safe characters (alphanumeric, dots, hyphens)
+ * to prevent command injection when used in shell commands.
+ * Returns true on success, false if parsing fails or version is invalid.
  */
 static bool parse_tag_name(const char *json, char *version, size_t version_size)
 {
@@ -124,6 +197,10 @@ static bool parse_tag_name(const char *json, char *version, size_t version_size)
 
 	strncpy(version, quote_start, len);
 	version[len] = '\0';
+
+	/* Validate version to prevent command injection */
+	if (!is_valid_version(version))
+		return false;
 
 	return true;
 }
@@ -244,7 +321,6 @@ bool update_install(const char *version)
 	char exe_path[PATH_MAX - 8];  /* Leave room for .new/.old suffix */
 	char new_path[PATH_MAX];
 	char old_path[PATH_MAX];
-	char command[PATH_MAX + 256];
 
 	/* Get current executable path */
 	if (!get_executable_path(exe_path, sizeof(exe_path))) {
@@ -271,14 +347,14 @@ bool update_install(const char *version)
 	/* Show status */
 	editor_set_status_message("Downloading v%s...", version);
 
-	/* Download new binary */
-	snprintf(command, sizeof(command),
-	         "curl -sL --max-time 60 -o '%s' "
-	         "'https://github.com/%s/releases/download/v%s/edit' 2>/dev/null",
-	         new_path, GITHUB_REPO, version);
+	/* Build download URL */
+	char url[512];
+	snprintf(url, sizeof(url),
+	         "https://github.com/%s/releases/download/v%s/edit",
+	         GITHUB_REPO, version);
 
-	int result = system(command);
-	if (result != 0) {
+	/* Download new binary using fork/exec (no shell interpretation) */
+	if (safe_curl_download(url, new_path) != 0) {
 		unlink(new_path);  /* Clean up partial download */
 		editor_set_status_message("Update failed: download error");
 		return false;

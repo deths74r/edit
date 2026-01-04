@@ -65,7 +65,7 @@ static void autosave_generate_swap_path(const char *filename, char *swap_path, s
 {
 	if (filename == NULL || filename[0] == '\0') {
 		/* Unnamed file - use home directory */
-		const char *home = getenv("HOME");
+		const char *home = safe_get_home();
 		if (home) {
 			snprintf(swap_path, size, "%s/.edit/.unnamed.swp", home);
 		} else {
@@ -237,7 +237,7 @@ int worker_process_autosave(struct task *task, struct task_result *result)
 	/* Ensure directory exists for unnamed files */
 	if (strstr(snapshot->swap_path, "/.edit/") != NULL) {
 		char dir[PATH_MAX];
-		const char *home = getenv("HOME");
+		const char *home = safe_get_home();
 		if (home) {
 			snprintf(dir, sizeof(dir), "%s/.edit", home);
 			mkdir(dir, 0700);  /* Ignore error if exists */

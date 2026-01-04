@@ -426,6 +426,13 @@ int worker_process_search(struct task *task, struct task_result *result)
 	bool regex_valid = false;
 
 	if (use_regex) {
+		/* Validate pattern length to mitigate ReDoS attacks */
+		if (strlen(pattern) > MAX_REGEX_PATTERN_LENGTH) {
+			log_warn("Regex pattern too long (max %d)", MAX_REGEX_PATTERN_LENGTH);
+			result->search.match_count = 0;
+			result->search.complete = true;
+			return -EINVAL;
+		}
 		int flags = REG_EXTENDED;
 		if (!case_sensitive) {
 			flags |= REG_ICASE;
@@ -568,6 +575,12 @@ int worker_process_replace_all(struct task *task, struct task_result *result)
 	bool regex_valid = false;
 
 	if (use_regex) {
+		/* Validate pattern length to mitigate ReDoS attacks */
+		if (strlen(pattern) > MAX_REGEX_PATTERN_LENGTH) {
+			result->replace.replacements = 0;
+			result->replace.complete = true;
+			return -EINVAL;
+		}
 		int flags = REG_EXTENDED;
 		if (!case_sensitive) {
 			flags |= REG_ICASE;
@@ -3459,6 +3472,13 @@ static void search_compile_regex(void)
 	search.regex_error[0] = '\0';
 
 	if (search.query_length == 0) {
+		return;
+	}
+
+	/* Validate pattern length to mitigate ReDoS attacks */
+	if (search.query_length > MAX_REGEX_PATTERN_LENGTH) {
+		snprintf(search.regex_error, sizeof(search.regex_error),
+		         "Pattern too long (max %d)", MAX_REGEX_PATTERN_LENGTH);
 		return;
 	}
 
