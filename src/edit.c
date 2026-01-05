@@ -3396,6 +3396,7 @@ void editor_handle_mouse(struct mouse_input *mouse)
  */
 static void search_enter(void)
 {
+	selection_clear();
 	search.active = true;
 	search.replace_mode = false;
 	search.query[0] = '\0';
@@ -3416,6 +3417,7 @@ static void search_enter(void)
  */
 static void replace_enter(void)
 {
+	selection_clear();
 	search.active = true;
 	search.replace_mode = true;
 	search.query[0] = '\0';
