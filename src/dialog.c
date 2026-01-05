@@ -1792,7 +1792,7 @@ static const struct help_item help_items[] = {
 	{"Ctrl+H", "Find & Replace"},
 	{"F3 / Alt+N", "Find next"},
 	{"Shift+F3 / Alt+P", "Find previous"},
-	{"Alt+A", "Find all (multi-cursor)"},
+	{"Alt+A", "Replace all"},
 	{"Alt+C", "Toggle case sensitivity"},
 	{"Alt+W", "Toggle whole word"},
 	{"Alt+R", "Toggle regex"},
@@ -1802,6 +1802,8 @@ static const struct help_item help_items[] = {
 	{"Alt+Shift+W", "Toggle whitespace"},
 	{"Alt+Shift+C", "Cycle color column"},
 	{"Alt+Z", "Cycle wrap mode"},
+	{"Alt+Shift+Z", "Cycle wrap indicator"},
+	{"Alt+U", "Check for updates"},
 };
 
 static const int help_item_count = sizeof(help_items) / sizeof(help_items[0]);

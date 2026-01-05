@@ -81,7 +81,7 @@ make clean        # removes build artifacts
 | Ctrl+H | Find & Replace |
 | F3 / Alt+N | Find next |
 | Shift+F3 / Alt+P | Find previous |
-| Alt+A | Find all (add cursors at all matches) |
+| Alt+A | Replace all |
 | Alt+C | Toggle case sensitivity (in search) |
 | Alt+W | Toggle whole word (in search) |
 | Alt+R | Toggle regex (in search) |
@@ -93,6 +93,8 @@ make clean        # removes build artifacts
 | Alt+Shift+W | Toggle whitespace indicators |
 | Alt+Shift+C | Cycle color column (off → 80 → 120) |
 | Alt+Z | Cycle wrap mode (off → char → word) |
+| Alt+Shift+Z | Cycle wrap indicator |
+| Alt+U | Check for updates |
 
 If you've used any text editor in the last thirty years, you already know how to use edit.
 
