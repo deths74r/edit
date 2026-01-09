@@ -182,4 +182,50 @@ bool syntax_is_in_code_block(struct buffer *buffer, uint32_t row);
 void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
                                     uint32_t row);
 
+/*****************************************************************************
+ * Hybrid Markdown Rendering
+ *****************************************************************************/
+
+/*
+ * Free the markdown element cache for a line.
+ */
+void md_element_cache_free(struct line *line);
+
+/*
+ * Invalidate the markdown element cache for a line.
+ */
+void md_element_cache_invalidate(struct line *line);
+
+/*
+ * Compute markdown element spans from syntax tokens.
+ */
+void md_compute_elements(struct line *line);
+
+/*
+ * Mark cells that should be hidden in hybrid mode.
+ */
+void md_mark_hideable_cells(struct line *line);
+
+/*
+ * Find the element containing a given column position.
+ */
+struct md_element *md_find_element_at(struct line *line, uint32_t column);
+
+/*
+ * Check if cursor is in an element that should be revealed.
+ */
+bool md_should_reveal_element(struct line *line, uint32_t cursor_col,
+			      uint32_t *reveal_start, uint32_t *reveal_end);
+
+/*
+ * Extract URL from a link element at cursor position.
+ */
+bool md_extract_link_url(struct line *line, uint32_t cursor_col,
+			 char *url_buffer, size_t buffer_size);
+
+/*
+ * Update link preview state based on cursor position.
+ */
+void md_update_link_preview(void);
+
 #endif /* EDIT_SYNTAX_H */

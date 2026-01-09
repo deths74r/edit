@@ -20,6 +20,7 @@
 #include "../third_party/utflite-1.5.2/single_include/utflite.h"
 
 #include "edit.h"
+#include "syntax.h"
 
 /*****************************************************************************
  * Global State
@@ -4404,11 +4405,39 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		output_buffer_append(output, escape, length);
 	}
 
+	/*
+	 * Hybrid mode: compute reveal range if cursor is on this line.
+	 * When cursor is inside a markdown element, we reveal the raw syntax
+	 * for that element to enable editing.
+	 */
+	uint32_t reveal_start = UINT32_MAX;
+	uint32_t reveal_end = 0;
+	if (editor.hybrid_mode && is_cursor_line &&
+	    syntax_is_markdown_file(buffer->filename)) {
+		md_should_reveal_element(line, editor.cursor_column, &reveal_start, &reveal_end);
+	}
+
 	/* Render visible content up to end_cell or max_width */
 	int rendered_width = 0;
 	while (cell_index < end_cell && rendered_width < max_width) {
 		uint32_t codepoint = line->cells[cell_index].codepoint;
 		enum syntax_token syntax = line->cells[cell_index].syntax;
+		uint8_t flags = line->cells[cell_index].flags;
+
+		/*
+		 * Hybrid mode: skip hideable cells unless cursor is revealing them.
+		 * Cells within the reveal range are shown despite being hideable.
+		 */
+		if (editor.hybrid_mode && (flags & CELL_FLAG_HIDEABLE) &&
+		    syntax_is_markdown_file(buffer->filename)) {
+			/* Check if this cell is in the reveal range */
+			bool in_reveal_range = (cell_index >= reveal_start && cell_index < reveal_end);
+			if (!in_reveal_range) {
+				/* Skip this cell - advance to next */
+				cell_index++;
+				continue;
+			}
+		}
 
 		/*
 		 * Determine highlight type with priority:
@@ -4574,6 +4603,55 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 						if (output_codepoint == '-' || output_codepoint == '*' ||
 						    output_codepoint == '_') {
 							output_codepoint = 0x2500;  /* ─ BOX DRAWINGS LIGHT HORIZONTAL */
+						}
+					}
+
+					/* Hybrid mode substitutions */
+					if (editor.hybrid_mode) {
+						enum syntax_token gi_syntax = line->cells[gi].syntax;
+
+						/* List markers: - * + → bullet */
+						if (gi_syntax == SYNTAX_MD_LIST_MARKER) {
+							if (output_codepoint == '-' || output_codepoint == '*' ||
+							    output_codepoint == '+') {
+								output_codepoint = 0x2022;  /* • BULLET */
+							}
+						}
+
+						/* Task markers: [ ] → ☐, [x] → ☑ */
+						if (gi_syntax == SYNTAX_MD_TASK_MARKER) {
+							if (output_codepoint == '[') {
+								/* Check if next char is space or x */
+								if (gi + 1 < line->cell_count) {
+									uint32_t inner = line->cells[gi + 1].codepoint;
+									if (inner == ' ') {
+										output_codepoint = 0x2610;  /* ☐ BALLOT BOX */
+									} else if (inner == 'x' || inner == 'X') {
+										output_codepoint = 0x2611;  /* ☑ BALLOT BOX WITH CHECK */
+									}
+								}
+							} else if (output_codepoint == ' ' || output_codepoint == 'x' ||
+							           output_codepoint == 'X' || output_codepoint == ']') {
+								/* Skip inner characters of task marker */
+								continue;
+							}
+						}
+
+						/* Table pipes: | → box drawing vertical */
+						if (gi_syntax == SYNTAX_MD_TABLE ||
+						    gi_syntax == SYNTAX_MD_TABLE_HEADER) {
+							if (output_codepoint == '|') {
+								output_codepoint = 0x2502;  /* │ BOX DRAWINGS LIGHT VERTICAL */
+							}
+						}
+
+						/* Table separator: dashes → box drawing horizontal */
+						if (gi_syntax == SYNTAX_MD_TABLE_SEPARATOR) {
+							if (output_codepoint == '-') {
+								output_codepoint = 0x2500;  /* ─ BOX DRAWINGS LIGHT HORIZONTAL */
+							} else if (output_codepoint == '|') {
+								output_codepoint = 0x2502;  /* │ BOX DRAWINGS LIGHT VERTICAL */
+							}
 						}
 					}
 
@@ -5046,10 +5124,32 @@ static void render_draw_status_bar(struct output_buffer *output)
 		current_pos += 4;
 	}
 
-	/* Right-aligned position with its own style */
-	char right_status[64];
-	int right_length = snprintf(right_status, sizeof(right_status), "%u/%u ",
-	                            editor.cursor_row + 1, editor.buffer.line_count);
+	/* Right-aligned content: link URL or position */
+	char right_status[256];
+	int right_length;
+
+	if (editor.link_preview_active && editor.link_url_preview[0] != '\0') {
+		/* Show link URL in status bar */
+		int max_url_len = (int)editor.screen_columns - current_pos - 8;
+		if (max_url_len < 20) max_url_len = 20;
+		if (max_url_len > 200) max_url_len = 200;
+
+		size_t url_len = strlen(editor.link_url_preview);
+		if ((int)url_len > max_url_len) {
+			/* Truncate with ellipsis */
+			right_length = snprintf(right_status, sizeof(right_status),
+			                        "%.200s... ", editor.link_url_preview);
+			right_status[max_url_len] = '\0';
+			right_length = (int)strlen(right_status);
+		} else {
+			right_length = snprintf(right_status, sizeof(right_status),
+			                        "%s ", editor.link_url_preview);
+		}
+	} else {
+		/* Normal position indicator */
+		right_length = snprintf(right_status, sizeof(right_status), "%u/%u ",
+		                        editor.cursor_row + 1, editor.buffer.line_count);
+	}
 
 	/* Fill with base status bar style */
 	escape_len = style_to_escape(&active_theme.status, color_escape, sizeof(color_escape));
@@ -5234,6 +5334,9 @@ int __must_check render_refresh_screen(void)
 {
 	editor_update_gutter_width();
 	editor_scroll();
+
+	/* Update link preview state for hybrid mode */
+	md_update_link_preview();
 
 	struct output_buffer output;
 	int ret = output_buffer_init_checked(&output);
@@ -6491,6 +6594,26 @@ void editor_process_keypress(void)
 		case 0x1d:  /* Ctrl+] */
 		case KEY_ALT_BRACKET:
 			editor_jump_to_match();
+			break;
+
+		case KEY_ALT_M:
+			/* Toggle hybrid markdown rendering mode */
+			if (syntax_is_markdown_file(editor.buffer.filename)) {
+				editor.hybrid_mode = !editor.hybrid_mode;
+				editor_set_status_message("Markdown %s mode",
+				                          editor.hybrid_mode ? "hybrid" : "raw");
+				/* Re-highlight visible lines to update element cache */
+				for (uint32_t i = editor.row_offset;
+				     i < editor.row_offset + editor.screen_rows &&
+				     i < editor.buffer.line_count; i++) {
+					struct line *line = &editor.buffer.lines[i];
+					if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
+						syntax_highlight_line(line, &editor.buffer, i);
+					}
+				}
+			} else {
+				editor_set_status_message("Hybrid mode only available for Markdown files");
+			}
 			break;
 
 		case KEY_ARROW_UP:

@@ -13,6 +13,8 @@
 #include "syntax.h"
 #include "buffer.h"
 
+extern struct editor_state editor;
+
 /*****************************************************************************
  * Neighbor Layer - Character Classification
  *****************************************************************************/
@@ -1322,6 +1324,10 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 				SYNTAX_MD_HEADER_5, SYNTAX_MD_HEADER_6
 			};
 			md_mark_to_end(line, 0, header_tokens[level - 1]);
+			if (editor.hybrid_mode) {
+				md_compute_elements(line);
+				md_mark_hideable_cells(line);
+			}
 			return;
 		}
 		pos = start;
@@ -1338,6 +1344,10 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 		md_mark_range(line, start, pos, SYNTAX_MD_BLOCKQUOTE);
 		inline_start = pos;
 		md_parse_inline(line, inline_start, line->cell_count);
+		if (editor.hybrid_mode) {
+			md_compute_elements(line);
+			md_mark_hideable_cells(line);
+		}
 		return;
 	}
 
@@ -1388,12 +1398,20 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 				              SYNTAX_MD_TASK_MARKER);
 				inline_start = task_end;
 				md_parse_inline(line, inline_start, line->cell_count);
+				if (editor.hybrid_mode) {
+					md_compute_elements(line);
+					md_mark_hideable_cells(line);
+				}
 				return;
 			}
 		}
 
 		inline_start = marker_end;
 		md_parse_inline(line, inline_start, line->cell_count);
+		if (editor.hybrid_mode) {
+			md_compute_elements(line);
+			md_mark_hideable_cells(line);
+		}
 		return;
 	}
 
@@ -1415,6 +1433,10 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 				md_mark_range(line, num_start, pos, SYNTAX_MD_LIST_MARKER);
 				inline_start = pos;
 				md_parse_inline(line, inline_start, line->cell_count);
+				if (editor.hybrid_mode) {
+					md_compute_elements(line);
+					md_mark_hideable_cells(line);
+				}
 				return;
 			}
 		}
@@ -1458,9 +1480,362 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 			/* Parse inline content between pipes */
 			md_parse_inline(line, 0, line->cell_count);
 		}
+		if (editor.hybrid_mode) {
+			md_compute_elements(line);
+			md_mark_hideable_cells(line);
+		}
 		return;
 	}
 
 	/* Default: parse inline elements */
 	md_parse_inline(line, 0, line->cell_count);
+
+	/* Compute element cache for hybrid rendering mode */
+	if (editor.hybrid_mode) {
+		md_compute_elements(line);
+		md_mark_hideable_cells(line);
+	}
+}
+
+/*****************************************************************************
+ * Hybrid Markdown Rendering - Element Detection
+ *****************************************************************************/
+
+/*
+ * Free the markdown element cache for a line.
+ */
+void md_element_cache_free(struct line *line)
+{
+	if (line->md_elements) {
+		free(line->md_elements->elements);
+		free(line->md_elements);
+		line->md_elements = NULL;
+	}
+}
+
+/*
+ * Invalidate the markdown element cache for a line.
+ */
+void md_element_cache_invalidate(struct line *line)
+{
+	if (line->md_elements) {
+		line->md_elements->valid = false;
+	}
+}
+
+/*
+ * Add an element to the cache, growing if necessary.
+ */
+static void md_element_cache_add(struct md_element_cache *cache,
+				 uint32_t start, uint32_t end, uint16_t syntax)
+{
+	if (cache->count >= cache->capacity) {
+		uint16_t new_capacity = cache->capacity == 0 ? 8 : cache->capacity * 2;
+		struct md_element *new_elements = realloc(cache->elements,
+			new_capacity * sizeof(struct md_element));
+		if (!new_elements)
+			return;
+		cache->elements = new_elements;
+		cache->capacity = new_capacity;
+	}
+	cache->elements[cache->count].start_col = start;
+	cache->elements[cache->count].end_col = end;
+	cache->elements[cache->count].syntax_type = syntax;
+	cache->count++;
+}
+
+/*
+ * Check if a syntax token is a markdown element that should be tracked.
+ */
+static bool md_is_tracked_element(uint16_t syntax)
+{
+	switch (syntax) {
+	case SYNTAX_MD_BOLD:
+	case SYNTAX_MD_ITALIC:
+	case SYNTAX_MD_BOLD_ITALIC:
+	case SYNTAX_MD_CODE_SPAN:
+	case SYNTAX_MD_LINK_TEXT:
+	case SYNTAX_MD_LINK_URL:
+	case SYNTAX_MD_IMAGE:
+	case SYNTAX_MD_HEADER_1:
+	case SYNTAX_MD_HEADER_2:
+	case SYNTAX_MD_HEADER_3:
+	case SYNTAX_MD_HEADER_4:
+	case SYNTAX_MD_HEADER_5:
+	case SYNTAX_MD_HEADER_6:
+		return true;
+	default:
+		return false;
+	}
+}
+
+/*
+ * Compute markdown element spans from syntax tokens.
+ * This identifies contiguous runs of the same syntax type.
+ */
+void md_compute_elements(struct line *line)
+{
+	if (!line->md_elements) {
+		line->md_elements = calloc(1, sizeof(struct md_element_cache));
+		if (!line->md_elements)
+			return;
+	}
+
+	/* Reset but keep allocation */
+	line->md_elements->count = 0;
+	line->md_elements->valid = true;
+
+	if (line->cell_count == 0)
+		return;
+
+	uint32_t start = 0;
+	uint16_t current_syntax = line->cells[0].syntax;
+	bool tracking = md_is_tracked_element(current_syntax);
+
+	for (uint32_t i = 1; i <= line->cell_count; i++) {
+		uint16_t syntax = (i < line->cell_count) ? line->cells[i].syntax : SYNTAX_NORMAL;
+		bool is_tracked = md_is_tracked_element(syntax);
+
+		/* Transition: end current element if syntax changes */
+		if (syntax != current_syntax || i == line->cell_count) {
+			if (tracking) {
+				md_element_cache_add(line->md_elements, start, i, current_syntax);
+			}
+			start = i;
+			current_syntax = syntax;
+			tracking = is_tracked;
+		}
+	}
+}
+
+/*
+ * Check if a character is a delimiter that should be hidden.
+ * This identifies the syntax characters like **, *, `, #, etc.
+ */
+static bool md_is_delimiter_char(uint32_t codepoint, uint16_t syntax)
+{
+	switch (syntax) {
+	case SYNTAX_MD_BOLD:
+	case SYNTAX_MD_ITALIC:
+	case SYNTAX_MD_BOLD_ITALIC:
+		return codepoint == '*' || codepoint == '_';
+
+	case SYNTAX_MD_CODE_SPAN:
+		return codepoint == '`';
+
+	case SYNTAX_MD_HEADER_1:
+	case SYNTAX_MD_HEADER_2:
+	case SYNTAX_MD_HEADER_3:
+	case SYNTAX_MD_HEADER_4:
+	case SYNTAX_MD_HEADER_5:
+	case SYNTAX_MD_HEADER_6:
+		return codepoint == '#' || codepoint == ' ';
+
+	case SYNTAX_MD_LINK_TEXT:
+		return codepoint == '[' || codepoint == ']';
+
+	case SYNTAX_MD_LINK_URL:
+		/* Hide entire URL portion including parens */
+		return true;
+
+	case SYNTAX_MD_IMAGE:
+		return codepoint == '!' || codepoint == '[' || codepoint == ']' ||
+		       codepoint == '(' || codepoint == ')';
+
+	default:
+		return false;
+	}
+}
+
+/*
+ * Mark cells that should be hidden in hybrid mode.
+ * Sets CELL_FLAG_HIDEABLE on delimiter characters.
+ */
+void md_mark_hideable_cells(struct line *line)
+{
+	if (!line->md_elements || !line->md_elements->valid)
+		return;
+
+	for (uint16_t i = 0; i < line->md_elements->count; i++) {
+		struct md_element *elem = &line->md_elements->elements[i];
+
+		for (uint32_t col = elem->start_col; col < elem->end_col && col < line->cell_count; col++) {
+			struct cell *cell = &line->cells[col];
+
+			/* Clear flags first */
+			cell->flags = 0;
+
+			/* Mark element boundaries */
+			if (col == elem->start_col)
+				cell->flags |= CELL_FLAG_ELEMENT_START;
+			if (col == elem->end_col - 1)
+				cell->flags |= CELL_FLAG_ELEMENT_END;
+
+			/* Mark hideable delimiters */
+			if (md_is_delimiter_char(cell->codepoint, elem->syntax_type)) {
+				cell->flags |= CELL_FLAG_HIDEABLE;
+			}
+		}
+	}
+
+	/* Special handling for headers: mark leading # and space as hideable */
+	if (line->cell_count > 0) {
+		uint16_t syntax = line->cells[0].syntax;
+		if (syntax >= SYNTAX_MD_HEADER_1 && syntax <= SYNTAX_MD_HEADER_6) {
+			for (uint32_t col = 0; col < line->cell_count; col++) {
+				uint32_t cp = line->cells[col].codepoint;
+				if (cp == '#' || (cp == ' ' && col > 0 && line->cells[col-1].codepoint == '#')) {
+					line->cells[col].flags |= CELL_FLAG_HIDEABLE;
+				} else if (cp != '#') {
+					break;
+				}
+			}
+		}
+	}
+}
+
+/*
+ * Find the element containing a given column position.
+ * Returns NULL if not in any tracked element.
+ */
+struct md_element *md_find_element_at(struct line *line, uint32_t column)
+{
+	if (!line->md_elements || !line->md_elements->valid)
+		return NULL;
+
+	for (uint16_t i = 0; i < line->md_elements->count; i++) {
+		struct md_element *elem = &line->md_elements->elements[i];
+		if (column >= elem->start_col && column < elem->end_col)
+			return elem;
+	}
+	return NULL;
+}
+
+/*
+ * Check if cursor is in an element that should be revealed.
+ * If so, returns the reveal range in start/end.
+ */
+bool md_should_reveal_element(struct line *line, uint32_t cursor_col,
+			      uint32_t *reveal_start, uint32_t *reveal_end)
+{
+	struct md_element *elem = md_find_element_at(line, cursor_col);
+	if (elem) {
+		*reveal_start = elem->start_col;
+		*reveal_end = elem->end_col;
+		return true;
+	}
+	return false;
+}
+
+/*
+ * Extract URL from a link element.
+ * If cursor is on a link, extracts the URL portion.
+ * Returns true if URL was found and copied to buffer.
+ */
+bool md_extract_link_url(struct line *line, uint32_t cursor_col,
+			 char *url_buffer, size_t buffer_size)
+{
+	if (!line || buffer_size == 0)
+		return false;
+
+	url_buffer[0] = '\0';
+
+	/* Check if cursor is in a link element */
+	uint16_t syntax = SYNTAX_NORMAL;
+	if (cursor_col < line->cell_count)
+		syntax = line->cells[cursor_col].syntax;
+
+	if (syntax != SYNTAX_MD_LINK_TEXT && syntax != SYNTAX_MD_LINK_URL)
+		return false;
+
+	/* Find the URL portion (cells with SYNTAX_MD_LINK_URL) */
+	uint32_t url_start = UINT32_MAX;
+	uint32_t url_end = 0;
+
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		if (line->cells[i].syntax == SYNTAX_MD_LINK_URL) {
+			if (url_start == UINT32_MAX)
+				url_start = i;
+			url_end = i + 1;
+		} else if (url_start != UINT32_MAX && i > url_end) {
+			/* Moved past URL region */
+			break;
+		}
+	}
+
+	if (url_start == UINT32_MAX)
+		return false;
+
+	/* Skip leading ( and trailing ) if present */
+	if (url_start < line->cell_count && line->cells[url_start].codepoint == '(')
+		url_start++;
+	if (url_end > 0 && url_end <= line->cell_count &&
+	    line->cells[url_end - 1].codepoint == ')')
+		url_end--;
+
+	/* Extract URL characters */
+	size_t offset = 0;
+	for (uint32_t i = url_start; i < url_end && i < line->cell_count; i++) {
+		uint32_t cp = line->cells[i].codepoint;
+		/* Simple ASCII for URLs - encode as UTF-8 */
+		char utf8[4];
+		int len = 0;
+		if (cp < 0x80) {
+			utf8[0] = (char)cp;
+			len = 1;
+		} else if (cp < 0x800) {
+			utf8[0] = (char)(0xC0 | (cp >> 6));
+			utf8[1] = (char)(0x80 | (cp & 0x3F));
+			len = 2;
+		} else if (cp < 0x10000) {
+			utf8[0] = (char)(0xE0 | (cp >> 12));
+			utf8[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+			utf8[2] = (char)(0x80 | (cp & 0x3F));
+			len = 3;
+		} else {
+			utf8[0] = (char)(0xF0 | (cp >> 18));
+			utf8[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+			utf8[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+			utf8[3] = (char)(0x80 | (cp & 0x3F));
+			len = 4;
+		}
+
+		if (offset + len < buffer_size - 1) {
+			for (int j = 0; j < len; j++)
+				url_buffer[offset++] = utf8[j];
+		} else {
+			break;
+		}
+	}
+	url_buffer[offset] = '\0';
+
+	return offset > 0;
+}
+
+/*
+ * Update link preview state based on cursor position.
+ * Called from cursor movement handlers.
+ */
+void md_update_link_preview(void)
+{
+	editor.link_preview_active = false;
+	editor.link_url_preview[0] = '\0';
+
+	if (!editor.hybrid_mode)
+		return;
+
+	if (!syntax_is_markdown_file(editor.buffer.filename))
+		return;
+
+	if (editor.cursor_row >= editor.buffer.line_count)
+		return;
+
+	struct line *line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(line, &editor.buffer);
+
+	if (md_extract_link_url(line, editor.cursor_column,
+	                        editor.link_url_preview,
+	                        sizeof(editor.link_url_preview))) {
+		editor.link_preview_active = true;
+	}
 }

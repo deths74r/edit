@@ -12,6 +12,7 @@
 
 #include <stdio.h>
 #include "edit.h"
+#include "syntax.h"
 #include "../third_party/utflite-1.5.2/single_include/utflite.h"
 
 /* Access to global editor state (defined in edit.c) */
@@ -365,6 +366,18 @@ uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 	line_warm(line, &editor.buffer);
 
 	/*
+	 * Hybrid mode: compute reveal range if this is the cursor line.
+	 * Cells in the reveal range are counted even if hideable.
+	 */
+	bool hybrid_active = editor.hybrid_mode &&
+	                     syntax_is_markdown_file(editor.buffer.filename);
+	uint32_t reveal_start = UINT32_MAX;
+	uint32_t reveal_end = 0;
+	if (hybrid_active && row == editor.cursor_row) {
+		md_should_reveal_element(line, column, &reveal_start, &reveal_end);
+	}
+
+	/*
 	 * Iterate by grapheme cluster to correctly handle multi-codepoint
 	 * characters like emoji with skin tone modifiers and ZWJ sequences.
 	 */
@@ -372,6 +385,18 @@ uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 	uint32_t i = 0;
 
 	while (i < column && i < line->cell_count) {
+		/*
+		 * Hybrid mode: skip hidden cells when counting render column.
+		 * Cells in the reveal range are counted normally.
+		 */
+		if (hybrid_active && (line->cells[i].flags & CELL_FLAG_HIDEABLE)) {
+			bool in_reveal = (i >= reveal_start && i < reveal_end);
+			if (!in_reveal) {
+				i++;
+				continue;
+			}
+		}
+
 		uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, i);
 
 		/* Don't count grapheme if cursor is in the middle of it */

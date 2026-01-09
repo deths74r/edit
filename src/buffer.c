@@ -42,6 +42,7 @@ void line_init(struct line *line)
 	line->wrap_segment_count = 0;
 	line->wrap_cache_width = 0;
 	line->wrap_cache_mode = WRAP_NONE;
+	line->md_elements = NULL;
 }
 
 /*
@@ -61,6 +62,12 @@ void line_free(struct line *line)
 	line->wrap_segment_count = 0;
 	line->wrap_cache_width = 0;
 	line->wrap_cache_mode = WRAP_NONE;
+	/* Free markdown element cache */
+	if (line->md_elements) {
+		free(line->md_elements->elements);
+		free(line->md_elements);
+		line->md_elements = NULL;
+	}
 }
 
 /*

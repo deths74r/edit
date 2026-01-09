@@ -282,6 +282,7 @@ enum key_code {
 	KEY_ALT_W = -67,
 	KEY_ALT_R = -66,
 	KEY_ALT_U = -65,
+	KEY_ALT_M = -71,
 
 	/* Shift+Tab (backtab). */
 	KEY_SHIFT_TAB = -78,
@@ -747,12 +748,44 @@ struct cell {
 	/* Character class and token position for word boundaries. */
 	uint8_t neighbor;
 
-	/* Reserved for future use. */
+	/* Cell flags for hybrid markdown rendering. */
 	uint8_t flags;
+#define CELL_FLAG_HIDEABLE      (1 << 0)  /* Can be hidden in hybrid mode */
+#define CELL_FLAG_ELEMENT_START (1 << 1)  /* Start of markdown element */
+#define CELL_FLAG_ELEMENT_END   (1 << 2)  /* End of markdown element */
 
 	/* Pair ID and type for matched delimiters. */
 	uint32_t context;
 };
+
+/*****************************************************************************
+ * Markdown Element Cache (Hybrid Rendering)
+ *****************************************************************************/
+
+/*
+ * A markdown element span - defines a contiguous element region.
+ * Used for cursor reveal logic in hybrid rendering mode.
+ */
+struct md_element {
+	uint32_t start_col;       /* First cell of element */
+	uint32_t end_col;         /* Last cell of element (exclusive) */
+	uint16_t syntax_type;     /* SYNTAX_MD_* token type */
+};
+
+/*
+ * Per-line cache of markdown elements for hybrid mode.
+ * Computed on demand, invalidated when line is edited.
+ */
+struct md_element_cache {
+	struct md_element *elements;
+	uint16_t count;
+	uint16_t capacity;
+	bool valid;
+};
+
+/*****************************************************************************
+ * Line Structure
+ *****************************************************************************/
 
 /* A single line of text. Cold lines reference mmap content directly.
  * Warm/hot lines have cells allocated. */
@@ -793,6 +826,9 @@ struct line {
 
 	/* Wrap mode when computed. */
 	enum wrap_mode wrap_cache_mode;
+
+	/* Markdown element cache for hybrid rendering mode. */
+	struct md_element_cache *md_elements;
 };
 
 /*****************************************************************************
@@ -944,6 +980,11 @@ struct editor_state {
 	struct cursor cursors[MAX_CURSORS];
 	uint32_t cursor_count;       /* Number of active cursors (0 = single cursor mode) */
 	uint32_t primary_cursor;     /* Index of main cursor for scrolling */
+
+	/* Hybrid markdown rendering mode. */
+	bool hybrid_mode;            /* True = hybrid mode, false = raw mode */
+	char link_url_preview[512];  /* URL to display in status bar */
+	bool link_preview_active;    /* True if cursor is on a link */
 };
 
 /*****************************************************************************
