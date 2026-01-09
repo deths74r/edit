@@ -346,6 +346,31 @@ enum syntax_token {
 	SYNTAX_OPERATOR,      /* +, -, *, /, =, etc. */
 	SYNTAX_BRACKET,       /* (), [], {} */
 	SYNTAX_ESCAPE,        /* \n, \t, etc. inside strings */
+
+	/* Markdown tokens */
+	SYNTAX_MD_HEADER_1,       /* # H1 */
+	SYNTAX_MD_HEADER_2,       /* ## H2 */
+	SYNTAX_MD_HEADER_3,       /* ### H3 */
+	SYNTAX_MD_HEADER_4,       /* #### H4 */
+	SYNTAX_MD_HEADER_5,       /* ##### H5 */
+	SYNTAX_MD_HEADER_6,       /* ###### H6 */
+	SYNTAX_MD_BOLD,           /* **bold** */
+	SYNTAX_MD_ITALIC,         /* *italic* */
+	SYNTAX_MD_BOLD_ITALIC,    /* ***both*** */
+	SYNTAX_MD_CODE_SPAN,      /* `inline code` */
+	SYNTAX_MD_CODE_BLOCK,     /* Fenced ``` or indented */
+	SYNTAX_MD_LINK_TEXT,      /* [text] portion */
+	SYNTAX_MD_LINK_URL,       /* (url) portion */
+	SYNTAX_MD_IMAGE,          /* ![alt](url) */
+	SYNTAX_MD_BLOCKQUOTE,     /* > quote */
+	SYNTAX_MD_LIST_MARKER,    /* - * + 1. */
+	SYNTAX_MD_HORIZONTAL_RULE,/* --- *** ___ */
+	SYNTAX_MD_ESCAPE,         /* \* \# */
+	SYNTAX_MD_TABLE,          /* | delimiters */
+	SYNTAX_MD_TABLE_SEPARATOR,/* |---|---| alignment row */
+	SYNTAX_MD_TABLE_HEADER,   /* Table header row content */
+	SYNTAX_MD_TASK_MARKER,    /* [ ] [x] */
+
 	SYNTAX_TOKEN_COUNT    /* Number of token types */
 };
 

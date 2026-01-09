@@ -150,6 +150,11 @@ bool buffer_find_pair_partner(struct buffer *buffer,
 bool syntax_is_c_file(const char *filename);
 
 /*
+ * Check if filename is a Markdown file.
+ */
+bool syntax_is_markdown_file(const char *filename);
+
+/*
  * Check if codepoint is alphanumeric or underscore.
  */
 bool syntax_is_alnum(uint32_t cp);
@@ -159,5 +164,22 @@ bool syntax_is_alnum(uint32_t cp);
  * Sets the syntax field of each cell.
  */
 void syntax_highlight_line(struct line *line, struct buffer *buffer, uint32_t row);
+
+/*****************************************************************************
+ * Markdown Syntax Highlighting
+ *****************************************************************************/
+
+/*
+ * Check if a row starts inside a fenced code block.
+ * Scans backwards from the given row to find unclosed ``` or ~~~.
+ */
+bool syntax_is_in_code_block(struct buffer *buffer, uint32_t row);
+
+/*
+ * Highlight a Markdown line.
+ * Sets the syntax field of each cell for Markdown tokens.
+ */
+void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
+                                    uint32_t row);
 
 #endif /* EDIT_SYNTAX_H */

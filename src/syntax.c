@@ -599,13 +599,36 @@ bool syntax_is_c_file(const char *filename)
 	       strcmp(ext, "cc") == 0 || strcmp(ext, "cxx") == 0;
 }
 
+/* Returns true if filename has a Markdown extension. */
+bool syntax_is_markdown_file(const char *filename)
+{
+	if (filename == NULL) {
+		return false;
+	}
+
+	const char *dot = strrchr(filename, '.');
+	if (dot == NULL) {
+		return false;
+	}
+
+	const char *ext = dot + 1;
+	return strcmp(ext, "md") == 0 || strcmp(ext, "markdown") == 0 ||
+	       strcmp(ext, "mkd") == 0 || strcmp(ext, "mdx") == 0;
+}
+
 /*
  * Apply syntax highlighting to a single line.
  */
 void syntax_highlight_line(struct line *line, struct buffer *buffer,
                            uint32_t row)
 {
-	/* Only highlight C files */
+	/* Dispatch to language-specific highlighter */
+	if (syntax_is_markdown_file(buffer->filename)) {
+		syntax_highlight_markdown_line(line, buffer, row);
+		return;
+	}
+
+	/* Only highlight C files from here on */
 	if (!syntax_is_c_file(buffer->filename)) {
 		return;
 	}
@@ -789,4 +812,655 @@ void syntax_highlight_line(struct line *line, struct buffer *buffer,
 		/* Default: skip */
 		i++;
 	}
+}
+
+/*****************************************************************************
+ * Markdown Syntax Highlighting
+ *****************************************************************************/
+
+/*
+ * Check if a row starts inside a fenced code block.
+ * Scans backwards from the given row to find unclosed ``` or ~~~.
+ */
+bool syntax_is_in_code_block(struct buffer *buffer, uint32_t row)
+{
+	bool in_code_block = false;
+	uint32_t fence_char = 0;
+	uint32_t fence_length = 0;
+
+	for (uint32_t r = 0; r < row; r++) {
+		struct line *line = &buffer->lines[r];
+
+		/* Ensure line is warm */
+		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+			line_warm(line, buffer);
+		}
+
+		if (line->cell_count == 0) {
+			continue;
+		}
+
+		/* Skip up to 3 leading spaces */
+		uint32_t col = 0;
+		uint32_t indent = 0;
+		while (col < line->cell_count && indent < 3 &&
+		       line->cells[col].codepoint == ' ') {
+			col++;
+			indent++;
+		}
+
+		if (col >= line->cell_count) {
+			continue;
+		}
+
+		uint32_t ch = line->cells[col].codepoint;
+
+		/* Check for fence character */
+		if (ch == '`' || ch == '~') {
+			uint32_t count = 0;
+			while (col < line->cell_count &&
+			       line->cells[col].codepoint == ch) {
+				count++;
+				col++;
+			}
+
+			if (count >= 3) {
+				if (!in_code_block) {
+					/* Opening fence */
+					in_code_block = true;
+					fence_char = ch;
+					fence_length = count;
+				} else if (ch == fence_char && count >= fence_length) {
+					/* Check if valid closing fence (only whitespace after) */
+					bool valid_close = true;
+					while (col < line->cell_count) {
+						uint32_t c = line->cells[col].codepoint;
+						if (c != ' ' && c != '\t') {
+							valid_close = false;
+							break;
+						}
+						col++;
+					}
+					if (valid_close) {
+						in_code_block = false;
+					}
+				}
+			}
+		}
+	}
+
+	return in_code_block;
+}
+
+/*
+ * Mark a range of cells with a syntax token.
+ */
+static void md_mark_range(struct line *line, uint32_t start, uint32_t end,
+                          enum syntax_token syntax)
+{
+	for (uint32_t i = start; i < end && i < line->cell_count; i++) {
+		line->cells[i].syntax = syntax;
+	}
+}
+
+/*
+ * Mark from position to end of line with a syntax token.
+ */
+static void md_mark_to_end(struct line *line, uint32_t start,
+                           enum syntax_token syntax)
+{
+	md_mark_range(line, start, line->cell_count, syntax);
+}
+
+/*
+ * Check if character is escapable in markdown.
+ */
+static bool md_is_escapable(uint32_t cp)
+{
+	return cp == '\\' || cp == '`' || cp == '*' || cp == '_' ||
+	       cp == '{' || cp == '}' || cp == '[' || cp == ']' ||
+	       cp == '(' || cp == ')' || cp == '#' || cp == '+' ||
+	       cp == '-' || cp == '.' || cp == '!' || cp == '|';
+}
+
+/*
+ * Check if line is a table separator (|---|:---:|---:|).
+ * Returns true if line contains only |, -, :, and spaces with at least one -.
+ */
+static bool md_is_table_separator(struct line *line)
+{
+	if (line == NULL || line->cell_count == 0) {
+		return false;
+	}
+
+	/* Must start with | */
+	if (line->cells[0].codepoint != '|') {
+		return false;
+	}
+
+	bool has_dash = false;
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		uint32_t c = line->cells[i].codepoint;
+		if (c == '-') {
+			has_dash = true;
+		} else if (c != '|' && c != ':' && c != ' ') {
+			return false;
+		}
+	}
+	return has_dash;
+}
+
+/*
+ * Parse inline code span starting at pos. Returns end position.
+ * Handles both single ` and multiple `` backticks.
+ */
+static uint32_t md_parse_code_span(struct line *line, uint32_t pos)
+{
+	if (pos >= line->cell_count || line->cells[pos].codepoint != '`') {
+		return pos;
+	}
+
+	uint32_t start = pos;
+
+	/* Count opening backticks */
+	uint32_t open_count = 0;
+	while (pos < line->cell_count && line->cells[pos].codepoint == '`') {
+		open_count++;
+		pos++;
+	}
+
+	/* Search for matching closing backticks */
+	while (pos < line->cell_count) {
+		if (line->cells[pos].codepoint == '`') {
+			uint32_t close_count = 0;
+			while (pos < line->cell_count &&
+			       line->cells[pos].codepoint == '`') {
+				close_count++;
+				pos++;
+			}
+
+			if (close_count == open_count) {
+				/* Found matching close */
+				md_mark_range(line, start, pos, SYNTAX_MD_CODE_SPAN);
+				return pos;
+			}
+			/* Wrong count, continue searching */
+		} else {
+			pos++;
+		}
+	}
+
+	/* No closing found, just advance past first backtick */
+	return start + 1;
+}
+
+/*
+ * Parse emphasis starting at pos. Returns end position.
+ * Handles *, **, ***, _, __, ___.
+ */
+static uint32_t md_parse_emphasis(struct line *line, uint32_t pos)
+{
+	if (pos >= line->cell_count) {
+		return pos;
+	}
+
+	uint32_t delim = line->cells[pos].codepoint;
+	if (delim != '*' && delim != '_') {
+		return pos;
+	}
+
+	uint32_t start = pos;
+
+	/* Count delimiter run */
+	uint32_t open_count = 0;
+	while (pos < line->cell_count && line->cells[pos].codepoint == delim) {
+		open_count++;
+		pos++;
+	}
+
+	/* Must be followed by non-space (left-flanking check) */
+	if (pos >= line->cell_count || line->cells[pos].codepoint == ' ') {
+		return start + 1;
+	}
+
+	/* Search for closing delimiter run */
+	while (pos < line->cell_count) {
+		if (line->cells[pos].codepoint == delim) {
+			uint32_t close_start = pos;
+			uint32_t close_count = 0;
+			while (pos < line->cell_count &&
+			       line->cells[pos].codepoint == delim) {
+				close_count++;
+				pos++;
+			}
+
+			/* Check if preceded by non-space (right-flanking) */
+			bool right_flanking = close_start > 0 &&
+			                      line->cells[close_start - 1].codepoint != ' ';
+
+			if (right_flanking && close_count >= open_count) {
+				/* Determine emphasis type */
+				enum syntax_token syntax;
+				uint32_t match_count;
+
+				if (open_count >= 3 && close_count >= 3) {
+					syntax = SYNTAX_MD_BOLD_ITALIC;
+					match_count = 3;
+				} else if (open_count >= 2 && close_count >= 2) {
+					syntax = SYNTAX_MD_BOLD;
+					match_count = 2;
+				} else {
+					syntax = SYNTAX_MD_ITALIC;
+					match_count = 1;
+				}
+
+				uint32_t mark_end = close_start + match_count;
+				md_mark_range(line, start, mark_end, syntax);
+				return mark_end;
+			}
+		} else {
+			pos++;
+		}
+	}
+
+	/* No closing found */
+	return start + 1;
+}
+
+/*
+ * Parse link starting at pos. Returns end position.
+ * Handles [text](url) format.
+ */
+static uint32_t md_parse_link(struct line *line, uint32_t pos, bool is_image)
+{
+	uint32_t start = pos;
+
+	/* For images, skip the ! */
+	if (is_image) {
+		if (pos >= line->cell_count || line->cells[pos].codepoint != '!') {
+			return pos;
+		}
+		pos++;
+	}
+
+	/* Must start with [ */
+	if (pos >= line->cell_count || line->cells[pos].codepoint != '[') {
+		return start;
+	}
+	uint32_t bracket_start = pos;
+	pos++;
+
+	/* Find closing ] */
+	uint32_t depth = 1;
+	while (pos < line->cell_count && depth > 0) {
+		uint32_t cp = line->cells[pos].codepoint;
+		if (cp == '[') depth++;
+		else if (cp == ']') depth--;
+		pos++;
+	}
+
+	if (depth != 0) {
+		return start + 1;
+	}
+
+	uint32_t bracket_end = pos - 1;
+
+	/* Must be followed by ( */
+	if (pos >= line->cell_count || line->cells[pos].codepoint != '(') {
+		return start + 1;
+	}
+	uint32_t url_start = pos;
+	pos++;
+
+	/* Find closing ) */
+	depth = 1;
+	while (pos < line->cell_count && depth > 0) {
+		uint32_t cp = line->cells[pos].codepoint;
+		if (cp == '(') depth++;
+		else if (cp == ')') depth--;
+		pos++;
+	}
+
+	if (depth != 0) {
+		return start + 1;
+	}
+
+	uint32_t url_end = pos;
+
+	/* Mark the image ! if present */
+	if (is_image) {
+		line->cells[start].syntax = SYNTAX_MD_IMAGE;
+	}
+
+	/* Mark link text portion [text] */
+	md_mark_range(line, bracket_start, bracket_end + 1, SYNTAX_MD_LINK_TEXT);
+
+	/* Mark URL portion (url) */
+	md_mark_range(line, url_start, url_end, SYNTAX_MD_LINK_URL);
+
+	return url_end;
+}
+
+/*
+ * Parse inline elements in a line segment.
+ */
+static void md_parse_inline(struct line *line, uint32_t start, uint32_t end)
+{
+	uint32_t pos = start;
+
+	while (pos < end && pos < line->cell_count) {
+		/* Skip if already marked */
+		if (line->cells[pos].syntax != SYNTAX_NORMAL) {
+			pos++;
+			continue;
+		}
+
+		uint32_t cp = line->cells[pos].codepoint;
+
+		/* Escape sequence */
+		if (cp == '\\' && pos + 1 < line->cell_count) {
+			uint32_t next = line->cells[pos + 1].codepoint;
+			if (md_is_escapable(next)) {
+				line->cells[pos].syntax = SYNTAX_MD_ESCAPE;
+				line->cells[pos + 1].syntax = SYNTAX_MD_ESCAPE;
+				pos += 2;
+				continue;
+			}
+		}
+
+		/* Code span */
+		if (cp == '`') {
+			uint32_t new_pos = md_parse_code_span(line, pos);
+			if (new_pos > pos) {
+				pos = new_pos;
+				continue;
+			}
+		}
+
+		/* Image */
+		if (cp == '!' && pos + 1 < line->cell_count &&
+		    line->cells[pos + 1].codepoint == '[') {
+			uint32_t new_pos = md_parse_link(line, pos, true);
+			if (new_pos > pos + 1) {
+				pos = new_pos;
+				continue;
+			}
+		}
+
+		/* Link */
+		if (cp == '[') {
+			uint32_t new_pos = md_parse_link(line, pos, false);
+			if (new_pos > pos + 1) {
+				pos = new_pos;
+				continue;
+			}
+		}
+
+		/* Emphasis */
+		if (cp == '*' || cp == '_') {
+			uint32_t new_pos = md_parse_emphasis(line, pos);
+			if (new_pos > pos + 1) {
+				pos = new_pos;
+				continue;
+			}
+		}
+
+		pos++;
+	}
+}
+
+/*
+ * Highlight a Markdown line.
+ */
+void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
+                                    uint32_t row)
+{
+	/* Must be warm/hot to highlight */
+	if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+		return;
+	}
+
+	if (line->cell_count == 0) {
+		return;
+	}
+
+	/* Reset all cells to normal */
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		line->cells[i].syntax = SYNTAX_NORMAL;
+	}
+
+	/* Mark line as hot */
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
+
+	/* Check if inside fenced code block */
+	if (syntax_is_in_code_block(buffer, row)) {
+		/* Check if this is a closing fence */
+		uint32_t col = 0;
+		uint32_t indent = 0;
+		while (col < line->cell_count && indent < 3 &&
+		       line->cells[col].codepoint == ' ') {
+			col++;
+			indent++;
+		}
+
+		if (col < line->cell_count) {
+			uint32_t ch = line->cells[col].codepoint;
+			if (ch == '`' || ch == '~') {
+				uint32_t count = 0;
+				while (col + count < line->cell_count &&
+				       line->cells[col + count].codepoint == ch) {
+					count++;
+				}
+				if (count >= 3) {
+					/* This is a fence line */
+					md_mark_to_end(line, 0, SYNTAX_MD_CODE_BLOCK);
+					return;
+				}
+			}
+		}
+
+		/* Regular code block content */
+		md_mark_to_end(line, 0, SYNTAX_MD_CODE_BLOCK);
+		return;
+	}
+
+	/* Block-level parsing */
+	uint32_t pos = 0;
+	uint32_t inline_start = 0;
+
+	/* Skip leading whitespace (up to 3 spaces) */
+	uint32_t indent = 0;
+	while (pos < line->cell_count && indent < 3 &&
+	       line->cells[pos].codepoint == ' ') {
+		pos++;
+		indent++;
+	}
+
+	/* 4+ spaces = indented code block */
+	if (indent >= 4 || (pos < line->cell_count &&
+	                    line->cells[pos].codepoint == '\t')) {
+		md_mark_to_end(line, 0, SYNTAX_MD_CODE_BLOCK);
+		return;
+	}
+
+	if (pos >= line->cell_count) {
+		return;
+	}
+
+	uint32_t cp = line->cells[pos].codepoint;
+
+	/* Fenced code block start */
+	if (cp == '`' || cp == '~') {
+		uint32_t count = 0;
+		uint32_t start = pos;
+		while (pos < line->cell_count && line->cells[pos].codepoint == cp) {
+			count++;
+			pos++;
+		}
+		if (count >= 3) {
+			md_mark_to_end(line, 0, SYNTAX_MD_CODE_BLOCK);
+			return;
+		}
+		pos = start;
+	}
+
+	/* ATX Header - count level and assign appropriate token */
+	if (cp == '#') {
+		uint32_t level = 0;
+		uint32_t start = pos;
+		while (pos < line->cell_count && line->cells[pos].codepoint == '#' &&
+		       level < 6) {
+			level++;
+			pos++;
+		}
+		/* Must be followed by space or end of line */
+		if (level > 0 && (pos >= line->cell_count ||
+		                  line->cells[pos].codepoint == ' ')) {
+			enum syntax_token header_tokens[] = {
+				SYNTAX_MD_HEADER_1, SYNTAX_MD_HEADER_2,
+				SYNTAX_MD_HEADER_3, SYNTAX_MD_HEADER_4,
+				SYNTAX_MD_HEADER_5, SYNTAX_MD_HEADER_6
+			};
+			md_mark_to_end(line, 0, header_tokens[level - 1]);
+			return;
+		}
+		pos = start;
+	}
+
+	/* Blockquote */
+	if (cp == '>') {
+		uint32_t start = pos;
+		pos++;
+		/* Optional space after > */
+		if (pos < line->cell_count && line->cells[pos].codepoint == ' ') {
+			pos++;
+		}
+		md_mark_range(line, start, pos, SYNTAX_MD_BLOCKQUOTE);
+		inline_start = pos;
+		md_parse_inline(line, inline_start, line->cell_count);
+		return;
+	}
+
+	/* Horizontal rule: check for --- or *** or ___ */
+	if (cp == '-' || cp == '*' || cp == '_') {
+		uint32_t rule_char = cp;
+		uint32_t count = 0;
+		uint32_t check_pos = pos;
+		bool is_rule = true;
+
+		while (check_pos < line->cell_count) {
+			uint32_t c = line->cells[check_pos].codepoint;
+			if (c == rule_char) {
+				count++;
+			} else if (c != ' ') {
+				is_rule = false;
+				break;
+			}
+			check_pos++;
+		}
+
+		if (is_rule && count >= 3) {
+			md_mark_to_end(line, 0, SYNTAX_MD_HORIZONTAL_RULE);
+			return;
+		}
+	}
+
+	/* Unordered list marker: - * + followed by space */
+	if ((cp == '-' || cp == '*' || cp == '+') &&
+	    pos + 1 < line->cell_count &&
+	    line->cells[pos + 1].codepoint == ' ') {
+		uint32_t marker_end = pos + 2;
+		md_mark_range(line, pos, marker_end, SYNTAX_MD_LIST_MARKER);
+
+		/* Check for task marker [ ] or [x] */
+		if (marker_end + 2 < line->cell_count &&
+		    line->cells[marker_end].codepoint == '[') {
+			uint32_t inner = line->cells[marker_end + 1].codepoint;
+			if ((inner == ' ' || inner == 'x' || inner == 'X') &&
+			    line->cells[marker_end + 2].codepoint == ']') {
+				uint32_t task_end = marker_end + 3;
+				/* Optional space after ] */
+				if (task_end < line->cell_count &&
+				    line->cells[task_end].codepoint == ' ') {
+					task_end++;
+				}
+				md_mark_range(line, marker_end, task_end,
+				              SYNTAX_MD_TASK_MARKER);
+				inline_start = task_end;
+				md_parse_inline(line, inline_start, line->cell_count);
+				return;
+			}
+		}
+
+		inline_start = marker_end;
+		md_parse_inline(line, inline_start, line->cell_count);
+		return;
+	}
+
+	/* Ordered list marker: digits followed by . or ) then space */
+	if (cp >= '0' && cp <= '9') {
+		uint32_t num_start = pos;
+		while (pos < line->cell_count &&
+		       line->cells[pos].codepoint >= '0' &&
+		       line->cells[pos].codepoint <= '9') {
+			pos++;
+		}
+		if (pos < line->cell_count &&
+		    (line->cells[pos].codepoint == '.' ||
+		     line->cells[pos].codepoint == ')')) {
+			pos++;
+			if (pos < line->cell_count &&
+			    line->cells[pos].codepoint == ' ') {
+				pos++;
+				md_mark_range(line, num_start, pos, SYNTAX_MD_LIST_MARKER);
+				inline_start = pos;
+				md_parse_inline(line, inline_start, line->cell_count);
+				return;
+			}
+		}
+		pos = num_start;
+	}
+
+	/* Table line: starts with | */
+	if (cp == '|') {
+		/* Check if this is a separator line (|---|:---:|---:|) */
+		if (md_is_table_separator(line)) {
+			md_mark_to_end(line, 0, SYNTAX_MD_TABLE_SEPARATOR);
+			return;
+		}
+
+		/* Check if next line is separator (making this a header row) */
+		bool is_header = false;
+		if (row + 1 < buffer->line_count) {
+			struct line *next_line = &buffer->lines[row + 1];
+			/* Only check if next line is warm/hot (has cell data) */
+			if (line_get_temperature(next_line) != LINE_TEMPERATURE_COLD) {
+				is_header = md_is_table_separator(next_line);
+			}
+		}
+
+		if (is_header) {
+			/* Mark header row: pipes as table, content as header */
+			for (uint32_t i = 0; i < line->cell_count; i++) {
+				if (line->cells[i].codepoint == '|') {
+					line->cells[i].syntax = SYNTAX_MD_TABLE;
+				} else {
+					line->cells[i].syntax = SYNTAX_MD_TABLE_HEADER;
+				}
+			}
+		} else {
+			/* Regular table row: mark all | characters */
+			for (uint32_t i = 0; i < line->cell_count; i++) {
+				if (line->cells[i].codepoint == '|') {
+					line->cells[i].syntax = SYNTAX_MD_TABLE;
+				}
+			}
+			/* Parse inline content between pipes */
+			md_parse_inline(line, 0, line->cell_count);
+		}
+		return;
+	}
+
+	/* Default: parse inline elements */
+	md_parse_inline(line, 0, line->cell_count);
 }

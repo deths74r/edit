@@ -590,6 +590,122 @@ struct theme theme_create_default(void)
 		.attr = ATTR_BOLD
 	};
 
+	/* Markdown syntax highlighting - color blind friendly palette
+	 * Based on Wong's colorblind-safe palette with high luminance contrast.
+	 * Uses blue/orange axis (safe for deuteranopia/protanopia) and
+	 * varied brightness (safe for tritanopia). Text attributes provide
+	 * additional non-color visual cues. */
+	t.syntax[SYNTAX_MD_HEADER_1] = (struct style){
+		.fg = {0x56, 0xB4, 0xE9},  /* Sky blue - most prominent */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD | ATTR_UNDERLINE
+	};
+	t.syntax[SYNTAX_MD_HEADER_2] = (struct style){
+		.fg = {0x56, 0xB4, 0xE9},  /* Sky blue */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HEADER_3] = (struct style){
+		.fg = {0xE6, 0x9F, 0x00},  /* Orange */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HEADER_4] = (struct style){
+		.fg = {0xE6, 0x9F, 0x00},  /* Orange - no bold */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_HEADER_5] = (struct style){
+		.fg = {0x90, 0x90, 0x90},  /* Gray */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HEADER_6] = (struct style){
+		.fg = {0x80, 0x80, 0x80},  /* Darker gray */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_BOLD] = (struct style){
+		.fg = {0xE6, 0x9F, 0x00},  /* Orange - contrasts with blue */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_ITALIC] = (struct style){
+		.fg = {0xCC, 0x79, 0xA7},  /* Reddish purple - distinct hue */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_ITALIC
+	};
+	t.syntax[SYNTAX_MD_BOLD_ITALIC] = (struct style){
+		.fg = {0xF0, 0xE4, 0x42},  /* Yellow - high luminance */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD | ATTR_ITALIC
+	};
+	t.syntax[SYNTAX_MD_CODE_SPAN] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Bluish green - accessible green */
+		.bg = {0x1A, 0x1A, 0x1A},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_CODE_BLOCK] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Bluish green */
+		.bg = {0x1A, 0x1A, 0x1A},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_LINK_TEXT] = (struct style){
+		.fg = {0x00, 0x72, 0xB2},  /* Blue - standard link color */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD | ATTR_UNDERLINE
+	};
+	t.syntax[SYNTAX_MD_LINK_URL] = (struct style){
+		.fg = {0x56, 0xB4, 0xE9},  /* Sky blue - lighter than link */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_DIM
+	};
+	t.syntax[SYNTAX_MD_IMAGE] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Bluish green */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD | ATTR_UNDERLINE
+	};
+	t.syntax[SYNTAX_MD_BLOCKQUOTE] = (struct style){
+		.fg = {0xA0, 0xA0, 0xA0},  /* Gray - neutral */
+		.bg = {0x15, 0x15, 0x18},
+		.attr = ATTR_ITALIC
+	};
+	t.syntax[SYNTAX_MD_LIST_MARKER] = (struct style){
+		.fg = {0xD5, 0x5E, 0x00},  /* Vermillion - distinct from blue */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HORIZONTAL_RULE] = (struct style){
+		.fg = {0xF0, 0xE4, 0x42},  /* Yellow */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_ESCAPE] = (struct style){
+		.fg = {0xA0, 0xA0, 0xA0},  /* Gray */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_DIM
+	};
+	t.syntax[SYNTAX_MD_TABLE] = (struct style){
+		.fg = {0x56, 0xB4, 0xE9},  /* Sky blue */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_TABLE_SEPARATOR] = (struct style){
+		.fg = {0x60, 0x60, 0x60},  /* Dark gray - subtle */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_DIM
+	};
+	t.syntax[SYNTAX_MD_TABLE_HEADER] = (struct style){
+		.fg = {0xE6, 0x9F, 0x00},  /* Orange - matches bold */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_TASK_MARKER] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Bluish green */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_BOLD
+	};
+
 	/* Syntax backgrounds not explicitly set */
 	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {
 		t.syntax_bg_set[i] = false;
@@ -838,6 +954,119 @@ struct theme theme_create_mono_white(void)
 	};
 	t.syntax[SYNTAX_ESCAPE] = (struct style){
 		.fg = {0x30, 0x30, 0x30},
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+
+	/* Markdown syntax highlighting (light theme) - color blind friendly palette
+	 * Based on Wong's colorblind-safe palette, darkened for light backgrounds. */
+	t.syntax[SYNTAX_MD_HEADER_1] = (struct style){
+		.fg = {0x00, 0x72, 0xB2},  /* Dark blue - most prominent */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD | ATTR_UNDERLINE
+	};
+	t.syntax[SYNTAX_MD_HEADER_2] = (struct style){
+		.fg = {0x00, 0x72, 0xB2},  /* Dark blue */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HEADER_3] = (struct style){
+		.fg = {0xD5, 0x5E, 0x00},  /* Vermilion */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HEADER_4] = (struct style){
+		.fg = {0xD5, 0x5E, 0x00},  /* Vermilion - no bold */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_HEADER_5] = (struct style){
+		.fg = {0x60, 0x60, 0x60},  /* Gray */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HEADER_6] = (struct style){
+		.fg = {0x70, 0x70, 0x70},  /* Lighter gray */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_BOLD] = (struct style){
+		.fg = {0xD5, 0x5E, 0x00},  /* Vermilion - contrasts with blue */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_ITALIC] = (struct style){
+		.fg = {0x88, 0x56, 0x78},  /* Muted reddish purple */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_ITALIC
+	};
+	t.syntax[SYNTAX_MD_BOLD_ITALIC] = (struct style){
+		.fg = {0x94, 0x40, 0x60},  /* Darker reddish purple */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD | ATTR_ITALIC
+	};
+	t.syntax[SYNTAX_MD_CODE_SPAN] = (struct style){
+		.fg = {0x40, 0x40, 0x40},  /* Dark gray */
+		.bg = {0xE8, 0xE8, 0xE8},  /* Light gray background */
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_CODE_BLOCK] = (struct style){
+		.fg = {0x40, 0x40, 0x40},  /* Dark gray */
+		.bg = {0xE8, 0xE8, 0xE8},  /* Light gray background */
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_LINK_TEXT] = (struct style){
+		.fg = {0x00, 0x72, 0xB2},  /* Dark blue - same as headers */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_UNDERLINE
+	};
+	t.syntax[SYNTAX_MD_LINK_URL] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Bluish green - distinct from link text */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_IMAGE] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Bluish green */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_BLOCKQUOTE] = (struct style){
+		.fg = {0x60, 0x60, 0x70},  /* Dark gray with slight blue */
+		.bg = {0xF0, 0xF0, 0xF4},  /* Very light gray-blue */
+		.attr = ATTR_ITALIC
+	};
+	t.syntax[SYNTAX_MD_LIST_MARKER] = (struct style){
+		.fg = {0xD5, 0x5E, 0x00},  /* Vermilion - same as bold */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_HORIZONTAL_RULE] = (struct style){
+		.fg = {0x80, 0x80, 0x80},  /* Medium gray */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_ESCAPE] = (struct style){
+		.fg = {0x50, 0x50, 0x50},  /* Dark gray */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_TABLE] = (struct style){
+		.fg = {0x00, 0x72, 0xB2},  /* Dark blue */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_TABLE_SEPARATOR] = (struct style){
+		.fg = {0x90, 0x90, 0x90},  /* Light gray - subtle */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_DIM
+	};
+	t.syntax[SYNTAX_MD_TABLE_HEADER] = (struct style){
+		.fg = {0xD5, 0x5E, 0x00},  /* Vermilion - matches bold */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_BOLD
+	};
+	t.syntax[SYNTAX_MD_TASK_MARKER] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Bluish green */
 		.bg = {0xF8, 0xF8, 0xF8},
 		.attr = ATTR_BOLD
 	};
@@ -1409,6 +1638,306 @@ struct theme *theme_parse_file(const char *filepath)
 		}
 		else if (strcmp(key, "syntax_escape_attr") == 0) {
 			t->syntax[SYNTAX_ESCAPE].attr = attr_parse(value);
+		}
+
+		/* Markdown syntax - Headers */
+		else if (strcmp(key, "syntax_md_header_1") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_1].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_1_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_1].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_1_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_1].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_HEADER_1] = true;
+		}
+		else if (strcmp(key, "syntax_md_header_1_attr") == 0) {
+			t->syntax[SYNTAX_MD_HEADER_1].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_header_2") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_2].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_2_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_2].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_2_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_2].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_HEADER_2] = true;
+		}
+		else if (strcmp(key, "syntax_md_header_2_attr") == 0) {
+			t->syntax[SYNTAX_MD_HEADER_2].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_header_3") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_3].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_3_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_3].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_3_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_3].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_HEADER_3] = true;
+		}
+		else if (strcmp(key, "syntax_md_header_3_attr") == 0) {
+			t->syntax[SYNTAX_MD_HEADER_3].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_header_4") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_4].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_4_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_4].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_4_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_4].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_HEADER_4] = true;
+		}
+		else if (strcmp(key, "syntax_md_header_4_attr") == 0) {
+			t->syntax[SYNTAX_MD_HEADER_4].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_header_5") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_5].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_5_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_5].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_5_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_5].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_HEADER_5] = true;
+		}
+		else if (strcmp(key, "syntax_md_header_5_attr") == 0) {
+			t->syntax[SYNTAX_MD_HEADER_5].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_header_6") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_6].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_6_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_6].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_header_6_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HEADER_6].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_HEADER_6] = true;
+		}
+		else if (strcmp(key, "syntax_md_header_6_attr") == 0) {
+			t->syntax[SYNTAX_MD_HEADER_6].attr = attr_parse(value);
+		}
+
+		/* Markdown syntax - Text formatting */
+		else if (strcmp(key, "syntax_md_bold") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BOLD].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_bold_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BOLD].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_bold_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BOLD].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_BOLD] = true;
+		}
+		else if (strcmp(key, "syntax_md_bold_attr") == 0) {
+			t->syntax[SYNTAX_MD_BOLD].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_italic") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_ITALIC].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_italic_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_ITALIC].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_italic_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_ITALIC].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_ITALIC] = true;
+		}
+		else if (strcmp(key, "syntax_md_italic_attr") == 0) {
+			t->syntax[SYNTAX_MD_ITALIC].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_bold_italic") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BOLD_ITALIC].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_bold_italic_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BOLD_ITALIC].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_bold_italic_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BOLD_ITALIC].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_BOLD_ITALIC] = true;
+		}
+		else if (strcmp(key, "syntax_md_bold_italic_attr") == 0) {
+			t->syntax[SYNTAX_MD_BOLD_ITALIC].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_escape") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_ESCAPE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_escape_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_ESCAPE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_escape_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_ESCAPE].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_ESCAPE] = true;
+		}
+		else if (strcmp(key, "syntax_md_escape_attr") == 0) {
+			t->syntax[SYNTAX_MD_ESCAPE].attr = attr_parse(value);
+		}
+
+		/* Markdown syntax - Code */
+		else if (strcmp(key, "syntax_md_code_span") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_SPAN].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_code_span_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_SPAN].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_code_span_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_SPAN].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_CODE_SPAN] = true;
+		}
+		else if (strcmp(key, "syntax_md_code_span_attr") == 0) {
+			t->syntax[SYNTAX_MD_CODE_SPAN].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_code_block") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_BLOCK].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_code_block_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_BLOCK].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_code_block_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_BLOCK].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_CODE_BLOCK] = true;
+		}
+		else if (strcmp(key, "syntax_md_code_block_attr") == 0) {
+			t->syntax[SYNTAX_MD_CODE_BLOCK].attr = attr_parse(value);
+		}
+
+		/* Markdown syntax - Links and images */
+		else if (strcmp(key, "syntax_md_link_text") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LINK_TEXT].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_link_text_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LINK_TEXT].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_link_text_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LINK_TEXT].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_LINK_TEXT] = true;
+		}
+		else if (strcmp(key, "syntax_md_link_text_attr") == 0) {
+			t->syntax[SYNTAX_MD_LINK_TEXT].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_link_url") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LINK_URL].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_link_url_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LINK_URL].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_link_url_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LINK_URL].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_LINK_URL] = true;
+		}
+		else if (strcmp(key, "syntax_md_link_url_attr") == 0) {
+			t->syntax[SYNTAX_MD_LINK_URL].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_image") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_IMAGE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_image_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_IMAGE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_image_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_IMAGE].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_IMAGE] = true;
+		}
+		else if (strcmp(key, "syntax_md_image_attr") == 0) {
+			t->syntax[SYNTAX_MD_IMAGE].attr = attr_parse(value);
+		}
+
+		/* Markdown syntax - Block elements */
+		else if (strcmp(key, "syntax_md_blockquote") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BLOCKQUOTE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_blockquote_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BLOCKQUOTE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_blockquote_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_BLOCKQUOTE].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_BLOCKQUOTE] = true;
+		}
+		else if (strcmp(key, "syntax_md_blockquote_attr") == 0) {
+			t->syntax[SYNTAX_MD_BLOCKQUOTE].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_list_marker") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LIST_MARKER].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_list_marker_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LIST_MARKER].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_list_marker_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_LIST_MARKER].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_LIST_MARKER] = true;
+		}
+		else if (strcmp(key, "syntax_md_list_marker_attr") == 0) {
+			t->syntax[SYNTAX_MD_LIST_MARKER].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_horizontal_rule") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HORIZONTAL_RULE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_horizontal_rule_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HORIZONTAL_RULE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_horizontal_rule_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_HORIZONTAL_RULE].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_HORIZONTAL_RULE] = true;
+		}
+		else if (strcmp(key, "syntax_md_horizontal_rule_attr") == 0) {
+			t->syntax[SYNTAX_MD_HORIZONTAL_RULE].attr = attr_parse(value);
+		}
+
+		/* Markdown syntax - Tables */
+		else if (strcmp(key, "syntax_md_table") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_table_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_table_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_TABLE] = true;
+		}
+		else if (strcmp(key, "syntax_md_table_attr") == 0) {
+			t->syntax[SYNTAX_MD_TABLE].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_table_separator") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE_SEPARATOR].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_table_separator_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE_SEPARATOR].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_table_separator_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE_SEPARATOR].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_TABLE_SEPARATOR] = true;
+		}
+		else if (strcmp(key, "syntax_md_table_separator_attr") == 0) {
+			t->syntax[SYNTAX_MD_TABLE_SEPARATOR].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_table_header") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE_HEADER].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_table_header_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE_HEADER].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_table_header_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TABLE_HEADER].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_TABLE_HEADER] = true;
+		}
+		else if (strcmp(key, "syntax_md_table_header_attr") == 0) {
+			t->syntax[SYNTAX_MD_TABLE_HEADER].attr = attr_parse(value);
+		}
+
+		/* Markdown syntax - Task lists */
+		else if (strcmp(key, "syntax_md_task_marker") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TASK_MARKER].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_task_marker_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TASK_MARKER].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_task_marker_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_TASK_MARKER].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_TASK_MARKER] = true;
+		}
+		else if (strcmp(key, "syntax_md_task_marker_attr") == 0) {
+			t->syntax[SYNTAX_MD_TASK_MARKER].attr = attr_parse(value);
 		}
 	}
 

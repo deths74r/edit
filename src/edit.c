@@ -4567,7 +4567,17 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				/* Output all codepoints in the grapheme cluster */
 				for (uint32_t gi = cell_index; gi < grapheme_end && gi < line->cell_count; gi++) {
 					char utf8_buffer[UTFLITE_MAX_BYTES];
-					int bytes = utflite_encode(line->cells[gi].codepoint, utf8_buffer);
+					uint32_t output_codepoint = line->cells[gi].codepoint;
+
+					/* Horizontal rule render-time substitution */
+					if (line->cells[gi].syntax == SYNTAX_MD_HORIZONTAL_RULE) {
+						if (output_codepoint == '-' || output_codepoint == '*' ||
+						    output_codepoint == '_') {
+							output_codepoint = 0x2500;  /* ─ BOX DRAWINGS LIGHT HORIZONTAL */
+						}
+					}
+
+					int bytes = utflite_encode(output_codepoint, utf8_buffer);
 					output_buffer_append(output, utf8_buffer, bytes);
 				}
 				rendered_width += width;
