@@ -228,4 +228,11 @@ bool md_extract_link_url(struct line *line, uint32_t cursor_col,
  */
 void md_update_link_preview(void);
 
+/*
+ * Check if a column is inside a task checkbox marker.
+ * Returns true if the column is on [, ], space, x, or X of a task marker.
+ * Sets checkbox_col to the column of the '[' character.
+ */
+bool md_is_task_checkbox(struct line *line, uint32_t column, uint32_t *checkbox_col);
+
 #endif /* EDIT_SYNTAX_H */

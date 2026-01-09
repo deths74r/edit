@@ -3200,6 +3200,43 @@ static uint32_t calculate_adaptive_scroll(int direction)
 }
 
 /*
+ * Toggle a task checkbox at the given row/column.
+ * Changes [ ] to [x] or [x]/[X] to [ ].
+ */
+static void editor_toggle_task_checkbox(uint32_t row, uint32_t checkbox_col)
+{
+	if (row >= editor.buffer.line_count)
+		return;
+
+	struct line *line = &editor.buffer.lines[row];
+	line_warm(line, &editor.buffer);
+
+	/* checkbox_col points to '[', inner char is at checkbox_col + 1 */
+	uint32_t inner_col = checkbox_col + 1;
+	if (inner_col >= line->cell_count)
+		return;
+
+	uint32_t inner_cp = line->cells[inner_col].codepoint;
+
+	/* Toggle: space -> 'x', x/X -> space */
+	if (inner_cp == ' ') {
+		line->cells[inner_col].codepoint = 'x';
+	} else if (inner_cp == 'x' || inner_cp == 'X') {
+		line->cells[inner_col].codepoint = ' ';
+	} else {
+		return;  /* Not a valid checkbox */
+	}
+
+	/* Update line state */
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
+	neighbor_compute_line(line);
+	syntax_highlight_line(line, &editor.buffer, row);
+	line_invalidate_wrap_cache(line);
+
+	editor.buffer.is_modified = true;
+}
+
+/*
  * Handle a mouse event by updating cursor position and selection state.
  * Handles click, drag, scroll, and multi-click for word/line selection.
  */
@@ -3260,9 +3297,17 @@ void editor_handle_mouse(struct mouse_input *mouse)
 			last_click_col = cell_col;
 
 			if (click_count == 2) {
-				/* Double-click: select word using neighbor layer */
-				editor.cursor_row = file_row;
-				editor_select_word(file_row, cell_col);
+				/* Check if clicking on a task checkbox */
+				struct line *line = &editor.buffer.lines[file_row];
+				uint32_t checkbox_col;
+				if (syntax_is_markdown_file(editor.buffer.filename) &&
+				    md_is_task_checkbox(line, cell_col, &checkbox_col)) {
+					editor_toggle_task_checkbox(file_row, checkbox_col);
+				} else {
+					/* Double-click: select word using neighbor layer */
+					editor.cursor_row = file_row;
+					editor_select_word(file_row, cell_col);
+				}
 			} else if (click_count >= 3) {
 				/* Triple-click: select entire line */
 				editor_select_line(file_row);
@@ -4414,6 +4459,12 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	uint32_t reveal_end = 0;
 	if (editor.hybrid_mode && is_cursor_line &&
 	    syntax_is_markdown_file(buffer->filename)) {
+		/* Ensure element cache is populated for HOT lines that were
+		 * highlighted before hybrid mode was enabled */
+		if (!line->md_elements || !line->md_elements->valid) {
+			md_compute_elements(line);
+			md_mark_hideable_cells(line);
+		}
 		md_should_reveal_element(line, editor.cursor_column, &reveal_start, &reveal_end);
 	}
 
@@ -4598,42 +4649,24 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 					char utf8_buffer[UTFLITE_MAX_BYTES];
 					uint32_t output_codepoint = line->cells[gi].codepoint;
 
-					/* Horizontal rule render-time substitution */
-					if (line->cells[gi].syntax == SYNTAX_MD_HORIZONTAL_RULE) {
-						if (output_codepoint == '-' || output_codepoint == '*' ||
-						    output_codepoint == '_') {
-							output_codepoint = 0x2500;  /* ─ BOX DRAWINGS LIGHT HORIZONTAL */
-						}
-					}
-
 					/* Hybrid mode substitutions */
 					if (editor.hybrid_mode) {
 						enum syntax_token gi_syntax = line->cells[gi].syntax;
+						bool in_reveal = (gi >= reveal_start && gi < reveal_end);
+
+						/* Horizontal rule: - * _ → box drawing horizontal */
+						if (gi_syntax == SYNTAX_MD_HORIZONTAL_RULE && !in_reveal) {
+							if (output_codepoint == '-' || output_codepoint == '*' ||
+							    output_codepoint == '_') {
+								output_codepoint = 0x2500;  /* ─ BOX DRAWINGS LIGHT HORIZONTAL */
+							}
+						}
 
 						/* List markers: - * + → bullet */
 						if (gi_syntax == SYNTAX_MD_LIST_MARKER) {
 							if (output_codepoint == '-' || output_codepoint == '*' ||
 							    output_codepoint == '+') {
 								output_codepoint = 0x2022;  /* • BULLET */
-							}
-						}
-
-						/* Task markers: [ ] → ☐, [x] → ☑ */
-						if (gi_syntax == SYNTAX_MD_TASK_MARKER) {
-							if (output_codepoint == '[') {
-								/* Check if next char is space or x */
-								if (gi + 1 < line->cell_count) {
-									uint32_t inner = line->cells[gi + 1].codepoint;
-									if (inner == ' ') {
-										output_codepoint = 0x2610;  /* ☐ BALLOT BOX */
-									} else if (inner == 'x' || inner == 'X') {
-										output_codepoint = 0x2611;  /* ☑ BALLOT BOX WITH CHECK */
-									}
-								}
-							} else if (output_codepoint == ' ' || output_codepoint == 'x' ||
-							           output_codepoint == 'X' || output_codepoint == ']') {
-								/* Skip inner characters of task marker */
-								continue;
 							}
 						}
 

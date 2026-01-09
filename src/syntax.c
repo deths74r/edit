@@ -1371,6 +1371,10 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 
 		if (is_rule && count >= 3) {
 			md_mark_to_end(line, 0, SYNTAX_MD_HORIZONTAL_RULE);
+			if (editor.hybrid_mode) {
+				md_compute_elements(line);
+				md_mark_hideable_cells(line);
+			}
 			return;
 		}
 	}
@@ -1563,6 +1567,7 @@ static bool md_is_tracked_element(uint16_t syntax)
 	case SYNTAX_MD_HEADER_4:
 	case SYNTAX_MD_HEADER_5:
 	case SYNTAX_MD_HEADER_6:
+	case SYNTAX_MD_HORIZONTAL_RULE:
 		return true;
 	default:
 		return false;
@@ -1705,7 +1710,7 @@ struct md_element *md_find_element_at(struct line *line, uint32_t column)
 
 	for (uint16_t i = 0; i < line->md_elements->count; i++) {
 		struct md_element *elem = &line->md_elements->elements[i];
-		if (column >= elem->start_col && column < elem->end_col)
+		if (column >= elem->start_col && column <= elem->end_col)
 			return elem;
 	}
 	return NULL;
@@ -1714,17 +1719,39 @@ struct md_element *md_find_element_at(struct line *line, uint32_t column)
 /*
  * Check if cursor is in an element that should be revealed.
  * If so, returns the reveal range in start/end.
+ * For links, expands to include both LINK_TEXT and LINK_URL parts.
  */
 bool md_should_reveal_element(struct line *line, uint32_t cursor_col,
 			      uint32_t *reveal_start, uint32_t *reveal_end)
 {
 	struct md_element *elem = md_find_element_at(line, cursor_col);
-	if (elem) {
-		*reveal_start = elem->start_col;
-		*reveal_end = elem->end_col;
-		return true;
+	if (!elem)
+		return false;
+
+	*reveal_start = elem->start_col;
+	*reveal_end = elem->end_col;
+
+	/* For links, expand to include both text and URL parts */
+	if (elem->syntax_type == SYNTAX_MD_LINK_TEXT ||
+	    elem->syntax_type == SYNTAX_MD_LINK_URL) {
+		/* Search for adjacent link elements to expand range */
+		for (uint16_t i = 0; i < line->md_elements->count; i++) {
+			struct md_element *other = &line->md_elements->elements[i];
+			if (other->syntax_type == SYNTAX_MD_LINK_TEXT ||
+			    other->syntax_type == SYNTAX_MD_LINK_URL) {
+				/* Check if adjacent (end of one == start of other) */
+				if (other->end_col == *reveal_start ||
+				    other->start_col == *reveal_end) {
+					if (other->start_col < *reveal_start)
+						*reveal_start = other->start_col;
+					if (other->end_col > *reveal_end)
+						*reveal_end = other->end_col;
+				}
+			}
+		}
 	}
-	return false;
+
+	return true;
 }
 
 /*
@@ -1838,4 +1865,37 @@ void md_update_link_preview(void)
 	                        sizeof(editor.link_url_preview))) {
 		editor.link_preview_active = true;
 	}
+}
+
+/*
+ * Check if a column is inside a task checkbox marker.
+ * Returns true if the column is on [, ], space, x, or X of a task marker.
+ * Sets checkbox_col to the column of the '[' character.
+ */
+bool md_is_task_checkbox(struct line *line, uint32_t column, uint32_t *checkbox_col)
+{
+	if (!line || column >= line->cell_count)
+		return false;
+
+	/* Check if cell has task marker syntax */
+	if (line->cells[column].syntax != SYNTAX_MD_TASK_MARKER)
+		return false;
+
+	/* Scan backwards to find the '[' character */
+	uint32_t bracket_col = column;
+	while (bracket_col > 0 &&
+	       line->cells[bracket_col].syntax == SYNTAX_MD_TASK_MARKER &&
+	       line->cells[bracket_col].codepoint != '[') {
+		bracket_col--;
+	}
+
+	/* Verify we found the opening bracket */
+	if (line->cells[bracket_col].codepoint != '[' ||
+	    line->cells[bracket_col].syntax != SYNTAX_MD_TASK_MARKER)
+		return false;
+
+	if (checkbox_col)
+		*checkbox_col = bracket_col;
+
+	return true;
 }
