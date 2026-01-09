@@ -2388,6 +2388,187 @@ void editor_delete_selection(void)
 	selection_clear();
 }
 
+
+/*
+ * Check if cursor is in a table and move to next cell.
+ * Returns true if navigation happened.
+ */
+static bool editor_table_next_cell(void)
+{
+	if (!syntax_is_markdown_file(editor.buffer.filename))
+		return false;
+	uint32_t start_row, end_row, separator_row;
+	if (!table_detect_bounds(&editor.buffer, editor.cursor_row,
+				 &start_row, &end_row, &separator_row))
+		return false;
+	/* Clear selection before table navigation */
+	selection_clear();
+	/* Reformat table before navigating */
+	table_reformat(&editor.buffer, editor.cursor_row);
+	struct line *line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(line, &editor.buffer);
+	/* Find first pipe at or after cursor - that ends current cell */
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		if (line->cells[i].codepoint == '|' && i >= editor.cursor_column) {
+			/* This pipe ends current cell, move to next cell */
+			if (i + 1 < line->cell_count) {
+				uint32_t next_cell_start = i + 1;
+				/* Skip leading space */
+				if (next_cell_start < line->cell_count &&
+				    line->cells[next_cell_start].codepoint == ' ')
+					next_cell_start++;
+				editor.cursor_column = next_cell_start;
+				return true;
+			}
+			break;  /* No next cell, try next row */
+		}
+	}
+	/* No next cell on this row - try next content row */
+	uint32_t next_row = editor.cursor_row + 1;
+	if (next_row == separator_row)
+		next_row++;  /* Skip separator */
+
+	if (next_row <= end_row) {
+		editor.cursor_row = next_row;
+		line = &editor.buffer.lines[editor.cursor_row];
+		line_warm(line, &editor.buffer);
+		/* Find first cell (after first |) */
+		for (uint32_t i = 0; i < line->cell_count; i++) {
+			if (line->cells[i].codepoint == '|') {
+				editor.cursor_column = i + 1;
+				/* Skip leading space */
+				if (editor.cursor_column < line->cell_count &&
+				    line->cells[editor.cursor_column].codepoint == ' ')
+					editor.cursor_column++;
+				return true;
+			}
+		}
+	}
+
+	/* At end of table - create a new row */
+	/* Count columns from current line */
+	line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(line, &editor.buffer);
+	uint32_t col_count = 0;
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		if (line->cells[i].codepoint == '|')
+			col_count++;
+	}
+	if (col_count > 1)
+		col_count--;  /* N pipes = N-1 columns */
+
+	if (col_count == 0)
+		return true;
+
+	/* Insert new line after current row */
+	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+
+	/* Move to end of current line and insert newline */
+	editor.cursor_column = line->cell_count;
+	undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	int ret = buffer_insert_newline_checked(&editor.buffer, editor.cursor_row,
+	                                         editor.cursor_column);
+	if (ret) {
+		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		return true;
+	}
+
+	/* Move to new line */
+	editor.cursor_row++;
+	editor.cursor_column = 0;
+
+	/* Build new row: | cell | cell | ... | */
+	for (uint32_t col = 0; col < col_count; col++) {
+		/* Insert | */
+		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, '|');
+		buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
+		                                      editor.cursor_column, '|');
+		editor.cursor_column++;
+		/* Insert space */
+		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, ' ');
+		buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
+		                                      editor.cursor_column, ' ');
+		editor.cursor_column++;
+	}
+	/* Final | */
+	undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, '|');
+	buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
+	                                      editor.cursor_column, '|');
+
+	/* Reformat to match column widths */
+	table_reformat(&editor.buffer, editor.cursor_row);
+
+	/* Move cursor to first cell */
+	line = &editor.buffer.lines[editor.cursor_row];
+	editor.cursor_column = 2;  /* After | and space */
+
+	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	return true;
+}
+/*
+ * Check if cursor is in a table and move to previous cell.
+ * Returns true if navigation happened.
+ */
+static bool editor_table_prev_cell(void)
+{
+	if (!syntax_is_markdown_file(editor.buffer.filename))
+		return false;
+	uint32_t start_row, end_row, separator_row;
+	if (!table_detect_bounds(&editor.buffer, editor.cursor_row,
+				 &start_row, &end_row, &separator_row))
+		return false;
+	/* Clear selection before table navigation */
+	selection_clear();
+	/* Reformat table before navigating */
+	table_reformat(&editor.buffer, editor.cursor_row);
+	struct line *line = &editor.buffer.lines[editor.cursor_row];
+	line_warm(line, &editor.buffer);
+	/* Find pipe before cursor */
+	int32_t prev_pipe = -1;
+	int32_t prev_prev_pipe = -1;
+	for (uint32_t i = 0; i < line->cell_count && i < editor.cursor_column; i++) {
+		if (line->cells[i].codepoint == '|') {
+			prev_prev_pipe = prev_pipe;
+			prev_pipe = i;
+		}
+	}
+	if (prev_prev_pipe >= 0) {
+		/* Move to previous cell */
+		editor.cursor_column = prev_prev_pipe + 1;
+		/* Skip leading space */
+		if (editor.cursor_column < line->cell_count &&
+		    line->cells[editor.cursor_column].codepoint == ' ')
+			editor.cursor_column++;
+		return true;
+	}
+	/* At first cell - try previous content row */
+	uint32_t prev_row = editor.cursor_row - 1;
+	if (prev_row == separator_row && prev_row > start_row)
+		prev_row--;  /* Skip separator */
+	if (prev_row >= start_row && prev_row != separator_row) {
+		editor.cursor_row = prev_row;
+		line = &editor.buffer.lines[editor.cursor_row];
+		line_warm(line, &editor.buffer);
+		/* Find last cell (before last |) */
+		int32_t last_pipe = -1;
+		int32_t second_last_pipe = -1;
+		for (uint32_t i = 0; i < line->cell_count; i++) {
+			if (line->cells[i].codepoint == '|') {
+				second_last_pipe = last_pipe;
+				last_pipe = i;
+			}
+		}
+		if (second_last_pipe >= 0) {
+			editor.cursor_column = second_last_pipe + 1;
+			/* Skip leading space */
+			if (editor.cursor_column < line->cell_count &&
+			    line->cells[editor.cursor_column].codepoint == ' ')
+				editor.cursor_column++;
+			return true;
+		}
+	}
+	return true;  /* Was in table but at start */
+}
 /*
  * Insert a character at the current cursor position and advance the
  * cursor. If there's an active selection, deletes it first. Resets
@@ -2486,6 +2667,65 @@ static void editor_insert_newline(void)
 	}
 	editor.cursor_row++;
 	editor.cursor_column = 0;
+
+	/* Check if previous line was a table separator - if so, complete the table */
+	if (syntax_is_markdown_file(editor.buffer.filename) && editor.cursor_row > 0) {
+		struct line *prev_line = &editor.buffer.lines[editor.cursor_row - 1];
+		line_warm(prev_line, &editor.buffer);
+
+		if (md_is_table_separator(prev_line)) {
+			uint32_t start_row, end_row, separator_row;
+			if (table_detect_bounds(&editor.buffer, editor.cursor_row - 1,
+						&start_row, &end_row, &separator_row)) {
+				/* Valid table detected - reformat it */
+				table_reformat(&editor.buffer, editor.cursor_row - 1);
+
+				/* Count columns from separator row */
+				prev_line = &editor.buffer.lines[separator_row];
+				line_warm(prev_line, &editor.buffer);
+				uint32_t col_count = 0;
+				for (uint32_t i = 0; i < prev_line->cell_count; i++) {
+					if (prev_line->cells[i].codepoint == '|')
+						col_count++;
+				}
+				if (col_count > 1)
+					col_count--;  /* N pipes = N-1 columns */
+
+				if (col_count > 0) {
+					/* Build new content row on current line */
+					/* Insert | at start */
+					undo_record_insert_char(&editor.buffer, editor.cursor_row, 0, '|');
+					buffer_insert_cell_at_column_checked(&editor.buffer,
+									     editor.cursor_row, 0, '|');
+
+					/* For each column, insert space + | */
+					uint32_t pos = 1;
+					for (uint32_t c = 0; c < col_count; c++) {
+						undo_record_insert_char(&editor.buffer,
+									editor.cursor_row, pos, ' ');
+						buffer_insert_cell_at_column_checked(&editor.buffer,
+										     editor.cursor_row,
+										     pos++, ' ');
+						undo_record_insert_char(&editor.buffer,
+									editor.cursor_row, pos, '|');
+						buffer_insert_cell_at_column_checked(&editor.buffer,
+										     editor.cursor_row,
+										     pos++, '|');
+					}
+
+					/* Reformat to get proper column widths */
+					table_reformat(&editor.buffer, editor.cursor_row);
+
+					/* Position cursor in first cell (after | and space) */
+					editor.cursor_column = 2;
+
+					undo_end_group(&editor.buffer, editor.cursor_row,
+						       editor.cursor_column);
+					return;  /* Skip auto-indent */
+				}
+			}
+		}
+	}
 
 	/* Insert auto-indent characters on the new line */
 	for (uint32_t i = 0; i < indent_count; i++) {
@@ -6707,16 +6947,19 @@ void editor_process_keypress(void)
 			break;
 
 		case '\t':
-			/* Tab indents when selection active, otherwise inserts tab */
+			/* Tab navigates in tables, indents with selection, otherwise inserts tab */
 			if (editor.selection_active && !selection_is_empty()) {
 				editor_indent_lines();
-			} else {
+			} else if (!editor_table_next_cell()) {
 				editor_insert_character('\t');
 			}
 			break;
 
 		case KEY_SHIFT_TAB:
-			editor_outdent_lines();
+			/* Shift+Tab navigates back in tables, otherwise outdents */
+			if (!editor_table_prev_cell()) {
+				editor_outdent_lines();
+			}
 			break;
 
 		default:

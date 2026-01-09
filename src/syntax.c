@@ -929,7 +929,7 @@ static bool md_is_escapable(uint32_t cp)
  * Check if line is a table separator (|---|:---:|---:|).
  * Returns true if line contains only |, -, :, and spaces with at least one -.
  */
-static bool md_is_table_separator(struct line *line)
+bool md_is_table_separator(struct line *line)
 {
 	if (line == NULL || line->cell_count == 0) {
 		return false;
@@ -950,6 +950,527 @@ static bool md_is_table_separator(struct line *line)
 		}
 	}
 	return has_dash;
+}
+
+/*****************************************************************************
+ * Table Auto-Formatting
+ *****************************************************************************/
+
+/*
+ * Check if a line is part of a table (starts with |).
+ */
+static bool table_is_table_line(struct line *line)
+{
+	if (!line || line->cell_count == 0)
+		return false;
+	return line->cells[0].codepoint == '|';
+}
+
+/*
+ * Detect table bounds starting from a given row.
+ * Returns true if row is in a table, sets start_row, end_row, separator_row.
+ */
+bool table_detect_bounds(struct buffer *buffer, uint32_t row,
+			 uint32_t *start_row, uint32_t *end_row,
+			 uint32_t *separator_row)
+{
+	if (row >= buffer->line_count)
+		return false;
+
+	struct line *line = &buffer->lines[row];
+	line_warm(line, buffer);
+
+	if (!table_is_table_line(line))
+		return false;
+
+	/* Find start of table (walk up) */
+	uint32_t start = row;
+	while (start > 0) {
+		struct line *prev = &buffer->lines[start - 1];
+		line_warm(prev, buffer);
+		if (!table_is_table_line(prev))
+			break;
+		start--;
+	}
+
+	/* Find end of table (walk down) */
+	uint32_t end = row;
+	while (end + 1 < buffer->line_count) {
+		struct line *next = &buffer->lines[end + 1];
+		line_warm(next, buffer);
+		if (!table_is_table_line(next))
+			break;
+		end++;
+	}
+
+	/* Find separator row (should be second row typically) */
+	uint32_t sep = UINT32_MAX;
+	for (uint32_t r = start; r <= end; r++) {
+		struct line *l = &buffer->lines[r];
+		if (md_is_table_separator(l)) {
+			sep = r;
+			break;
+		}
+	}
+
+	/* Must have a separator row to be a valid table */
+	if (sep == UINT32_MAX)
+		return false;
+
+	*start_row = start;
+	*end_row = end;
+	*separator_row = sep;
+	return true;
+}
+
+/*
+ * Count pipe characters in a line (for column counting).
+ */
+static uint16_t table_count_pipes(struct line *line)
+{
+	uint16_t count = 0;
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		if (line->cells[i].codepoint == '|')
+			count++;
+	}
+	return count;
+}
+
+/*
+ * Parse alignment from separator row for a specific column.
+ * column_index is 0-based.
+ */
+static enum table_alignment table_parse_alignment(struct line *line, uint16_t column_index)
+{
+	uint16_t current_col = 0;
+	uint32_t cell_start = 0;
+	bool in_cell = false;
+
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		if (line->cells[i].codepoint == '|') {
+			if (in_cell && current_col == column_index) {
+				/* Found the column, check alignment */
+				bool left_colon = false;
+				bool right_colon = false;
+
+				/* Check first non-space char after cell_start */
+				for (uint32_t j = cell_start; j < i; j++) {
+					uint32_t c = line->cells[j].codepoint;
+					if (c == ':') {
+						left_colon = true;
+						break;
+					} else if (c != ' ') {
+						break;
+					}
+				}
+
+				/* Check last non-space char before i */
+				for (uint32_t j = i; j > cell_start; j--) {
+					uint32_t c = line->cells[j - 1].codepoint;
+					if (c == ':') {
+						right_colon = true;
+						break;
+					} else if (c != ' ') {
+						break;
+					}
+				}
+
+				if (left_colon && right_colon)
+					return TABLE_ALIGN_CENTER;
+				else if (right_colon)
+					return TABLE_ALIGN_RIGHT;
+				else if (left_colon)
+					return TABLE_ALIGN_LEFT;
+				else
+					return TABLE_ALIGN_DEFAULT;
+			}
+			if (in_cell)
+				current_col++;
+			cell_start = i + 1;
+			in_cell = true;
+		}
+	}
+
+	return TABLE_ALIGN_DEFAULT;
+}
+
+/*
+ * Parse table structure and allocate table_info.
+ * Caller must free the returned struct and columns array.
+ */
+struct table_info *table_parse(struct buffer *buffer, uint32_t start_row,
+			       uint32_t end_row, uint32_t separator_row)
+{
+	struct table_info *info = calloc(1, sizeof(struct table_info));
+	if (!info)
+		return NULL;
+
+	info->start_row = start_row;
+	info->end_row = end_row;
+	info->separator_row = separator_row;
+
+	/* Count columns from separator row */
+	struct line *sep_line = &buffer->lines[separator_row];
+	line_warm(sep_line, buffer);
+	uint16_t pipes = table_count_pipes(sep_line);
+	info->column_count = (pipes > 1) ? pipes - 1 : 0;
+
+	if (info->column_count == 0) {
+		free(info);
+		return NULL;
+	}
+
+	/* Allocate columns */
+	info->columns = calloc(info->column_count, sizeof(struct table_column));
+	if (!info->columns) {
+		free(info);
+		return NULL;
+	}
+
+	/* Parse alignment for each column */
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		info->columns[col].align = table_parse_alignment(sep_line, col);
+		info->columns[col].width = 0;
+	}
+
+	return info;
+}
+
+/*
+ * Free a table_info struct.
+ */
+void table_info_free(struct table_info *info)
+{
+	if (info) {
+		free(info->columns);
+		free(info);
+	}
+}
+
+/*
+ * Extract cell content from a line at given column index.
+ * Returns allocated string (caller must free) and sets content_width.
+ * content_width is the display width (grapheme-aware).
+ */
+static uint32_t *table_extract_cell(struct line *line, uint16_t column_index,
+				    uint32_t *content_length, uint32_t *content_width)
+{
+	uint16_t current_col = 0;
+	uint32_t cell_start = 0;
+	uint32_t cell_end = 0;
+	bool found = false;
+
+	/* Find the cell boundaries */
+	for (uint32_t i = 0; i < line->cell_count; i++) {
+		if (line->cells[i].codepoint == '|') {
+			if (current_col == column_index + 1) {
+				cell_end = i;
+				found = true;
+				break;
+			}
+			current_col++;
+			cell_start = i + 1;
+		}
+	}
+
+	if (!found) {
+		*content_length = 0;
+		*content_width = 0;
+		return NULL;
+	}
+
+	/* Trim ALL leading/trailing spaces to get pure content */
+	while (cell_start < cell_end && line->cells[cell_start].codepoint == ' ')
+		cell_start++;
+	while (cell_end > cell_start && line->cells[cell_end - 1].codepoint == ' ')
+		cell_end--;
+
+	uint32_t len = cell_end - cell_start;
+	if (len == 0) {
+		*content_length = 0;
+		*content_width = 0;
+		return NULL;
+	}
+
+	/* Allocate and copy codepoints */
+	uint32_t *content = malloc(len * sizeof(uint32_t));
+	if (!content) {
+		*content_length = 0;
+		*content_width = 0;
+		return NULL;
+	}
+
+	uint32_t width = 0;
+	for (uint32_t i = 0; i < len; i++) {
+		content[i] = line->cells[cell_start + i].codepoint;
+		/* Simple width calculation - ASCII is 1, wide chars are 2 */
+		uint32_t cp = content[i];
+		if (cp < 0x80) {
+			width += 1;
+		} else if ((cp >= 0x1100 && cp <= 0x115F) ||  /* Hangul Jamo */
+			   (cp >= 0x2E80 && cp <= 0x9FFF) ||  /* CJK */
+			   (cp >= 0xF900 && cp <= 0xFAFF) ||  /* CJK Compat */
+			   (cp >= 0xFE10 && cp <= 0xFE1F) ||  /* Vertical forms */
+			   (cp >= 0xFE30 && cp <= 0xFE6F) ||  /* CJK Compat Forms */
+			   (cp >= 0xFF00 && cp <= 0xFF60) ||  /* Fullwidth */
+			   (cp >= 0xFFE0 && cp <= 0xFFE6) ||  /* Fullwidth symbols */
+			   (cp >= 0x20000 && cp <= 0x2FFFF)) { /* CJK Ext */
+			width += 2;
+		} else {
+			width += 1;
+		}
+	}
+
+	*content_length = len;
+	*content_width = width;
+	return content;
+}
+
+/*
+ * Calculate maximum column widths across all rows in the table.
+ */
+void table_calculate_widths(struct buffer *buffer, struct table_info *info)
+{
+	/* Reset widths */
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		info->columns[col].width = 0;
+	}
+
+	/* Scan all rows except separator */
+	for (uint32_t row = info->start_row; row <= info->end_row; row++) {
+		if (row == info->separator_row)
+			continue;
+
+		struct line *line = &buffer->lines[row];
+		line_warm(line, buffer);
+
+		for (uint16_t col = 0; col < info->column_count; col++) {
+			uint32_t len, width;
+			uint32_t *content = table_extract_cell(line, col, &len, &width);
+			if (content) {
+				if (width > info->columns[col].width)
+					info->columns[col].width = width;
+				free(content);
+			}
+		}
+	}
+
+	/* Minimum width of 1 for empty columns */
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		if (info->columns[col].width == 0)
+			info->columns[col].width = 1;
+	}
+}
+
+/*
+ * Format a content row with proper alignment and spacing.
+ * Rebuilds the line's cells array.
+ */
+static void table_format_content_row(struct line *line, struct buffer *buffer,
+				     uint32_t row, struct table_info *info)
+{
+	/* Extract all cell contents first */
+	uint32_t **contents = calloc(info->column_count, sizeof(uint32_t *));
+	uint32_t *lengths = calloc(info->column_count, sizeof(uint32_t));
+	uint32_t *widths = calloc(info->column_count, sizeof(uint32_t));
+
+	if (!contents || !lengths || !widths) {
+		free(contents);
+		free(lengths);
+		free(widths);
+		return;
+	}
+
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		contents[col] = table_extract_cell(line, col, &lengths[col], &widths[col]);
+	}
+
+	/* Calculate total cells needed: | + (space + content + padding + space) * cols + | */
+	uint32_t total_cells = 1;  /* Leading | */
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		total_cells += 1;  /* Leading space */
+		total_cells += info->columns[col].width;  /* Content + padding */
+		total_cells += 1;  /* Trailing space */
+		total_cells += 1;  /* | */
+	}
+
+	/* Resize cells array */
+	struct cell *new_cells = calloc(total_cells, sizeof(struct cell));
+	if (!new_cells) {
+		for (uint16_t col = 0; col < info->column_count; col++)
+			free(contents[col]);
+		free(contents);
+		free(lengths);
+		free(widths);
+		return;
+	}
+
+	/* Build the new row */
+	uint32_t pos = 0;
+
+	/* Leading | */
+	new_cells[pos++].codepoint = '|';
+
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		uint32_t col_width = info->columns[col].width;
+		uint32_t content_width = widths[col];
+		uint32_t padding = col_width - content_width;
+
+		/* Leading space */
+		new_cells[pos++].codepoint = ' ';
+
+		/* Calculate left/right padding based on alignment */
+		uint32_t left_pad = 0, right_pad = 0;
+		switch (info->columns[col].align) {
+		case TABLE_ALIGN_DEFAULT:
+		case TABLE_ALIGN_LEFT:
+			right_pad = padding;
+			break;
+		case TABLE_ALIGN_RIGHT:
+			left_pad = padding;
+			break;
+		case TABLE_ALIGN_CENTER:
+			left_pad = padding / 2;
+			right_pad = padding - left_pad;
+			break;
+		}
+
+		/* Left padding */
+		for (uint32_t i = 0; i < left_pad; i++)
+			new_cells[pos++].codepoint = ' ';
+
+		/* Content */
+		for (uint32_t i = 0; i < lengths[col]; i++)
+			new_cells[pos++].codepoint = contents[col][i];
+
+		/* Right padding */
+		for (uint32_t i = 0; i < right_pad; i++)
+			new_cells[pos++].codepoint = ' ';
+
+		/* Trailing space */
+		new_cells[pos++].codepoint = ' ';
+
+		/* | */
+		new_cells[pos++].codepoint = '|';
+	}
+
+	/* Free old cells and install new ones */
+	free(line->cells);
+	line->cells = new_cells;
+	line->cell_count = pos;
+	line->cell_capacity = total_cells;
+
+	/* Mark line as modified */
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
+	neighbor_compute_line(line);
+	syntax_highlight_line(line, buffer, row);
+	line_invalidate_wrap_cache(line);
+
+	/* Cleanup */
+	for (uint16_t col = 0; col < info->column_count; col++)
+		free(contents[col]);
+	free(contents);
+	free(lengths);
+	free(widths);
+}
+
+/*
+ * Format the separator row with proper column widths.
+ */
+static void table_format_separator_row(struct line *line, struct buffer *buffer,
+				       uint32_t row, struct table_info *info)
+{
+	/* Calculate total cells: | + (:-...-:) * cols + | */
+	uint32_t total_cells = 1;  /* Leading | */
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		/* Each column: optional :, dashes (width), optional :, | */
+		total_cells += info->columns[col].width + 2;  /* dashes + 2 for possible colons */
+		total_cells += 1;  /* | */
+	}
+
+	struct cell *new_cells = calloc(total_cells, sizeof(struct cell));
+	if (!new_cells)
+		return;
+
+	uint32_t pos = 0;
+
+	/* Leading | */
+	new_cells[pos++].codepoint = '|';
+
+	for (uint16_t col = 0; col < info->column_count; col++) {
+		enum table_alignment align = info->columns[col].align;
+		uint32_t width = info->columns[col].width;
+
+		/* Left colon for center or left-explicit */
+		if (align == TABLE_ALIGN_CENTER || align == TABLE_ALIGN_LEFT) {
+			new_cells[pos++].codepoint = ':';
+		}
+
+		/* Dashes - adjust count based on colons */
+		uint32_t dash_count = width;
+		if (align == TABLE_ALIGN_CENTER)
+			dash_count = width;  /* Both colons are extra */
+		else if (align == TABLE_ALIGN_LEFT || align == TABLE_ALIGN_RIGHT)
+			dash_count = width + 1;  /* One colon, add a dash */
+		else  /* TABLE_ALIGN_DEFAULT */
+			dash_count = width + 2;  /* No colons, add two dashes */
+
+		for (uint32_t i = 0; i < dash_count; i++)
+			new_cells[pos++].codepoint = '-';
+
+		/* Right colon for center or right */
+		if (align == TABLE_ALIGN_CENTER || align == TABLE_ALIGN_RIGHT) {
+			new_cells[pos++].codepoint = ':';
+		}
+
+		/* | */
+		new_cells[pos++].codepoint = '|';
+	}
+
+	/* Free old cells and install new ones */
+	free(line->cells);
+	line->cells = new_cells;
+	line->cell_count = pos;
+	line->cell_capacity = total_cells;
+
+	/* Mark line as modified */
+	line_set_temperature(line, LINE_TEMPERATURE_HOT);
+	neighbor_compute_line(line);
+	syntax_highlight_line(line, buffer, row);
+	line_invalidate_wrap_cache(line);
+}
+
+/*
+ * Reformat an entire table starting from any row within it.
+ * Returns the cursor column adjustment needed.
+ */
+int32_t table_reformat(struct buffer *buffer, uint32_t row)
+{
+	uint32_t start_row, end_row, separator_row;
+
+	if (!table_detect_bounds(buffer, row, &start_row, &end_row, &separator_row))
+		return 0;
+
+	struct table_info *info = table_parse(buffer, start_row, end_row, separator_row);
+	if (!info)
+		return 0;
+
+	table_calculate_widths(buffer, info);
+
+	/* Format all rows */
+	for (uint32_t r = start_row; r <= end_row; r++) {
+		struct line *line = &buffer->lines[r];
+		line_warm(line, buffer);
+
+		if (r == separator_row) {
+			table_format_separator_row(line, buffer, r, info);
+		} else {
+			table_format_content_row(line, buffer, r, info);
+		}
+	}
+
+	table_info_free(info);
+	return 0;  /* TODO: Calculate cursor adjustment */
 }
 
 /*

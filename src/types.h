@@ -784,6 +784,33 @@ struct md_element_cache {
 };
 
 /*****************************************************************************
+ * Table Auto-Formatting
+ *****************************************************************************/
+
+/* Table column alignment parsed from separator row */
+enum table_alignment {
+	TABLE_ALIGN_DEFAULT,  /* No colons, default alignment */
+	TABLE_ALIGN_LEFT,     /* Explicit left colon :--- */
+	TABLE_ALIGN_CENTER,   /* Both colons :---: */
+	TABLE_ALIGN_RIGHT     /* Right colon ---: */
+};
+
+/* Per-column information for table formatting */
+struct table_column {
+	uint32_t width;              /* Content width (excluding padding/pipes) */
+	enum table_alignment align;  /* Alignment from separator row */
+};
+
+/* Table structure spanning multiple lines */
+struct table_info {
+	uint32_t start_row;          /* First row of table */
+	uint32_t end_row;            /* Last row (inclusive) */
+	uint32_t separator_row;      /* Row with |---|---| */
+	uint16_t column_count;       /* Number of columns */
+	struct table_column *columns; /* Array of column info */
+};
+
+/*****************************************************************************
  * Line Structure
  *****************************************************************************/
 

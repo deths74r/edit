@@ -235,4 +235,44 @@ void md_update_link_preview(void);
  */
 bool md_is_task_checkbox(struct line *line, uint32_t column, uint32_t *checkbox_col);
 
+/*****************************************************************************
+ * Table Auto-Formatting
+ *****************************************************************************/
+
+/*
+ * Check if a line is a table separator row (contains only |, -, :, space).
+ */
+bool md_is_table_separator(struct line *line);
+
+/*
+ * Detect table bounds starting from a given row.
+ * Returns true if row is in a table, sets start_row, end_row, separator_row.
+ */
+bool table_detect_bounds(struct buffer *buffer, uint32_t row,
+			 uint32_t *start_row, uint32_t *end_row,
+			 uint32_t *separator_row);
+
+/*
+ * Parse table structure and allocate table_info.
+ * Caller must free the returned struct with table_info_free().
+ */
+struct table_info *table_parse(struct buffer *buffer, uint32_t start_row,
+			       uint32_t end_row, uint32_t separator_row);
+
+/*
+ * Free a table_info struct.
+ */
+void table_info_free(struct table_info *info);
+
+/*
+ * Calculate maximum column widths across all rows in the table.
+ */
+void table_calculate_widths(struct buffer *buffer, struct table_info *info);
+
+/*
+ * Reformat an entire table starting from any row within it.
+ * Returns cursor column adjustment needed.
+ */
+int32_t table_reformat(struct buffer *buffer, uint32_t row);
+
 #endif /* EDIT_SYNTAX_H */
