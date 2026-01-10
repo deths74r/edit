@@ -1519,7 +1519,7 @@ static uint32_t md_parse_code_span(struct line *line, uint32_t pos)
 
 /*
  * Parse emphasis starting at pos. Returns end position.
- * Handles *, **, ***, _, __, ___.
+ * Handles *, **, ***, _, __, ___, ~~.
  */
 static uint32_t md_parse_emphasis(struct line *line, uint32_t pos)
 {
@@ -1528,7 +1528,7 @@ static uint32_t md_parse_emphasis(struct line *line, uint32_t pos)
 	}
 
 	uint32_t delim = line->cells[pos].codepoint;
-	if (delim != '*' && delim != '_') {
+	if (delim != '*' && delim != '_' && delim != '~') {
 		return pos;
 	}
 
@@ -1539,6 +1539,10 @@ static uint32_t md_parse_emphasis(struct line *line, uint32_t pos)
 	while (pos < line->cell_count && line->cells[pos].codepoint == delim) {
 		open_count++;
 		pos++;
+	}
+	/* Strikethrough requires exactly 2 tildes */
+	if (delim == '~' && open_count < 2) {
+		return start + 1;
 	}
 
 	/* Must be followed by non-space (left-flanking check) */
@@ -1566,7 +1570,11 @@ static uint32_t md_parse_emphasis(struct line *line, uint32_t pos)
 				enum syntax_token syntax;
 				uint32_t match_count;
 
-				if (open_count >= 3 && close_count >= 3) {
+				if (delim == '~') {
+					/* Strikethrough: ~~ */
+					syntax = SYNTAX_MD_STRIKETHROUGH;
+					match_count = 2;
+				} else if (open_count >= 3 && close_count >= 3) {
 					syntax = SYNTAX_MD_BOLD_ITALIC;
 					match_count = 3;
 				} else if (open_count >= 2 && close_count >= 2) {
@@ -1719,8 +1727,8 @@ static void md_parse_inline(struct line *line, uint32_t start, uint32_t end)
 			}
 		}
 
-		/* Emphasis */
-		if (cp == '*' || cp == '_') {
+		/* Emphasis and strikethrough */
+		if (cp == '*' || cp == '_' || cp == '~') {
 			uint32_t new_pos = md_parse_emphasis(line, pos);
 			if (new_pos > pos + 1) {
 				pos = new_pos;
@@ -1775,8 +1783,12 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 					count++;
 				}
 				if (count >= 3) {
-					/* This is a fence line */
-					md_mark_to_end(line, 0, SYNTAX_MD_CODE_BLOCK);
+					/* This is a closing fence */
+					md_mark_to_end(line, 0, SYNTAX_MD_CODE_FENCE_CLOSE);
+					if (editor.hybrid_mode) {
+						md_compute_elements(line);
+						md_mark_hideable_cells(line);
+					}
 					return;
 				}
 			}
@@ -1812,7 +1824,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 
 	uint32_t cp = line->cells[pos].codepoint;
 
-	/* Fenced code block start */
+	/* Fenced code block start (opening fence) */
 	if (cp == '`' || cp == '~') {
 		uint32_t count = 0;
 		uint32_t start = pos;
@@ -1821,7 +1833,11 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 			pos++;
 		}
 		if (count >= 3) {
-			md_mark_to_end(line, 0, SYNTAX_MD_CODE_BLOCK);
+			md_mark_to_end(line, 0, SYNTAX_MD_CODE_FENCE_OPEN);
+			if (editor.hybrid_mode) {
+				md_compute_elements(line);
+				md_mark_hideable_cells(line);
+			}
 			return;
 		}
 		pos = start;
@@ -1854,13 +1870,20 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 		pos = start;
 	}
 
-	/* Blockquote */
+	/* Blockquote (supports nesting: > > > text) */
 	if (cp == '>') {
 		uint32_t start = pos;
-		pos++;
-		/* Optional space after > */
-		if (pos < line->cell_count && line->cells[pos].codepoint == ' ') {
-			pos++;
+		/* Parse all > markers with optional spaces between them */
+		while (pos < line->cell_count) {
+			if (line->cells[pos].codepoint == '>') {
+				pos++;
+				/* Optional space after > */
+				if (pos < line->cell_count && line->cells[pos].codepoint == ' ') {
+					pos++;
+				}
+			} else {
+				break;
+			}
 		}
 		md_mark_range(line, start, pos, SYNTAX_MD_BLOCKQUOTE);
 		inline_start = pos;
@@ -2078,7 +2101,10 @@ static bool md_is_tracked_element(uint16_t syntax)
 	case SYNTAX_MD_BOLD:
 	case SYNTAX_MD_ITALIC:
 	case SYNTAX_MD_BOLD_ITALIC:
+	case SYNTAX_MD_STRIKETHROUGH:
 	case SYNTAX_MD_CODE_SPAN:
+	case SYNTAX_MD_CODE_FENCE_OPEN:
+	case SYNTAX_MD_CODE_FENCE_CLOSE:
 	case SYNTAX_MD_LINK_TEXT:
 	case SYNTAX_MD_LINK_URL:
 	case SYNTAX_MD_IMAGE:
@@ -2148,6 +2174,14 @@ static bool md_is_delimiter_char(uint32_t codepoint, uint16_t syntax)
 
 	case SYNTAX_MD_CODE_SPAN:
 		return codepoint == '`';
+	case SYNTAX_MD_STRIKETHROUGH:
+		return codepoint == '~';
+	case SYNTAX_MD_CODE_FENCE_OPEN:
+		/* Hide backticks/tildes, language specifier rendered as label */
+		return codepoint == '`' || codepoint == '~';
+	case SYNTAX_MD_CODE_FENCE_CLOSE:
+		/* Hide entire closing fence line */
+		return true;
 
 	case SYNTAX_MD_HEADER_1:
 	case SYNTAX_MD_HEADER_2:

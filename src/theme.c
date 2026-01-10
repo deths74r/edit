@@ -640,6 +640,11 @@ struct theme theme_create_default(void)
 		.bg = {0x0A, 0x0A, 0x0A},
 		.attr = ATTR_BOLD | ATTR_ITALIC
 	};
+	t.syntax[SYNTAX_MD_STRIKETHROUGH] = (struct style){
+		.fg = {0x80, 0x80, 0x80},  /* Gray - dimmed appearance */
+		.bg = {0x0A, 0x0A, 0x0A},
+		.attr = ATTR_DIM
+	};
 	t.syntax[SYNTAX_MD_CODE_SPAN] = (struct style){
 		.fg = {0x00, 0x9E, 0x73},  /* Bluish green - accessible green */
 		.bg = {0x1A, 0x1A, 0x1A},
@@ -647,6 +652,16 @@ struct theme theme_create_default(void)
 	};
 	t.syntax[SYNTAX_MD_CODE_BLOCK] = (struct style){
 		.fg = {0x00, 0x9E, 0x73},  /* Bluish green */
+		.bg = {0x1A, 0x1A, 0x1A},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_CODE_FENCE_OPEN] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Same as code block */
+		.bg = {0x1A, 0x1A, 0x1A},
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_CODE_FENCE_CLOSE] = (struct style){
+		.fg = {0x00, 0x9E, 0x73},  /* Same as code block */
 		.bg = {0x1A, 0x1A, 0x1A},
 		.attr = ATTR_NONE
 	};
@@ -1005,6 +1020,11 @@ struct theme theme_create_mono_white(void)
 		.bg = {0xF8, 0xF8, 0xF8},
 		.attr = ATTR_BOLD | ATTR_ITALIC
 	};
+	t.syntax[SYNTAX_MD_STRIKETHROUGH] = (struct style){
+		.fg = {0x70, 0x70, 0x70},  /* Gray - dimmed appearance */
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_DIM
+	};
 	t.syntax[SYNTAX_MD_CODE_SPAN] = (struct style){
 		.fg = {0x40, 0x40, 0x40},  /* Dark gray */
 		.bg = {0xE8, 0xE8, 0xE8},  /* Light gray background */
@@ -1012,6 +1032,16 @@ struct theme theme_create_mono_white(void)
 	};
 	t.syntax[SYNTAX_MD_CODE_BLOCK] = (struct style){
 		.fg = {0x40, 0x40, 0x40},  /* Dark gray */
+		.bg = {0xE8, 0xE8, 0xE8},  /* Light gray background */
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_CODE_FENCE_OPEN] = (struct style){
+		.fg = {0x40, 0x40, 0x40},  /* Same as code block */
+		.bg = {0xE8, 0xE8, 0xE8},  /* Light gray background */
+		.attr = ATTR_NONE
+	};
+	t.syntax[SYNTAX_MD_CODE_FENCE_CLOSE] = (struct style){
+		.fg = {0x40, 0x40, 0x40},  /* Same as code block */
 		.bg = {0xE8, 0xE8, 0xE8},  /* Light gray background */
 		.attr = ATTR_NONE
 	};
@@ -1760,6 +1790,19 @@ struct theme *theme_parse_file(const char *filepath)
 		else if (strcmp(key, "syntax_md_bold_italic_attr") == 0) {
 			t->syntax[SYNTAX_MD_BOLD_ITALIC].attr = attr_parse(value);
 		}
+		else if (strcmp(key, "syntax_md_strikethrough") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_STRIKETHROUGH].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_strikethrough_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_STRIKETHROUGH].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_strikethrough_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_STRIKETHROUGH].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_STRIKETHROUGH] = true;
+		}
+		else if (strcmp(key, "syntax_md_strikethrough_attr") == 0) {
+			t->syntax[SYNTAX_MD_STRIKETHROUGH].attr = attr_parse(value);
+		}
 		else if (strcmp(key, "syntax_md_escape") == 0 && color_parse_hex(value, &color)) {
 			t->syntax[SYNTAX_MD_ESCAPE].fg = color;
 		}
@@ -1800,6 +1843,20 @@ struct theme *theme_parse_file(const char *filepath)
 		}
 		else if (strcmp(key, "syntax_md_code_block_attr") == 0) {
 			t->syntax[SYNTAX_MD_CODE_BLOCK].attr = attr_parse(value);
+		}
+		else if (strcmp(key, "syntax_md_code_fence_open_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_FENCE_OPEN].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_code_fence_open_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_FENCE_OPEN].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_CODE_FENCE_OPEN] = true;
+		}
+		else if (strcmp(key, "syntax_md_code_fence_close_fg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_FENCE_CLOSE].fg = color;
+		}
+		else if (strcmp(key, "syntax_md_code_fence_close_bg") == 0 && color_parse_hex(value, &color)) {
+			t->syntax[SYNTAX_MD_CODE_FENCE_CLOSE].bg = color;
+			t->syntax_bg_set[SYNTAX_MD_CODE_FENCE_CLOSE] = true;
 		}
 
 		/* Markdown syntax - Links and images */

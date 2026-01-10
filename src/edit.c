@@ -2739,6 +2739,119 @@ static void editor_insert_newline(void)
 		}
 		editor.cursor_column++;
 	}
+	/*
+	 * Markdown list continuation: auto-insert list markers on Enter.
+	 * Detects ordered (1. 2.) and unordered (- * +) lists, including task lists.
+	 * If the previous line was an empty list item (just marker, no content),
+	 * we remove the marker instead of adding a new one.
+	 */
+	if (syntax_is_markdown_file(editor.buffer.filename) && editor.cursor_row > 0) {
+		struct line *prev_line = &editor.buffer.lines[editor.cursor_row - 1];
+		line_warm(prev_line, &editor.buffer);
+		/* Scan for list marker in previous line */
+		uint32_t marker_start = UINT32_MAX;
+		uint32_t marker_end = 0;
+		bool found_marker = false;
+		/* Find where the marker ends and content begins */
+		for (uint32_t i = 0; i < prev_line->cell_count; i++) {
+			if (prev_line->cells[i].syntax == SYNTAX_MD_LIST_MARKER) {
+				if (!found_marker) {
+					marker_start = i;
+				}
+				marker_end = i + 1;
+				found_marker = true;
+			} else if (found_marker) {
+				break;
+			}
+		}
+		if (found_marker && marker_start != UINT32_MAX) {
+			/* Check if there's any content after the marker (excluding trailing whitespace) */
+			bool has_content = false;
+			for (uint32_t i = marker_end; i < prev_line->cell_count; i++) {
+				uint32_t cp = prev_line->cells[i].codepoint;
+				if (cp != ' ' && cp != '\t') {
+					has_content = true;
+					break;
+				}
+			}
+			if (!has_content) {
+				/*
+				 * Empty list item - remove the marker from previous line.
+				 * Delete from marker_start to end of line.
+				 */
+				uint32_t delete_count = prev_line->cell_count - marker_start;
+				for (uint32_t i = 0; i < delete_count; i++) {
+					undo_record_delete_char(&editor.buffer,
+						editor.cursor_row - 1, marker_start,
+						prev_line->cells[marker_start].codepoint);
+					line_delete_cell(prev_line, marker_start);
+				}
+			} else {
+				/*
+				 * Has content - insert a new list marker on the new line.
+				 * Copy unordered markers directly, increment ordered numbers.
+				 */
+				uint32_t list_marker[32];
+				uint32_t list_marker_count = 0;
+				uint32_t first_cp = prev_line->cells[marker_start].codepoint;
+				if (first_cp == '-' || first_cp == '*' || first_cp == '+') {
+					/* Unordered list: copy marker and space */
+					list_marker[list_marker_count++] = first_cp;
+					list_marker[list_marker_count++] = ' ';
+					/* Check for task marker: - [ ] or - [x] */
+					if (marker_end - marker_start >= 5) {
+						/* Task list marker includes [ ] */
+						bool is_task = false;
+						for (uint32_t i = marker_start; i < marker_end; i++) {
+							if (prev_line->cells[i].codepoint == '[') {
+								is_task = true;
+								break;
+							}
+						}
+						if (is_task) {
+							/* Add unchecked task marker */
+							list_marker[list_marker_count++] = '[';
+							list_marker[list_marker_count++] = ' ';
+							list_marker[list_marker_count++] = ']';
+							list_marker[list_marker_count++] = ' ';
+						}
+					}
+				} else if (first_cp >= '0' && first_cp <= '9') {
+					/* Ordered list: parse number, increment, format */
+					uint32_t num = 0;
+					char delimiter = '.';
+					/* Parse the number */
+					for (uint32_t i = marker_start; i < marker_end; i++) {
+						uint32_t cp = prev_line->cells[i].codepoint;
+						if (cp >= '0' && cp <= '9') {
+							num = num * 10 + (cp - '0');
+						} else if (cp == '.' || cp == ')') {
+							delimiter = (char)cp;
+							break;
+						}
+					}
+					/* Increment and format */
+					num++;
+					char num_str[16];
+					int num_len = snprintf(num_str, sizeof(num_str), "%u%c ",
+							       num, delimiter);
+					for (int i = 0; i < num_len && list_marker_count < 32; i++) {
+						list_marker[list_marker_count++] = (uint32_t)num_str[i];
+					}
+				}
+				/* Insert the list marker on the new line */
+				for (uint32_t i = 0; i < list_marker_count; i++) {
+					undo_record_insert_char(&editor.buffer,
+						editor.cursor_row, editor.cursor_column,
+						list_marker[i]);
+					buffer_insert_cell_at_column_checked(&editor.buffer,
+						editor.cursor_row, editor.cursor_column,
+						list_marker[i]);
+					editor.cursor_column++;
+				}
+			}
+		}
+	}
 
 
 	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
@@ -4707,6 +4820,84 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		}
 		md_should_reveal_element(line, editor.cursor_column, &reveal_start, &reveal_end);
 	}
+	/*
+	 * Hybrid mode: Check if cursor is inside a code block.
+	 * When cursor is anywhere in a code block (fences or content), we reveal
+	 * the entire block as raw markdown - no [language] label, no hidden fences,
+	 * no special background.
+	 */
+	bool cursor_in_code_block = false;
+	if (editor.hybrid_mode && syntax_is_markdown_file(buffer->filename) &&
+	    editor.cursor_row < buffer->line_count) {
+		struct line *cursor_line = &buffer->lines[editor.cursor_row];
+		uint32_t cursor_cell_count = line_get_cell_count(cursor_line, buffer);
+		if (cursor_cell_count > 0) {
+			uint16_t cursor_syntax = cursor_line->cells[0].syntax;
+			if (cursor_syntax == SYNTAX_MD_CODE_BLOCK ||
+			    cursor_syntax == SYNTAX_MD_CODE_FENCE_OPEN ||
+			    cursor_syntax == SYNTAX_MD_CODE_FENCE_CLOSE) {
+				cursor_in_code_block = true;
+			}
+		}
+	}
+	/*
+	 * Hybrid mode: render [language] label for code fence opening lines.
+	 * This replaces the raw ```language with a clean [language] indicator.
+	 */
+	if (editor.hybrid_mode && line->cell_count > 0 &&
+	    line->cells[0].syntax == SYNTAX_MD_CODE_FENCE_OPEN &&
+	    syntax_is_markdown_file(buffer->filename) &&
+	    reveal_start == UINT32_MAX &&  /* Not revealing this element */
+	    !cursor_in_code_block) {       /* Cursor not in any code block */
+		/* Extract language from cells after the fence characters */
+		char language[17] = "code";  /* Default if no language specified */
+		int lang_len = 0;
+		bool found_lang = false;
+		
+		for (uint32_t i = 0; i < line->cell_count && lang_len < 16; i++) {
+			uint32_t cp = line->cells[i].codepoint;
+			/* Skip fence characters and leading whitespace */
+			if (cp == '`' || cp == '~') continue;
+			if (!found_lang && cp == ' ') continue;
+			if (cp == ' ' || cp == '\t') break;  /* End of language */
+			found_lang = true;
+			/* Simple ASCII conversion for language name */
+			if (cp < 128) {
+				language[lang_len++] = (char)cp;
+			}
+		}
+		if (found_lang && lang_len > 0) {
+			language[lang_len] = '\0';
+		}
+		
+		/* Render [language] with code fence style */
+		struct style *style = &active_theme.syntax[SYNTAX_MD_CODE_FENCE_OPEN];
+		struct syntax_color bg = is_cursor_line ? active_theme.cursor_line : style->bg;
+		char escape[128];
+		int esc_len = snprintf(escape, sizeof(escape),
+		         "\x1b[0;48;2;%d;%d;%d;38;2;%d;%d;%dm",
+		         bg.red, bg.green, bg.blue,
+		         style->fg.red, style->fg.green, style->fg.blue);
+		esc_len += attr_to_escape(style->attr, escape + esc_len, sizeof(escape) - esc_len);
+		output_buffer_append(output, escape, esc_len);
+		
+		/* Output the label */
+		output_buffer_append_string(output, "[");
+		output_buffer_append_string(output, language);
+		output_buffer_append_string(output, "]");
+		
+		return;  /* Done with this line */
+	}
+	/*
+	 * Hybrid mode: hide closing fence lines entirely.
+	 */
+	if (editor.hybrid_mode && line->cell_count > 0 &&
+	    line->cells[0].syntax == SYNTAX_MD_CODE_FENCE_CLOSE &&
+	    syntax_is_markdown_file(buffer->filename) &&
+	    reveal_start == UINT32_MAX &&  /* Not revealing */
+	    !cursor_in_code_block) {       /* Cursor not in any code block */
+		return;  /* Output nothing for closing fence */
+	}
 
 	/* Render visible content up to end_cell or max_width */
 	int rendered_width = 0;
@@ -4716,11 +4907,12 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		uint8_t flags = line->cells[cell_index].flags;
 
 		/*
-		 * Hybrid mode: skip hideable cells unless cursor is revealing them.
-		 * Cells within the reveal range are shown despite being hideable.
+		 * Hybrid mode: skip hideable cells unless cursor is revealing them
+		 * or cursor is inside a code block (show entire block raw).
 		 */
 		if (editor.hybrid_mode && (flags & CELL_FLAG_HIDEABLE) &&
-		    syntax_is_markdown_file(buffer->filename)) {
+		    syntax_is_markdown_file(buffer->filename) &&
+		    !cursor_in_code_block) {
 			/* Check if this cell is in the reveal range */
 			bool in_reveal_range = (cell_index >= reveal_start && cell_index < reveal_end);
 			if (!in_reveal_range) {
@@ -4784,6 +4976,12 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				default: /* Token background, cursor line, or normal */
 					if (is_cursor_line) {
 						bg = active_theme.cursor_line;
+					} else if (!editor.hybrid_mode &&
+					           (syntax == SYNTAX_MD_CODE_BLOCK ||
+					            syntax == SYNTAX_MD_CODE_FENCE_OPEN ||
+					            syntax == SYNTAX_MD_CODE_FENCE_CLOSE)) {
+						/* Code block bg only in hybrid mode */
+						bg = active_theme.background;
 					} else {
 						bg = style->bg;
 					}
@@ -4804,8 +5002,12 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			         bg.red, bg.green, bg.blue,
 			         fg.red, fg.green, fg.blue);
 
-			/* Add text attributes */
-			length += attr_to_escape(style->attr, escape + length, sizeof(escape) - length);
+			/* Add text attributes (strikethrough only in hybrid mode) */
+			text_attr attr = style->attr;
+			if (editor.hybrid_mode && syntax == SYNTAX_MD_STRIKETHROUGH) {
+				attr |= ATTR_STRIKE;
+			}
+			length += attr_to_escape(attr, escape + length, sizeof(escape) - length);
 
 			output_buffer_append(output, escape, length);
 			current_syntax = syntax;
@@ -4926,6 +5128,12 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 								output_codepoint = 0x2502;  /* │ BOX DRAWINGS LIGHT VERTICAL */
 							}
 						}
+						/* Blockquote: > → box drawing vertical */
+						if (gi_syntax == SYNTAX_MD_BLOCKQUOTE) {
+							if (output_codepoint == '>') {
+								output_codepoint = 0x2502;  /* │ BOX DRAWINGS LIGHT VERTICAL */
+							}
+						}
 					}
 
 					int bytes = utflite_encode(output_codepoint, utf8_buffer);
@@ -4967,6 +5175,35 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			         fg_color.red, fg_color.green, fg_color.blue);
 			output_buffer_append(output, escape, length);
 			rendered_width++;
+		}
+	}
+	/*
+	 * Hybrid mode: extend code block background to terminal width.
+	 * This creates a visual "box" effect for code blocks.
+	 */
+	if (editor.hybrid_mode && syntax_is_markdown_file(buffer->filename) &&
+	    line->cell_count > 0 && !cursor_in_code_block) {
+		uint16_t first_syntax = line->cells[0].syntax;
+		if (first_syntax == SYNTAX_MD_CODE_BLOCK ||
+		    first_syntax == SYNTAX_MD_CODE_FENCE_OPEN) {
+			/* Calculate remaining width to fill */
+			int remaining = max_width - rendered_width;
+			if (remaining > 0) {
+				/* Set code block background color */
+				struct style *style = &active_theme.syntax[SYNTAX_MD_CODE_BLOCK];
+				struct syntax_color bg = is_cursor_line ?
+					active_theme.cursor_line : style->bg;
+				char escape[64];
+				int esc_len = snprintf(escape, sizeof(escape),
+					"\x1b[0;48;2;%d;%d;%dm",
+					bg.red, bg.green, bg.blue);
+				output_buffer_append(output, escape, esc_len);
+				/* Fill remaining width with spaces */
+				for (int i = 0; i < remaining; i++) {
+					output_buffer_append_string(output, " ");
+				}
+				rendered_width = max_width;  /* Mark as filled */
+			}
 		}
 	}
 

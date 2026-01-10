@@ -358,8 +358,11 @@ enum syntax_token {
 	SYNTAX_MD_BOLD,           /* **bold** */
 	SYNTAX_MD_ITALIC,         /* *italic* */
 	SYNTAX_MD_BOLD_ITALIC,    /* ***both*** */
+	SYNTAX_MD_STRIKETHROUGH,  /* ~~strikethrough~~ */
 	SYNTAX_MD_CODE_SPAN,      /* `inline code` */
 	SYNTAX_MD_CODE_BLOCK,     /* Fenced ``` or indented */
+	SYNTAX_MD_CODE_FENCE_OPEN,  /* Opening ``` fence line */
+	SYNTAX_MD_CODE_FENCE_CLOSE, /* Closing ``` fence line */
 	SYNTAX_MD_LINK_TEXT,      /* [text] portion */
 	SYNTAX_MD_LINK_URL,       /* (url) portion */
 	SYNTAX_MD_IMAGE,          /* ![alt](url) */
@@ -770,6 +773,7 @@ struct md_element {
 	uint32_t start_col;       /* First cell of element */
 	uint32_t end_col;         /* Last cell of element (exclusive) */
 	uint16_t syntax_type;     /* SYNTAX_MD_* token type */
+	char language[16];        /* Language specifier for code blocks */
 };
 
 /*
