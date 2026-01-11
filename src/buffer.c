@@ -38,6 +38,7 @@ void line_init(struct line *line)
 	line->mmap_offset = 0;
 	line->mmap_length = 0;
 	line_set_temperature(line, LINE_TEMPERATURE_HOT);
+	atomic_store(&line->warming_in_progress, false);
 	line->wrap_columns = NULL;
 	line->wrap_segment_count = 0;
 	line->wrap_cache_width = 0;
@@ -50,6 +51,9 @@ void line_init(struct line *line)
  */
 void line_free(struct line *line)
 {
+	if (line == NULL)
+		return;
+
 	free(line->cells);
 	line->cells = NULL;
 	line->cell_count = 0;
@@ -401,15 +405,20 @@ void buffer_init(struct buffer *buffer)
  */
 void buffer_free(struct buffer *buffer)
 {
+	if (buffer == NULL)
+		return;
+
 	/* Free undo history */
 	undo_history_free(&buffer->undo_history);
 
-	for (uint32_t index = 0; index < buffer->line_count; index++) {
-		line_free(&buffer->lines[index]);
+	/* Free all lines if lines array exists */
+	if (buffer->lines != NULL) {
+		for (uint32_t index = 0; index < buffer->line_count; index++) {
+			line_free(&buffer->lines[index]);
+		}
+		free(buffer->lines);
 	}
-	free(buffer->lines);
 	free(buffer->filename);
-
 	/* Unmap file if mapped */
 	if (buffer->mmap_base != NULL) {
 		munmap(buffer->mmap_base, buffer->mmap_size);

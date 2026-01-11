@@ -44,6 +44,11 @@ int editor_context_new(void);
  */
 bool editor_context_close(uint32_t index);
 /*
+ * Safely get the active buffer with bounds checking.
+ * Returns NULL if no valid buffer exists.
+ */
+struct buffer *editor_get_active_buffer(void);
+/*
  * Switch to the context at the given index.
  */
 void editor_context_switch(uint32_t index);

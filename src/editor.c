@@ -202,7 +202,22 @@ bool editor_context_close(uint32_t index)
 	}
 	/* Recalculate screen size (tab bar may disappear) */
 	editor_update_screen_size();
+	/* Signal main loop to skip this iteration */
+	editor.context_just_closed = true;
 	return true;
+}
+/*
+ * Safely get the active buffer, with bounds checking.
+ * Returns NULL if no valid buffer exists (shouldn't happen in normal operation).
+ * Use this instead of E_BUF macro in places where context may have just been closed.
+ */
+struct buffer *editor_get_active_buffer(void)
+{
+	if (editor.context_count == 0 ||
+	    editor.active_context >= editor.context_count) {
+		return NULL;
+	}
+	return &editor.contexts[editor.active_context].buffer;
 }
 /*
  * Switch to a context by index.

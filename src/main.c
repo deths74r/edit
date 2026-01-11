@@ -15,6 +15,7 @@
 #define _GNU_SOURCE
 
 #include "edit.h"
+#include "editor.h"
 #include "keybindings.h"
 
 /*****************************************************************************
@@ -175,6 +176,11 @@ int main(int argument_count, char *argument_values[])
 	#define FILECHANGE_CHECK_INTERVAL_SECONDS 2
 
 	while (1) {
+		/* Skip iteration if context was just closed to avoid use-after-free */
+		if (editor.context_just_closed) {
+			editor.context_just_closed = false;
+			continue;
+		}
 		int ret = render_refresh_screen();
 		if (ret) {
 			/* Minimal recovery on render failure */
@@ -183,6 +189,10 @@ int main(int argument_count, char *argument_values[])
 			usleep(100000);
 		}
 		editor_process_keypress();
+		/* Skip rest of iteration if context was closed during keypress */
+		if (editor.context_just_closed) {
+			continue;
+		}
 		worker_process_results();
 
 		time_t now = time(NULL);
@@ -195,8 +205,9 @@ int main(int argument_count, char *argument_values[])
 
 		/* Check for external file changes periodically */
 		if (now - last_filechange_check >= FILECHANGE_CHECK_INTERVAL_SECONDS) {
-			if (!reload_prompt_is_active() &&
-			    file_check_external_change(E_BUF)) {
+			struct buffer *buf = editor_get_active_buffer();
+			if (buf && !reload_prompt_is_active() &&
+			    file_check_external_change(buf)) {
 				reload_prompt_enter();
 			}
 			last_filechange_check = now;

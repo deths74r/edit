@@ -22,6 +22,7 @@
 #include "edit.h"
 #include "syntax.h"
 #include "keybindings.h"
+#include <execinfo.h>
 
 /*****************************************************************************
  * Global State
@@ -984,13 +985,40 @@ static void editor_request_background_warming(void)
  * Fatal signal handler - attempts to save user data before dying.
  *
  * Called on SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL. Restores the
- * terminal to a sane state and attempts emergency save, then re-raises
- * the signal with default handler to get proper exit status.
+ * terminal to a sane state, prints diagnostic info and backtrace,
+ * attempts emergency save, then re-raises the signal.
  */
 void fatal_signal_handler(int sig)
 {
 	/* Restore terminal first so error output is visible */
 	terminal_disable_raw_mode();
+
+	/* Print signal information */
+	const char *sig_name = "UNKNOWN";
+	switch (sig) {
+		case SIGSEGV: sig_name = "SIGSEGV (Segmentation fault)"; break;
+		case SIGABRT: sig_name = "SIGABRT (Abort)"; break;
+		case SIGBUS:  sig_name = "SIGBUS (Bus error)"; break;
+		case SIGFPE:  sig_name = "SIGFPE (Floating point exception)"; break;
+		case SIGILL:  sig_name = "SIGILL (Illegal instruction)"; break;
+	}
+	fprintf(stderr, "\nedit: fatal signal %s\n", sig_name);
+
+	/* Print editor state for debugging */
+	fprintf(stderr, "edit: state: context_count=%u, active_context=%u\n",
+	        editor.context_count, editor.active_context);
+	if (editor.context_count > 0 && editor.active_context < editor.context_count) {
+		struct buffer *buf = &editor.contexts[editor.active_context].buffer;
+		fprintf(stderr, "edit: buffer: filename=%s, lines=%u, modified=%d\n",
+		        buf->filename ? buf->filename : "(none)",
+		        buf->line_count, buf->is_modified);
+	}
+
+	/* Print backtrace */
+	void *bt_buffer[64];
+	int bt_size = backtrace(bt_buffer, 64);
+	fprintf(stderr, "edit: backtrace (%d frames):\n", bt_size);
+	backtrace_symbols_fd(bt_buffer, bt_size, STDERR_FILENO);
 
 	/* Attempt to save user's work */
 	emergency_save();
@@ -1012,7 +1040,8 @@ void fatal_signal_handler(int sig)
  * simple and robust as possible:
  *
  * - Guards against recursive calls (crash during emergency save)
- * - Skips if there's nothing to save
+ * - Validates state before accessing contexts (crash-safe)
+ * - Saves ALL modified buffers, not just the active one
  * - Tries original location first, falls back to /tmp
  * - Handles both cold (mmap'd) and warm/hot (cell-based) lines
  * - Best effort: ignores write errors since we're already dying
@@ -1026,61 +1055,77 @@ void emergency_save(void)
 		return;
 	in_emergency_save = true;
 
-	struct buffer *buffer = E_BUF;
-
-	/* Nothing to save? */
-	if (buffer->line_count == 0 || !buffer->is_modified)
+	/* Validate state before accessing - we may be in corrupted state */
+	if (editor.context_count == 0 || editor.context_count > MAX_CONTEXTS) {
+		fprintf(stderr, "edit: emergency save skipped (invalid state)\n");
 		return;
+	}
 
-	/* Build emergency filename */
-	char emergency_path[PATH_MAX];
 	pid_t pid = getpid();
+	int saved_count = 0;
 
-	if (buffer->filename) {
-		snprintf(emergency_path, sizeof(emergency_path),
-		         "%s.emergency.%d", buffer->filename, pid);
-	} else {
-		snprintf(emergency_path, sizeof(emergency_path),
-		         "/tmp/edit.emergency.%d", pid);
-	}
+	/* Save ALL modified buffers */
+	for (uint32_t ctx_idx = 0; ctx_idx < editor.context_count; ctx_idx++) {
+		struct buffer *buffer = &editor.contexts[ctx_idx].buffer;
 
-	/* Try to open file for writing */
-	FILE *file = fopen(emergency_path, "w");
-	if (!file && buffer->filename) {
-		/* Fallback to /tmp if original location fails */
-		snprintf(emergency_path, sizeof(emergency_path),
-		         "/tmp/edit.emergency.%d", pid);
-		file = fopen(emergency_path, "w");
-	}
+		/* Skip unmodified or empty buffers */
+		if (buffer->line_count == 0 || !buffer->is_modified)
+			continue;
 
-	if (!file)
-		return;
+		/* Build emergency filename */
+		char emergency_path[PATH_MAX];
 
-	/* Write all lines - best effort, ignore errors */
-	for (uint32_t row = 0; row < buffer->line_count; row++) {
-		struct line *line = &buffer->lines[row];
-
-		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
-			/* Cold line: write directly from mmap */
-			if (buffer->mmap_base && line->mmap_length > 0) {
-				fwrite(buffer->mmap_base + line->mmap_offset,
-				       1, line->mmap_length, file);
-			}
+		if (buffer->filename) {
+			snprintf(emergency_path, sizeof(emergency_path),
+			         "%s.emergency.%d", buffer->filename, pid);
 		} else {
-			/* Warm/hot line: encode cells to UTF-8 */
-			for (uint32_t col = 0; col < line->cell_count; col++) {
-				char utf8_buffer[UTFLITE_MAX_BYTES];
-				int bytes = utflite_encode(
-					line->cells[col].codepoint, utf8_buffer);
-				fwrite(utf8_buffer, 1, bytes, file);
-			}
+			snprintf(emergency_path, sizeof(emergency_path),
+			         "/tmp/edit.emergency.%u.%d", ctx_idx, pid);
 		}
 
-		fwrite("\n", 1, 1, file);
+		/* Try to open file for writing */
+		FILE *file = fopen(emergency_path, "w");
+		if (!file && buffer->filename) {
+			/* Fallback to /tmp if original location fails */
+			snprintf(emergency_path, sizeof(emergency_path),
+			         "/tmp/edit.emergency.%u.%d", ctx_idx, pid);
+			file = fopen(emergency_path, "w");
+		}
+
+		if (!file)
+			continue;
+
+		/* Write all lines - best effort, ignore errors */
+		for (uint32_t row = 0; row < buffer->line_count; row++) {
+			struct line *line = &buffer->lines[row];
+
+			if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
+				/* Cold line: write directly from mmap */
+				if (buffer->mmap_base && line->mmap_length > 0) {
+					fwrite(buffer->mmap_base + line->mmap_offset,
+					       1, line->mmap_length, file);
+				}
+			} else {
+				/* Warm/hot line: encode cells to UTF-8 */
+				for (uint32_t col = 0; col < line->cell_count; col++) {
+					char utf8_buffer[UTFLITE_MAX_BYTES];
+					int bytes = utflite_encode(
+						line->cells[col].codepoint, utf8_buffer);
+					fwrite(utf8_buffer, 1, bytes, file);
+				}
+			}
+
+			fwrite("\n", 1, 1, file);
+		}
+
+		fclose(file);
+		fprintf(stderr, "edit: emergency save to %s\n", emergency_path);
+		saved_count++;
 	}
 
-	fclose(file);
-	fprintf(stderr, "edit: emergency save to %s\n", emergency_path);
+	if (saved_count == 0) {
+		fprintf(stderr, "edit: no modified buffers to save\n");
+	}
 }
 
 /*
@@ -3596,6 +3641,10 @@ static void editor_toggle_task_checkbox(uint32_t row, uint32_t checkbox_col)
  */
 void editor_handle_mouse(struct mouse_input *mouse)
 {
+	/* Don't process mouse events after context close */
+	if (editor.context_just_closed) {
+		return;
+	}
 	switch (mouse->event) {
 		case MOUSE_LEFT_PRESS: {
 			/* Check for tab bar click (row 0 when tab bar visible) */
@@ -3615,7 +3664,7 @@ void editor_handle_mouse(struct mouse_input *mouse)
 					size_t name_len = strlen(display_name);
 					if (name_len > 20) name_len = 20;  /* Truncated */
 					uint32_t tab_width = 2 + (uint32_t)name_len;
-					if (buf->is_modified) tab_width += 3;  /* [+] */
+					if (buf->is_modified) tab_width += 4;  /* " [+]" */
 					if (mouse->column >= x && mouse->column < x + tab_width) {
 						editor_context_switch(i);
 						return;
@@ -3702,6 +3751,21 @@ void editor_handle_mouse(struct mouse_input *mouse)
 		}
 
 		case MOUSE_LEFT_DRAG: {
+			/* Auto-scroll when dragging at screen edges */
+			uint32_t content_top = (editor.context_count > 1) ? 1 : 0;  /* Skip tab bar */
+			uint32_t content_bottom = content_top + editor.screen_rows - 1;  /* Last content row */
+
+			if (mouse->row <= content_top && E_CTX->row_offset > 0) {
+				/* At top edge - scroll up */
+				E_CTX->row_offset--;
+			} else if (mouse->row >= content_bottom) {
+				/* At bottom edge - scroll down */
+				uint32_t max_offset = (E_BUF->line_count > editor.screen_rows)
+					? E_BUF->line_count - editor.screen_rows : 0;
+				if (E_CTX->row_offset < max_offset) {
+					E_CTX->row_offset++;
+				}
+			}
 			/* Update cursor position; anchor stays fixed */
 			uint32_t file_row;
 			uint16_t segment;
@@ -5664,7 +5728,7 @@ static void render_draw_tab_bar(struct output_buffer *output)
 		}
 		/* Calculate tab width */
 		int tab_width = (int)strlen(display_name) + 3;  /* " name " + modified indicator */
-		if (buf->is_modified) tab_width += 2;  /* "[+]" - 1 for the space we already have */
+		if (buf->is_modified) tab_width += 4;  /* " [+]" */
 		/* Check if tab fits */
 		if (current_pos + tab_width > (int)editor.screen_columns - 1) {
 			/* Tab doesn't fit, show "..." indicator */
@@ -5710,8 +5774,8 @@ static void render_draw_tab_bar(struct output_buffer *output)
 				         active_theme.status_modified.fg.blue);
 				output_buffer_append_string(output, escape);
 			}
-			output_buffer_append_string(output, "[+]");
-			current_pos += 3;
+			output_buffer_append_string(output, " [+]");
+			current_pos += 4;
 		}
 		output_buffer_append_char(output, ' ');
 		current_pos++;
@@ -5747,7 +5811,7 @@ static void render_draw_status_bar(struct output_buffer *output)
 	/* Filename with its own style */
 	const char *filename = E_BUF->filename ? E_BUF->filename : "[No Name]";
 	char filename_buf[104];
-	int filename_len = snprintf(filename_buf, sizeof(filename_buf), " %.100s", filename);
+	int filename_len = snprintf(filename_buf, sizeof(filename_buf), " %.100s ", filename);
 
 	escape_len = style_to_escape(&active_theme.status_filename, color_escape,
 	                             sizeof(color_escape));
@@ -5761,8 +5825,8 @@ static void render_draw_status_bar(struct output_buffer *output)
 		escape_len = style_to_escape(&active_theme.status_modified, color_escape,
 		                             sizeof(color_escape));
 		output_buffer_append(output, color_escape, escape_len);
-		output_buffer_append_string(output, " [+]");
-		current_pos += 4;
+		output_buffer_append_string(output, "[+]");
+		current_pos += 3;
 	}
 
 	/* Right-aligned content: link URL or position */
@@ -5973,6 +6037,16 @@ static void render_draw_message_bar(struct output_buffer *output)
  */
 int __must_check render_refresh_screen(void)
 {
+	/* Validate state before rendering */
+	if (editor.context_count == 0 || editor.active_context >= editor.context_count) {
+		fprintf(stderr, "render: invalid context state count=%u active=%u\n",
+		        editor.context_count, editor.active_context);
+		return -1;
+	}
+	if (E_BUF->lines == NULL) {
+		fprintf(stderr, "render: buffer lines is NULL\n");
+		return -1;
+	}
 	editor_update_gutter_width();
 	editor_scroll();
 

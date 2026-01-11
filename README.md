@@ -10,6 +10,17 @@ Edit occupies a different position. It assumes you want to edit text, not learn 
 
 This is not a vim replacement. If you've invested years in vim, you've probably recouped that investment by now. This is for everyone else: the developer who SSH'd into a server and discovered nano can't handle their file, the new programmer who doesn't want to memorize a command vocabulary, the experienced developer who just wants to make a quick edit without launching an Electron application that consumes half a gigabyte of RAM.
 
+## Contents
+
+- [Quick Start](#quick-start)
+- [Features](#features)
+- [Themes](#themes)
+- [Architecture](#architecture)
+- [Comparisons](#comparisons)
+- [Building](#building)
+- [Source Organization](#source-organization)
+- [License](#license)
+
 ## Quick Start
 
 ```bash

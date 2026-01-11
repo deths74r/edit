@@ -1129,6 +1129,7 @@ struct editor_state {
 	struct editor_context contexts[MAX_CONTEXTS];
 	uint32_t context_count;          /* Number of open contexts (>= 1) */
 	uint32_t active_context;         /* Index of currently active context */
+	bool context_just_closed;        /* Skip processing after context close */
 	/*
 	 * Legacy per-buffer fields (to be migrated to contexts in Phase 2).
 	 * These are temporarily kept for compatibility during transition.
