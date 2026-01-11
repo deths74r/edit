@@ -5961,14 +5961,6 @@ static bool editor_open_file(const char *path)
 	/* Start background warming for the new file */
 	editor_request_background_warming();
 
-	/* Auto-format tables in markdown files */
-	if (syntax_is_markdown_file(path)) {
-		int tables_changed = tables_reformat_all(&editor.buffer);
-		if (tables_changed > 0) {
-			editor.buffer.is_modified = true;
-			autoformat_prompt_enter(tables_changed);
-		}
-	}
 
 	return true;
 }
@@ -7204,6 +7196,19 @@ execute_action(enum editor_action action)
 	case ACTION_CHECK_UPDATES:
 		editor_check_for_updates();
 		return true;
+	case ACTION_FORMAT_TABLES:
+		if (syntax_is_markdown_file(editor.buffer.filename)) {
+			int count = tables_reformat_all(&editor.buffer);
+			if (count > 0) {
+				editor.buffer.is_modified = true;
+				editor_set_status_message("%d table(s) formatted", count);
+			} else {
+				editor_set_status_message("No tables to format");
+			}
+		} else {
+			editor_set_status_message("Table formatting only available in markdown files");
+		}
+		return true;
 
 	/* Special */
 	case ACTION_ESCAPE:
@@ -7274,8 +7279,6 @@ void editor_process_keypress(void)
 	if (quit_prompt_handle_key(key))
 		return;
 	if (reload_prompt_handle_key(key))
-		return;
-	if (autoformat_prompt_handle_key(key))
 		return;
 
 	/* Look up action for this key */

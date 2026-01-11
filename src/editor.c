@@ -55,9 +55,6 @@ static struct save_as_state save_as = {0};
 /* Quit prompt state */
 static struct quit_prompt_state quit_prompt = {0};
 
-/* Auto-format prompt state */
-static struct autoformat_prompt_state autoformat_prompt = {0};
-
 /*****************************************************************************
  * Editor Initialization
  *****************************************************************************/
@@ -855,68 +852,6 @@ bool reload_prompt_handle_key(int key)
 
 	/* Repeat prompt for unrecognized keys */
 	editor_set_status_message("File changed on disk. [R]eload [K]eep: ");
-	return true;
-}
-
-/*****************************************************************************
- * Auto-format Prompt
- *****************************************************************************/
-
-/*
- * Enter auto-format prompt mode after tables are reformatted.
- */
-void autoformat_prompt_enter(int table_count)
-{
-	autoformat_prompt.active = true;
-	autoformat_prompt.table_count = table_count;
-	if (table_count == 1) {
-		editor_set_status_message("1 table auto-formatted. Save? [y]es [n]o");
-	} else {
-		editor_set_status_message("%d tables auto-formatted. Save? [y]es [n]o",
-					  table_count);
-	}
-}
-
-/*
- * Check if auto-format prompt is currently active.
- */
-bool autoformat_prompt_is_active(void)
-{
-	return autoformat_prompt.active;
-}
-
-/*
- * Handle input in auto-format prompt mode.
- */
-bool autoformat_prompt_handle_key(int key)
-{
-	if (!autoformat_prompt.active)
-		return false;
-
-	if (key == 'y' || key == 'Y') {
-		autoformat_prompt.active = false;
-		editor_save();
-		return true;
-	}
-
-	if (key == 'n' || key == 'N' || key == '\x1b') {
-		autoformat_prompt.active = false;
-		if (autoformat_prompt.table_count == 1) {
-			editor_set_status_message("1 table formatted (not saved)");
-		} else {
-			editor_set_status_message("%d tables formatted (not saved)",
-						  autoformat_prompt.table_count);
-		}
-		return true;
-	}
-
-	/* Repeat prompt for unrecognized keys */
-	if (autoformat_prompt.table_count == 1) {
-		editor_set_status_message("1 table auto-formatted. Save? [y]es [n]o");
-	} else {
-		editor_set_status_message("%d tables auto-formatted. Save? [y]es [n]o",
-					  autoformat_prompt.table_count);
-	}
 	return true;
 }
 

@@ -248,26 +248,6 @@ bool reload_prompt_is_active(void);
 void editor_reload_file(void);
 
 /*****************************************************************************
- * Auto-format Prompt
- *****************************************************************************/
-
-/*
- * Enter auto-format prompt mode after tables are reformatted.
- */
-void autoformat_prompt_enter(int table_count);
-
-/*
- * Handle input in auto-format prompt mode.
- * Returns true if key was handled.
- */
-bool autoformat_prompt_handle_key(int key);
-
-/*
- * Check if auto-format prompt is currently active.
- */
-bool autoformat_prompt_is_active(void);
-
-/*****************************************************************************
  * External File Change Detection
  *****************************************************************************/
 

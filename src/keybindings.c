@@ -86,6 +86,7 @@ static const struct {
 	{ ACTION_HELP, "help" },
 	{ ACTION_THEME_PICKER, "theme_picker" },
 	{ ACTION_CHECK_UPDATES, "check_updates" },
+	{ ACTION_FORMAT_TABLES, "format_tables" },
 	{ ACTION_ESCAPE, "escape" },
 	{ ACTION_INSERT_TAB, "insert_tab" },
 	{ ACTION_INSERT_BACKTAB, "insert_backtab" },
@@ -227,6 +228,7 @@ keybinding_load_defaults(void)
 	keybinding_add(KEY_F1, ACTION_HELP);
 	keybinding_add(KEY_CTRL_T, ACTION_THEME_PICKER);
 	keybinding_add(KEY_ALT_U, ACTION_CHECK_UPDATES);
+	keybinding_add(KEY_ALT_T, ACTION_FORMAT_TABLES);
 
 	/* Special keys */
 	keybinding_add(27, ACTION_ESCAPE);  /* ESC */
@@ -385,6 +387,7 @@ keybinding_parse_key(const char *str)
 			case 'k': return KEY_ALT_K;
 			case 'l': return KEY_ALT_L;
 			case 'm': return KEY_ALT_M;
+			case 't': return KEY_ALT_T;
 			case 'n': return KEY_ALT_N;
 			case 'p': return KEY_ALT_P;
 			case 'r': return KEY_ALT_R;
@@ -488,6 +491,7 @@ keybinding_key_string(enum editor_action action, char *buffer, size_t size)
 		case KEY_ALT_K: snprintf(buffer, size, "Alt+K"); return buffer;
 		case KEY_ALT_L: snprintf(buffer, size, "Alt+L"); return buffer;
 		case KEY_ALT_M: snprintf(buffer, size, "Alt+M"); return buffer;
+		case KEY_ALT_T: snprintf(buffer, size, "Alt+T"); return buffer;
 		case KEY_ALT_N: snprintf(buffer, size, "Alt+N"); return buffer;
 		case KEY_ALT_P: snprintf(buffer, size, "Alt+P"); return buffer;
 		case KEY_ALT_R: snprintf(buffer, size, "Alt+R"); return buffer;

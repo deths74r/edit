@@ -284,6 +284,7 @@ enum key_code {
 	KEY_ALT_R = -66,
 	KEY_ALT_U = -65,
 	KEY_ALT_M = -71,
+	KEY_ALT_T = -72,
 
 	/* Shift+Tab (backtab). */
 	KEY_SHIFT_TAB = -78,
@@ -393,6 +394,7 @@ enum editor_action {
 	ACTION_HELP,
 	ACTION_THEME_PICKER,
 	ACTION_CHECK_UPDATES,
+	ACTION_FORMAT_TABLES,
 
 	/* Special */
 	ACTION_ESCAPE,
@@ -1305,12 +1307,6 @@ struct quit_prompt_state {
 /* Reload prompt state - shown when file changes externally. */
 struct reload_prompt_state {
 	bool active;
-};
-
-/* Auto-format prompt state - shown when tables are auto-formatted on open. */
-struct autoformat_prompt_state {
-	bool active;
-	int table_count;
 };
 
 /*****************************************************************************
