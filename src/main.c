@@ -1,6 +1,6 @@
 /*
- * SPDX-License-Identifier: GPL-2.0-only
- * Copyright (C) 2024-2025 Edward Edmonds
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2024-2026 Edward Edmonds
  */
 
 /*
@@ -15,6 +15,7 @@
 #define _GNU_SOURCE
 
 #include "edit.h"
+#include "keybindings.h"
 
 /*****************************************************************************
  * External Dependencies
@@ -97,6 +98,7 @@ int main(int argument_count, char *argument_values[])
 	signal(SIGILL, fatal_signal_handler);
 
 	editor_init();
+	keybinding_init();
 	editor_update_screen_size();
 
 	/* Load content from stdin pipe if available */

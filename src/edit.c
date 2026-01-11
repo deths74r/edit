@@ -1,6 +1,6 @@
 /*
- * SPDX-License-Identifier: GPL-2.0-only
- * Copyright (C) 2024-2025 Edward Edmonds
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2024-2026 Edward Edmonds
  */
 
 /*****************************************************************************
@@ -21,6 +21,7 @@
 
 #include "edit.h"
 #include "syntax.h"
+#include "keybindings.h"
 
 /*****************************************************************************
  * Global State
@@ -6893,317 +6894,389 @@ static void editor_outdent_lines(void)
 	                          lines_modified != 1 ? "s" : "");
 }
 
+/*****************************************************************************
+ * Action Execution
+ *
+ * Execute editor actions by enum value. This decouples the key handling
+ * from the action logic, enabling customizable keybindings.
+ *****************************************************************************/
+
+/*
+ * Execute an editor action.
+ * Returns true if the action was handled, false otherwise.
+ */
+static bool
+execute_action(enum editor_action action)
+{
+	switch (action) {
+	case ACTION_NONE:
+		return false;
+
+	/* File operations */
+	case ACTION_QUIT:
+		if (editor.buffer.is_modified) {
+			quit_prompt_enter();
+		} else {
+			editor_perform_exit();
+		}
+		return true;
+
+	case ACTION_SAVE:
+		editor_save();
+		return true;
+
+	case ACTION_SAVE_AS:
+		save_as_enter();
+		return true;
+
+	case ACTION_OPEN:
+		editor_command_open_file();
+		return true;
+
+	case ACTION_NEW:
+		if (editor.buffer.is_modified) {
+			editor_set_status_message("Save changes? (y/n)");
+		}
+		buffer_free(&editor.buffer);
+		buffer_init(&editor.buffer);
+		editor.cursor_row = 0;
+		editor.cursor_column = 0;
+		editor.row_offset = 0;
+		editor.column_offset = 0;
+		selection_clear();
+		editor_set_status_message("New file");
+		return true;
+
+	/* Edit operations */
+	case ACTION_UNDO:
+		editor_undo();
+		return true;
+
+	case ACTION_REDO:
+		editor_redo();
+		return true;
+
+	case ACTION_CUT:
+		editor_cut();
+		return true;
+
+	case ACTION_COPY:
+		editor_copy();
+		return true;
+
+	case ACTION_PASTE:
+		editor_paste();
+		return true;
+
+	case ACTION_DELETE_LINE:
+		editor_delete_line();
+		return true;
+
+	case ACTION_DUPLICATE_LINE:
+		editor_duplicate_line();
+		return true;
+
+	/* Cursor movement */
+	case ACTION_MOVE_UP:
+		editor_move_cursor(KEY_ARROW_UP);
+		return true;
+
+	case ACTION_MOVE_DOWN:
+		editor_move_cursor(KEY_ARROW_DOWN);
+		return true;
+
+	case ACTION_MOVE_LEFT:
+		editor_move_cursor(KEY_ARROW_LEFT);
+		return true;
+
+	case ACTION_MOVE_RIGHT:
+		editor_move_cursor(KEY_ARROW_RIGHT);
+		return true;
+
+	case ACTION_MOVE_WORD_LEFT:
+		editor_move_cursor(KEY_CTRL_ARROW_LEFT);
+		return true;
+
+	case ACTION_MOVE_WORD_RIGHT:
+		editor_move_cursor(KEY_CTRL_ARROW_RIGHT);
+		return true;
+
+	case ACTION_MOVE_LINE_START:
+		editor_move_cursor(KEY_HOME);
+		return true;
+
+	case ACTION_MOVE_LINE_END:
+		editor_move_cursor(KEY_END);
+		return true;
+
+	case ACTION_MOVE_PAGE_UP:
+		editor_move_cursor(KEY_PAGE_UP);
+		return true;
+
+	case ACTION_MOVE_PAGE_DOWN:
+		editor_move_cursor(KEY_PAGE_DOWN);
+		return true;
+
+	case ACTION_MOVE_FILE_START:
+		editor.cursor_row = 0;
+		editor.cursor_column = 0;
+		editor.row_offset = 0;
+		editor.column_offset = 0;
+		selection_clear();
+		return true;
+
+	case ACTION_MOVE_FILE_END:
+		if (editor.buffer.line_count > 0) {
+			editor.cursor_row = editor.buffer.line_count - 1;
+			struct line *last_line = &editor.buffer.lines[editor.cursor_row];
+			line_warm(last_line, &editor.buffer);
+			editor.cursor_column = last_line->cell_count;
+		}
+		selection_clear();
+		return true;
+
+	case ACTION_GO_TO_LINE:
+		goto_line_enter();
+		return true;
+
+	/* Selection */
+	case ACTION_SELECT_UP:
+		editor_move_cursor(KEY_SHIFT_ARROW_UP);
+		return true;
+
+	case ACTION_SELECT_DOWN:
+		editor_move_cursor(KEY_SHIFT_ARROW_DOWN);
+		return true;
+
+	case ACTION_SELECT_LEFT:
+		editor_move_cursor(KEY_SHIFT_ARROW_LEFT);
+		return true;
+
+	case ACTION_SELECT_RIGHT:
+		editor_move_cursor(KEY_SHIFT_ARROW_RIGHT);
+		return true;
+
+	case ACTION_SELECT_WORD_LEFT:
+		editor_move_cursor(KEY_CTRL_SHIFT_ARROW_LEFT);
+		return true;
+
+	case ACTION_SELECT_WORD_RIGHT:
+		editor_move_cursor(KEY_CTRL_SHIFT_ARROW_RIGHT);
+		return true;
+
+	case ACTION_SELECT_LINE_START:
+		editor_move_cursor(KEY_SHIFT_HOME);
+		return true;
+
+	case ACTION_SELECT_LINE_END:
+		editor_move_cursor(KEY_SHIFT_END);
+		return true;
+
+	case ACTION_SELECT_PAGE_UP:
+		editor_move_cursor(KEY_SHIFT_PAGE_UP);
+		return true;
+
+	case ACTION_SELECT_PAGE_DOWN:
+		editor_move_cursor(KEY_SHIFT_PAGE_DOWN);
+		return true;
+
+	case ACTION_SELECT_ALL:
+		editor_select_all();
+		return true;
+
+	case ACTION_SELECT_WORD:
+		editor_select_word(editor.cursor_row, editor.cursor_column);
+		return true;
+
+	case ACTION_ADD_CURSOR_NEXT:
+		editor_select_next_occurrence();
+		return true;
+
+	/* Search */
+	case ACTION_FIND:
+		search_enter();
+		return true;
+
+	case ACTION_FIND_REPLACE:
+		replace_enter();
+		return true;
+
+	case ACTION_FIND_NEXT:
+		search_find_next(true);
+		return true;
+
+	case ACTION_FIND_PREV:
+		search_find_previous(true);
+		return true;
+
+	/* Line operations */
+	case ACTION_MOVE_LINE_UP:
+		editor_move_line_up();
+		return true;
+
+	case ACTION_MOVE_LINE_DOWN:
+		editor_move_line_down();
+		return true;
+
+	case ACTION_TOGGLE_COMMENT:
+		editor_toggle_comment();
+		return true;
+
+	case ACTION_JUMP_TO_MATCH:
+		editor_jump_to_match();
+		return true;
+
+	/* View toggles */
+	case ACTION_TOGGLE_LINE_NUMBERS:
+		editor.show_line_numbers = !editor.show_line_numbers;
+		editor_update_gutter_width();
+		editor_set_status_message("Line numbers %s",
+		                          editor.show_line_numbers ? "on" : "off");
+		return true;
+
+	case ACTION_TOGGLE_WHITESPACE:
+		editor.show_whitespace = !editor.show_whitespace;
+		editor_set_status_message("Whitespace %s",
+		                          editor.show_whitespace ? "visible" : "hidden");
+		return true;
+
+	case ACTION_CYCLE_WRAP_MODE:
+		editor_cycle_wrap_mode();
+		return true;
+
+	case ACTION_CYCLE_WRAP_INDICATOR:
+		editor_cycle_wrap_indicator();
+		return true;
+
+	case ACTION_CYCLE_COLOR_COLUMN:
+		if (editor.color_column == 0) {
+			editor.color_column = 80;
+		} else if (editor.color_column == 80) {
+			editor.color_column = 120;
+		} else {
+			editor.color_column = 0;
+		}
+		if (editor.color_column > 0) {
+			editor_set_status_message("Column %u (%s)",
+			                          editor.color_column,
+			                          color_column_style_name(editor.color_column_style));
+		} else {
+			editor_set_status_message("Color column off");
+		}
+		return true;
+
+	case ACTION_TOGGLE_HYBRID_MODE:
+		if (syntax_is_markdown_file(editor.buffer.filename)) {
+			editor.hybrid_mode = !editor.hybrid_mode;
+			editor_set_status_message("Markdown %s mode",
+			                          editor.hybrid_mode ? "hybrid" : "raw");
+			for (uint32_t i = editor.row_offset;
+			     i < editor.row_offset + editor.screen_rows &&
+			     i < editor.buffer.line_count; i++) {
+				struct line *line = &editor.buffer.lines[i];
+				if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
+					syntax_highlight_line(line, &editor.buffer, i);
+				}
+			}
+		} else {
+			editor_set_status_message("Hybrid mode only available for Markdown files");
+		}
+		return true;
+
+	/* Dialogs */
+	case ACTION_HELP:
+		help_dialog();
+		return true;
+
+	case ACTION_THEME_PICKER:
+		editor_command_theme_picker();
+		return true;
+
+	case ACTION_CHECK_UPDATES:
+		editor_check_for_updates();
+		return true;
+
+	/* Special */
+	case ACTION_ESCAPE:
+		if (editor.cursor_count > 0) {
+			multicursor_exit();
+		} else {
+			selection_clear();
+		}
+		return true;
+
+	case ACTION_INSERT_TAB:
+		if (editor.selection_active && !selection_is_empty()) {
+			editor_indent_lines();
+		} else if (!editor_table_next_cell()) {
+			editor_insert_character('\t');
+		}
+		return true;
+
+	case ACTION_INSERT_BACKTAB:
+		if (!editor_table_prev_cell()) {
+			editor_outdent_lines();
+		}
+		return true;
+
+	case ACTION_INSERT_NEWLINE:
+		editor_insert_newline();
+		return true;
+
+	case ACTION_BACKSPACE:
+		multicursor_backspace();
+		return true;
+
+	case ACTION_DELETE:
+		editor_delete_character();
+		return true;
+
+	case ACTION_COUNT:
+		return false;
+	}
+
+	return false;
+}
+
 void editor_process_keypress(void)
 {
 	int key = input_read_key();
 
-	if (key == -1) {
+	if (key == -1)
 		return;
-	}
 
+	/* Handle terminal resize directly */
 	if (key == KEY_RESIZE) {
-		/* Terminal resize */
 		editor_update_screen_size();
 		return;
 	}
 
-	/* Handle Save As mode input first */
-	if (save_as_handle_key(key)) {
+	/* Handle mouse events directly (processed in input_read_key) */
+	if (key == KEY_MOUSE_EVENT)
 		return;
-	}
 
-	/* Handle search mode input */
-	if (search_handle_key(key)) {
+	/* Handle mode-specific input */
+	if (save_as_handle_key(key))
 		return;
-	}
-
-	/* Handle go-to-line mode input */
-	if (goto_handle_key(key)) {
+	if (search_handle_key(key))
 		return;
-	}
-
-	/* Handle quit prompt input */
-	if (quit_prompt_handle_key(key)) {
+	if (goto_handle_key(key))
 		return;
-	}
-
-	/* Handle reload prompt input */
-	if (reload_prompt_handle_key(key)) {
+	if (quit_prompt_handle_key(key))
 		return;
-	}
+	if (reload_prompt_handle_key(key))
+		return;
 
-	switch (key) {
-		case CONTROL_KEY('q'):
-			if (editor.buffer.is_modified) {
-				/* Unsaved changes - show prompt */
-				quit_prompt_enter();
-				return;
-			}
-			/* No unsaved changes - exit immediately */
-			editor_perform_exit();
-			break;
+	/* Look up action for this key */
+	enum editor_action action = keybinding_lookup(key);
+	if (execute_action(action))
+		return;
 
-		case CONTROL_KEY('s'):
-			editor_save();
-			break;
+	/* Ctrl-L: refresh (ignore) */
+	if (key == CONTROL_KEY('l'))
+		return;
 
-		case KEY_ALT_SHIFT_S:
-			save_as_enter();
-			break;
-
-		case KEY_CTRL_O:
-			editor_command_open_file();
-			break;
-
-		case KEY_CTRL_T:
-			editor_command_theme_picker();
-			break;
-
-		case KEY_F1:
-			help_dialog();
-			break;
-
-		case KEY_CTRL_N:
-			/* New file - prompt to save if modified, then clear buffer */
-			if (editor.buffer.is_modified) {
-				editor_set_status_message("Save changes? (y/n)");
-				/* TODO: implement save prompt before new file */
-			}
-			buffer_free(&editor.buffer);
-			buffer_init(&editor.buffer);
-			editor.cursor_row = 0;
-			editor.cursor_column = 0;
-			editor.row_offset = 0;
-			editor.column_offset = 0;
-			selection_clear();
-			editor_set_status_message("New file");
-			break;
-
-		case KEY_CTRL_HOME:
-			/* Go to beginning of file */
-			editor.cursor_row = 0;
-			editor.cursor_column = 0;
-			editor.row_offset = 0;
-			editor.column_offset = 0;
-			selection_clear();
-			break;
-
-		case KEY_CTRL_END:
-			/* Go to end of file */
-			if (editor.buffer.line_count > 0) {
-				editor.cursor_row = editor.buffer.line_count - 1;
-				struct line *last_line = &editor.buffer.lines[editor.cursor_row];
-				line_warm(last_line, &editor.buffer);
-				editor.cursor_column = last_line->cell_count;
-			}
-			selection_clear();
-			break;
-
-		case CONTROL_KEY('c'):
-			editor_copy();
-			break;
-
-		case CONTROL_KEY('x'):
-			editor_cut();
-			break;
-
-		case CONTROL_KEY('v'):
-			editor_paste();
-			break;
-
-		case CONTROL_KEY('z'):
-			editor_undo();
-			break;
-
-		case CONTROL_KEY('y'):
-			editor_redo();
-			break;
-
-		case KEY_ALT_L:
-			editor.show_line_numbers = !editor.show_line_numbers;
-			editor_update_gutter_width();
-			editor_set_status_message("Line numbers %s", editor.show_line_numbers ? "on" : "off");
-			break;
-
-		case KEY_ALT_SHIFT_W:
-			editor.show_whitespace = !editor.show_whitespace;
-			editor_set_status_message("Whitespace %s", editor.show_whitespace ? "visible" : "hidden");
-			break;
-
-		case KEY_ALT_SHIFT_C:
-			/* Cycle color column: 0 -> 80 -> 120 -> 0 */
-			if (editor.color_column == 0) {
-				editor.color_column = 80;
-			} else if (editor.color_column == 80) {
-				editor.color_column = 120;
-			} else {
-				editor.color_column = 0;
-			}
-			if (editor.color_column > 0) {
-				editor_set_status_message("Column %u (%s)",
-				                          editor.color_column,
-				                          color_column_style_name(editor.color_column_style));
-			} else {
-				editor_set_status_message("Color column off");
-			}
-			break;
-
-		case KEY_ALT_U:
-			editor_check_for_updates();
-			break;
-
-		case KEY_ALT_Z:
-			editor_cycle_wrap_mode();
-			break;
-
-		case KEY_ALT_SHIFT_Z:
-			editor_cycle_wrap_indicator();
-			break;
-
-		case CONTROL_KEY('f'):
-			search_enter();
-			break;
-
-		case CONTROL_KEY('r'):
-			replace_enter();
-			break;
-
-		case CONTROL_KEY('g'):
-			goto_line_enter();
-			break;
-
-		case CONTROL_KEY('a'):
-			editor_select_all();
-			break;
-
-		case CONTROL_KEY('d'):
-			editor_select_next_occurrence();
-			break;
-
-		case KEY_ALT_K:
-			editor_delete_line();
-			break;
-
-		case KEY_ALT_D:
-			editor_duplicate_line();
-			break;
-
-		case KEY_ALT_ARROW_UP:
-			editor_move_line_up();
-			break;
-
-		case KEY_ALT_ARROW_DOWN:
-			editor_move_line_down();
-			break;
-
-		case 0x1f:  /* Ctrl+/ in many terminals */
-		case KEY_ALT_SLASH:
-			editor_toggle_comment();
-			break;
-
-		case 0x1d:  /* Ctrl+] */
-		case KEY_ALT_BRACKET:
-			editor_jump_to_match();
-			break;
-
-		case KEY_ALT_M:
-			/* Toggle hybrid markdown rendering mode */
-			if (syntax_is_markdown_file(editor.buffer.filename)) {
-				editor.hybrid_mode = !editor.hybrid_mode;
-				editor_set_status_message("Markdown %s mode",
-				                          editor.hybrid_mode ? "hybrid" : "raw");
-				/* Re-highlight visible lines to update element cache */
-				for (uint32_t i = editor.row_offset;
-				     i < editor.row_offset + editor.screen_rows &&
-				     i < editor.buffer.line_count; i++) {
-					struct line *line = &editor.buffer.lines[i];
-					if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
-						syntax_highlight_line(line, &editor.buffer, i);
-					}
-				}
-			} else {
-				editor_set_status_message("Hybrid mode only available for Markdown files");
-			}
-			break;
-
-		case KEY_ARROW_UP:
-		case KEY_ARROW_DOWN:
-		case KEY_ARROW_LEFT:
-		case KEY_ARROW_RIGHT:
-		case KEY_CTRL_ARROW_LEFT:
-		case KEY_CTRL_ARROW_RIGHT:
-		case KEY_HOME:
-		case KEY_END:
-		case KEY_PAGE_UP:
-		case KEY_PAGE_DOWN:
-		case KEY_SHIFT_ARROW_UP:
-		case KEY_SHIFT_ARROW_DOWN:
-		case KEY_SHIFT_ARROW_LEFT:
-		case KEY_SHIFT_ARROW_RIGHT:
-		case KEY_SHIFT_HOME:
-		case KEY_SHIFT_END:
-		case KEY_SHIFT_PAGE_UP:
-		case KEY_SHIFT_PAGE_DOWN:
-		case KEY_CTRL_SHIFT_ARROW_LEFT:
-		case KEY_CTRL_SHIFT_ARROW_RIGHT:
-			editor_move_cursor(key);
-			break;
-
-		case KEY_BACKSPACE:
-			multicursor_backspace();
-			break;
-
-		case CONTROL_KEY('h'):
-			/* CUA: Ctrl+H opens find & replace */
-			replace_enter();
-			break;
-
-		case KEY_DELETE:
-			editor_delete_character();
-			break;
-
-		case '\r':
-			editor_insert_newline();
-			break;
-
-		case '\x1b':
-			/* Escape exits multi-cursor mode first, then clears selection */
-			if (editor.cursor_count > 0) {
-				multicursor_exit();
-			} else {
-				selection_clear();
-			}
-			break;
-
-		case CONTROL_KEY('l'):
-			/* Ctrl-L: ignore (refresh) */
-			break;
-
-		case KEY_MOUSE_EVENT:
-			/* Mouse events are handled in input_read_key via editor_handle_mouse */
-			break;
-
-		case '\t':
-			/* Tab navigates in tables, indents with selection, otherwise inserts tab */
-			if (editor.selection_active && !selection_is_empty()) {
-				editor_indent_lines();
-			} else if (!editor_table_next_cell()) {
-				editor_insert_character('\t');
-			}
-			break;
-
-		case KEY_SHIFT_TAB:
-			/* Shift+Tab navigates back in tables, otherwise outdents */
-			if (!editor_table_prev_cell()) {
-				editor_outdent_lines();
-			}
-			break;
-
-		default:
-			/* Insert printable ASCII (32-126) and Unicode codepoints (>= 128) */
-			if ((key >= 32 && key < 127) || key >= 128) {
-				multicursor_insert_character((uint32_t)key);
-			}
-			break;
-	}
+	/* Insert printable ASCII (32-126) and Unicode codepoints (>= 128) */
+	if ((key >= 32 && key < 127) || key >= 128)
+		multicursor_insert_character((uint32_t)key);
 }

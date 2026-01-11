@@ -1,6 +1,6 @@
 /*
- * SPDX-License-Identifier: GPL-2.0-only
- * Copyright (C) 2024-2025 Edward Edmonds
+ * SPDX-License-Identifier: MIT
+ * Copyright (c) 2024-2026 Edward Edmonds
  */
 
 /*
@@ -78,6 +78,7 @@
 /* Theme directory and config file locations (relative to HOME) */
 #define THEME_DIR "/.edit/themes/"
 #define CONFIG_FILE "/.editrc"
+#define KEYBINDINGS_FILE "/.edit/keybindings.ini"
 
 /* Double-click timing threshold for dialogs (milliseconds) */
 #define DIALOG_DOUBLE_CLICK_MS 400
@@ -310,6 +311,98 @@ enum key_code {
 
 	/* Mouse events (handled internally, not returned). */
 	KEY_MOUSE_EVENT = -3
+};
+
+/*****************************************************************************
+ * Editor Actions
+ *
+ * Actions are logical operations that can be bound to keys. This decouples
+ * the physical key from the operation, enabling customizable keybindings.
+ *****************************************************************************/
+
+enum editor_action {
+	ACTION_NONE = 0,
+
+	/* File operations */
+	ACTION_QUIT,
+	ACTION_SAVE,
+	ACTION_SAVE_AS,
+	ACTION_OPEN,
+	ACTION_NEW,
+
+	/* Edit operations */
+	ACTION_UNDO,
+	ACTION_REDO,
+	ACTION_CUT,
+	ACTION_COPY,
+	ACTION_PASTE,
+	ACTION_DELETE_LINE,
+	ACTION_DUPLICATE_LINE,
+
+	/* Cursor movement */
+	ACTION_MOVE_UP,
+	ACTION_MOVE_DOWN,
+	ACTION_MOVE_LEFT,
+	ACTION_MOVE_RIGHT,
+	ACTION_MOVE_WORD_LEFT,
+	ACTION_MOVE_WORD_RIGHT,
+	ACTION_MOVE_LINE_START,
+	ACTION_MOVE_LINE_END,
+	ACTION_MOVE_PAGE_UP,
+	ACTION_MOVE_PAGE_DOWN,
+	ACTION_MOVE_FILE_START,
+	ACTION_MOVE_FILE_END,
+	ACTION_GO_TO_LINE,
+
+	/* Selection */
+	ACTION_SELECT_UP,
+	ACTION_SELECT_DOWN,
+	ACTION_SELECT_LEFT,
+	ACTION_SELECT_RIGHT,
+	ACTION_SELECT_WORD_LEFT,
+	ACTION_SELECT_WORD_RIGHT,
+	ACTION_SELECT_LINE_START,
+	ACTION_SELECT_LINE_END,
+	ACTION_SELECT_PAGE_UP,
+	ACTION_SELECT_PAGE_DOWN,
+	ACTION_SELECT_ALL,
+	ACTION_SELECT_WORD,
+	ACTION_ADD_CURSOR_NEXT,
+
+	/* Search */
+	ACTION_FIND,
+	ACTION_FIND_REPLACE,
+	ACTION_FIND_NEXT,
+	ACTION_FIND_PREV,
+
+	/* Line operations */
+	ACTION_MOVE_LINE_UP,
+	ACTION_MOVE_LINE_DOWN,
+	ACTION_TOGGLE_COMMENT,
+	ACTION_JUMP_TO_MATCH,
+
+	/* View toggles */
+	ACTION_TOGGLE_LINE_NUMBERS,
+	ACTION_TOGGLE_WHITESPACE,
+	ACTION_CYCLE_WRAP_MODE,
+	ACTION_CYCLE_WRAP_INDICATOR,
+	ACTION_CYCLE_COLOR_COLUMN,
+	ACTION_TOGGLE_HYBRID_MODE,
+
+	/* Dialogs */
+	ACTION_HELP,
+	ACTION_THEME_PICKER,
+	ACTION_CHECK_UPDATES,
+
+	/* Special */
+	ACTION_ESCAPE,
+	ACTION_INSERT_TAB,
+	ACTION_INSERT_BACKTAB,
+	ACTION_INSERT_NEWLINE,
+	ACTION_BACKSPACE,
+	ACTION_DELETE,
+
+	ACTION_COUNT  /* Total number of actions */
 };
 
 /*****************************************************************************
