@@ -1472,6 +1472,63 @@ int32_t table_reformat(struct buffer *buffer, uint32_t row)
 	table_info_free(info);
 	return 0;  /* TODO: Calculate cursor adjustment */
 }
+/*
+ * Reformat all tables in a markdown buffer.
+ * Returns the count of tables that were modified (content actually changed).
+ * Used for auto-formatting tables when opening a markdown file.
+ */
+int tables_reformat_all(struct buffer *buffer)
+{
+	if (!buffer || buffer->line_count == 0)
+		return 0;
+	int modified_count = 0;
+	uint32_t row = 0;
+	while (row < buffer->line_count) {
+		struct line *line = &buffer->lines[row];
+		line_warm(line, buffer);
+		/* Look for table separator rows to find tables */
+		if (md_is_table_separator(line)) {
+			uint32_t start_row, end_row, separator_row;
+			if (table_detect_bounds(buffer, row, &start_row, &end_row,
+						&separator_row)) {
+				/*
+				 * Capture content before reformatting using
+				 * a simple hash of all cell codepoints.
+				 */
+				uint64_t hash_before = 0;
+				for (uint32_t r = start_row; r <= end_row; r++) {
+					struct line *l = &buffer->lines[r];
+					line_warm(l, buffer);
+					for (uint32_t c = 0; c < l->cell_count; c++) {
+						hash_before = hash_before * 31 +
+							      l->cells[c].codepoint;
+					}
+					hash_before = hash_before * 31 + l->cell_count;
+				}
+				/* Reformat the table */
+				table_reformat(buffer, row);
+				/* Capture content after reformatting */
+				uint64_t hash_after = 0;
+				for (uint32_t r = start_row; r <= end_row; r++) {
+					struct line *l = &buffer->lines[r];
+					for (uint32_t c = 0; c < l->cell_count; c++) {
+						hash_after = hash_after * 31 +
+							     l->cells[c].codepoint;
+					}
+					hash_after = hash_after * 31 + l->cell_count;
+				}
+				if (hash_before != hash_after) {
+					modified_count++;
+				}
+				/* Skip to after this table */
+				row = end_row + 1;
+				continue;
+			}
+		}
+		row++;
+	}
+	return modified_count;
+}
 
 /*
  * Parse inline code span starting at pos. Returns end position.

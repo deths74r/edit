@@ -1307,6 +1307,12 @@ struct reload_prompt_state {
 	bool active;
 };
 
+/* Auto-format prompt state - shown when tables are auto-formatted on open. */
+struct autoformat_prompt_state {
+	bool active;
+	int table_count;
+};
+
 /*****************************************************************************
  * Clipboard
  *****************************************************************************/

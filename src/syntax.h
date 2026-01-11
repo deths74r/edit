@@ -275,4 +275,10 @@ void table_calculate_widths(struct buffer *buffer, struct table_info *info);
  */
 int32_t table_reformat(struct buffer *buffer, uint32_t row);
 
+/*
+ * Reformat all tables in a markdown buffer.
+ * Returns count of tables that were modified (content actually changed).
+ */
+int tables_reformat_all(struct buffer *buffer);
+
 #endif /* EDIT_SYNTAX_H */
