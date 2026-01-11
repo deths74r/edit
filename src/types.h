@@ -74,6 +74,8 @@
 
 /* Maximum number of simultaneous cursors for multi-cursor editing. */
 #define MAX_CURSORS 100
+/* Maximum number of open buffers (tabs/contexts). */
+#define MAX_CONTEXTS 32
 
 /* Theme directory and config file locations (relative to HOME) */
 #define THEME_DIR "/.edit/themes/"
@@ -1034,12 +1036,90 @@ struct cursor {
 };
 
 /*****************************************************************************
+ * Search State
+ *****************************************************************************/
+/* Incremental search state (per-buffer). */
+struct search_state {
+	bool active;                    /* Whether search mode is active */
+	char query[256];                /* The search query (UTF-8) */
+	uint32_t query_length;          /* Length of query in bytes */
+	uint32_t saved_cursor_row;      /* Cursor position when search started */
+	uint32_t saved_cursor_column;
+	uint32_t saved_row_offset;      /* Scroll position when search started */
+	uint32_t saved_column_offset;
+	uint32_t match_row;             /* Current match position */
+	uint32_t match_column;
+	bool has_match;                 /* Whether current query has a match */
+	int direction;                  /* 1 = forward, -1 = backward */
+	/* Replace mode fields */
+	bool replace_mode;              /* true = replace mode, false = search only */
+	char replace_text[256];         /* Replacement text (UTF-8) */
+	uint32_t replace_length;        /* Length of replacement text in bytes */
+	bool editing_replace;           /* true = editing replace field */
+	/* Search options */
+	bool case_sensitive;            /* Match exact case */
+	bool whole_word;                /* Match complete words only */
+	bool use_regex;                 /* Use regular expressions */
+	/* Compiled regex state */
+	regex_t compiled_regex;         /* Compiled pattern */
+	bool regex_compiled;            /* True if compiled_regex is valid */
+	char regex_error[128];          /* Error message if compilation failed */
+};
+/*****************************************************************************
+ * Editor Context (Per-Buffer State)
+ *****************************************************************************/
+/*
+ * Per-buffer editing context. Each open file has its own context containing
+ * the buffer content, cursor position, scroll state, and search state.
+ * Switching tabs/buffers means switching which context is active.
+ */
+struct editor_context {
+	/* The text buffer (contains content, filename, undo history). */
+	struct buffer buffer;
+	/* Cursor position as line index (0-based). */
+	uint32_t cursor_row;
+	/* Cursor position as cell index within the line (0-based). */
+	uint32_t cursor_column;
+	/* First visible line (for vertical scrolling). */
+	uint32_t row_offset;
+	/* First visible column (for horizontal scrolling). */
+	uint32_t column_offset;
+	/* Selection anchor position (fixed point when extending selection). */
+	uint32_t selection_anchor_row;
+	uint32_t selection_anchor_column;
+	/* Whether a selection is currently active. */
+	bool selection_active;
+	/* Multi-cursor support for this buffer. */
+	struct cursor cursors[MAX_CURSORS];
+	uint32_t cursor_count;       /* Number of active cursors (0 = single cursor) */
+	uint32_t primary_cursor;     /* Index of main cursor for scrolling */
+	/* Width of the line number gutter (depends on this buffer's line count). */
+	uint32_t gutter_width;
+	/* Per-buffer search state. */
+	struct search_state search;
+	/* Hybrid markdown rendering mode (per-file setting). */
+	bool hybrid_mode;
+	char link_url_preview[512];
+	bool link_preview_active;
+};
+/*****************************************************************************
  * Editor State
  *****************************************************************************/
 
 /* Global editor state including the buffer, cursor position, scroll
  * offsets, screen dimensions, and UI settings. */
 struct editor_state {
+	/*
+	 * Multi-buffer context management.
+	 * contexts[] holds all open buffers, active_context is the visible one.
+	 */
+	struct editor_context contexts[MAX_CONTEXTS];
+	uint32_t context_count;          /* Number of open contexts (>= 1) */
+	uint32_t active_context;         /* Index of currently active context */
+	/*
+	 * Legacy per-buffer fields (to be migrated to contexts in Phase 2).
+	 * These are temporarily kept for compatibility during transition.
+	 */
 	/* The text buffer being edited. */
 	struct buffer buffer;
 
@@ -1117,40 +1197,12 @@ struct editor_state {
 	bool help_file_open;         /* True if currently viewing help */
 };
 
-/*****************************************************************************
- * Search State
- *****************************************************************************/
-
-/* Incremental search state. */
-struct search_state {
-	bool active;                    /* Whether search mode is active */
-	char query[256];                /* The search query (UTF-8) */
-	uint32_t query_length;          /* Length of query in bytes */
-	uint32_t saved_cursor_row;      /* Cursor position when search started */
-	uint32_t saved_cursor_column;
-	uint32_t saved_row_offset;      /* Scroll position when search started */
-	uint32_t saved_column_offset;
-	uint32_t match_row;             /* Current match position */
-	uint32_t match_column;
-	bool has_match;                 /* Whether current query has a match */
-	int direction;                  /* 1 = forward, -1 = backward */
-
-	/* Replace mode fields */
-	bool replace_mode;              /* true = replace mode, false = search only */
-	char replace_text[256];         /* Replacement text (UTF-8) */
-	uint32_t replace_length;        /* Length of replacement text in bytes */
-	bool editing_replace;           /* true = editing replace field */
-
-	/* Search options */
-	bool case_sensitive;            /* Match exact case */
-	bool whole_word;                /* Match complete words only */
-	bool use_regex;                 /* Use regular expressions */
-
-	/* Compiled regex state */
-	regex_t compiled_regex;         /* Compiled pattern */
-	bool regex_compiled;            /* True if compiled_regex is valid */
-	char regex_error[128];          /* Error message if compilation failed */
-};
+/*
+ * Convenience macros for accessing the active context.
+ * Use these instead of directly accessing editor.buffer, editor.cursor_row, etc.
+ */
+#define CTX(e)     (&(e)->contexts[(e)->active_context])
+#define BUF(e)     (&CTX(e)->buffer)
 
 /*
  * A single search match location.
