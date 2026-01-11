@@ -3598,6 +3598,32 @@ void editor_handle_mouse(struct mouse_input *mouse)
 {
 	switch (mouse->event) {
 		case MOUSE_LEFT_PRESS: {
+			/* Check for tab bar click (row 0 when tab bar visible) */
+			if (editor.context_count > 1 && mouse->row == 0) {
+				uint32_t x = 0;
+				for (uint32_t i = 0; i < editor.context_count; i++) {
+					struct buffer *buf = &editor.contexts[i].buffer;
+					const char *name = buf->filename;
+					const char *display_name;
+					if (name) {
+						const char *slash = strrchr(name, '/');
+						display_name = slash ? slash + 1 : name;
+					} else {
+						display_name = "[No Name]";
+					}
+					/* Tab width: space + name + optional [+] + space */
+					size_t name_len = strlen(display_name);
+					if (name_len > 20) name_len = 20;  /* Truncated */
+					uint32_t tab_width = 2 + (uint32_t)name_len;
+					if (buf->is_modified) tab_width += 3;  /* [+] */
+					if (mouse->column >= x && mouse->column < x + tab_width) {
+						editor_context_switch(i);
+						return;
+					}
+					x += tab_width;
+				}
+				return;  /* Click on tab bar but not on a tab */
+			}
 			/* Convert screen position to buffer position */
 			uint32_t file_row;
 			uint16_t segment;
