@@ -3776,10 +3776,17 @@ void editor_handle_mouse(struct mouse_input *mouse)
 			uint32_t content_top = (editor.context_count > 1) ? 1 : 0;  /* Skip tab bar */
 			uint32_t content_bottom = content_top + editor.screen_rows - 1;  /* Last content row */
 
-			if (mouse->row <= content_top && E_CTX->row_offset > 0) {
+			/* Track drag state for timer-based auto-scroll */
+			editor.drag_scroll.active = true;
+			editor.drag_scroll.last_row = mouse->row;
+			editor.drag_scroll.last_column = mouse->column;
+			editor.drag_scroll.at_top_edge = (mouse->row <= content_top && E_CTX->row_offset > 0);
+			editor.drag_scroll.at_bottom_edge = (mouse->row >= content_bottom);
+
+			if (editor.drag_scroll.at_top_edge) {
 				/* At top edge - scroll up */
 				E_CTX->row_offset--;
-			} else if (mouse->row >= content_bottom) {
+			} else if (editor.drag_scroll.at_bottom_edge) {
 				/* At bottom edge - scroll down */
 				uint32_t max_offset = (E_BUF->line_count > editor.screen_rows)
 					? E_BUF->line_count - editor.screen_rows : 0;
@@ -3822,6 +3829,12 @@ void editor_handle_mouse(struct mouse_input *mouse)
 			E_CTX->cursor_row = file_row;
 			E_CTX->cursor_column = cell_col;
 
+			/* Ensure cursor stays in visible area */
+			uint32_t max_visible_row = E_CTX->row_offset + editor.screen_rows - 1;
+			if (E_CTX->cursor_row > max_visible_row && max_visible_row < E_BUF->line_count) {
+				E_CTX->cursor_row = max_visible_row;
+			}
+
 			/* Ensure selection is active during drag */
 			if (!E_CTX->selection_active) {
 				selection_start();
@@ -3831,6 +3844,9 @@ void editor_handle_mouse(struct mouse_input *mouse)
 
 		case MOUSE_LEFT_RELEASE:
 			/* Selection complete; leave it active */
+			editor.drag_scroll.active = false;
+			editor.drag_scroll.at_top_edge = false;
+			editor.drag_scroll.at_bottom_edge = false;
 			break;
 
 		case MOUSE_SCROLL_UP: {
@@ -3858,6 +3874,10 @@ void editor_handle_mouse(struct mouse_input *mouse)
 					if (E_CTX->cursor_row >= E_BUF->line_count && E_BUF->line_count > 0) {
 						E_CTX->cursor_row = E_BUF->line_count - 1;
 					}
+				}
+				/* Also clamp from above (cursor above visible area) */
+				if (E_CTX->cursor_row < E_CTX->row_offset) {
+					E_CTX->cursor_row = E_CTX->row_offset;
 				}
 			}
 			break;
@@ -3895,6 +3915,43 @@ void editor_handle_mouse(struct mouse_input *mouse)
 
 		default:
 			break;
+	}
+}
+/*
+ * Handle timer-based auto-scroll during drag selection.
+ * Called from main loop when input times out while dragging.
+ */
+void editor_drag_scroll_tick(void)
+{
+	if (!editor.drag_scroll.active)
+		return;
+	if (editor.drag_scroll.at_top_edge && E_CTX->row_offset > 0) {
+		/* Scroll up and update cursor */
+		E_CTX->row_offset--;
+		if (E_CTX->cursor_row > 0) {
+			E_CTX->cursor_row--;
+			/* Move cursor to start of line when scrolling up */
+			E_CTX->cursor_column = 0;
+		}
+	} else if (editor.drag_scroll.at_bottom_edge) {
+		/* Scroll down and update cursor */
+		uint32_t max_offset = (E_BUF->line_count > editor.screen_rows)
+			? E_BUF->line_count - editor.screen_rows : 0;
+		if (E_CTX->row_offset < max_offset) {
+			E_CTX->row_offset++;
+			if (E_CTX->cursor_row < E_BUF->line_count - 1) {
+				E_CTX->cursor_row++;
+				/* Clamp cursor to visible area */
+				uint32_t max_visible_row = E_CTX->row_offset + editor.screen_rows - 1;
+				if (E_CTX->cursor_row > max_visible_row && max_visible_row < E_BUF->line_count) {
+					E_CTX->cursor_row = max_visible_row;
+				}
+				/* Move cursor to end of line when scrolling down */
+				struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+				line_warm(line, E_BUF);
+				E_CTX->cursor_column = line->cell_count;
+			}
+		}
 	}
 }
 
@@ -6142,6 +6199,15 @@ int __must_check render_refresh_screen(void)
 		cursor_screen_row += TAB_BAR_ROWS;
 	}
 
+	/* Clamp cursor_screen_row to content area (prevent cursor in status bar) */
+	uint32_t max_screen_row = editor.screen_rows;
+	if (editor.context_count > 1) {
+		max_screen_row += TAB_BAR_ROWS;
+	}
+	if (cursor_screen_row > max_screen_row) {
+		cursor_screen_row = max_screen_row;
+	}
+
 	snprintf(cursor_position, sizeof(cursor_position), "\x1b[%u;%uH",
 	         cursor_screen_row, cursor_screen_col);
 	output_buffer_append_string(&output, cursor_position);
@@ -7578,7 +7644,19 @@ execute_action(enum editor_action action)
 
 void editor_process_keypress(void)
 {
-	int key = input_read_key();
+	int key;
+
+	/* Use timeout-based input during drag selection for auto-scroll */
+	if (editor.drag_scroll.active) {
+		key = input_read_key_timeout(50);  /* 50ms for responsive scrolling */
+		if (key == 0) {
+			/* Timeout - trigger auto-scroll */
+			editor_drag_scroll_tick();
+			return;
+		}
+	} else {
+		key = input_read_key();
+	}
 
 	if (key == -1)
 		return;

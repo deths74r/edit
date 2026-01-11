@@ -34,6 +34,12 @@ int input_read_key(void);
  * Returns true if a character is waiting to be read.
  */
 bool input_available(void);
+/*
+ * Read a key with timeout. Used for auto-scroll during drag selection.
+ * Returns key code if input available, 0 if timeout, -1 on error.
+ * timeout_ms: milliseconds to wait (0 = non-blocking check)
+ */
+int input_read_key_timeout(int timeout_ms);
 
 /*****************************************************************************
  * Mouse Input

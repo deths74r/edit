@@ -1208,6 +1208,14 @@ struct editor_state {
 	bool link_preview_active;    /* True if cursor is on a link */
 	/* Help context tracking (for multi-buffer help toggle). */
 	int32_t help_context_index;          /* Index of help context, -1 if none */
+	/* Drag selection auto-scroll state. */
+	struct {
+		bool active;              /* Currently dragging with mouse */
+		bool at_top_edge;         /* Mouse at top edge of viewport */
+		bool at_bottom_edge;      /* Mouse at bottom edge of viewport */
+		uint32_t last_row;        /* Last mouse row position */
+		uint32_t last_column;     /* Last mouse column position */
+	} drag_scroll;
 	uint32_t previous_context_before_help;  /* Context to return to when closing help */
 };
 

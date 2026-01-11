@@ -31,6 +31,7 @@ extern int file_open(struct buffer *buffer, const char *filename);
 extern char *stdin_read_all(size_t *out_size);
 extern void editor_handle_mouse(struct mouse_input *mouse);
 extern void editor_process_keypress(void);
+extern void editor_drag_scroll_tick(void);
 
 /*****************************************************************************
  * Entry Point

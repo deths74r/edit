@@ -84,6 +84,24 @@ bool input_available(void)
 
 	return select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout) > 0;
 }
+int input_read_key_timeout(int timeout_ms)
+{
+	struct timeval timeout;
+	fd_set readfds;
+	timeout.tv_sec = timeout_ms / 1000;
+	timeout.tv_usec = (timeout_ms % 1000) * 1000;
+	FD_ZERO(&readfds);
+	FD_SET(STDIN_FILENO, &readfds);
+	int result = select(STDIN_FILENO + 1, &readfds, NULL, NULL, &timeout);
+	if (result < 0) {
+		return -1;  /* Error */
+	}
+	if (result == 0) {
+		return 0;   /* Timeout */
+	}
+	/* Input available - read it */
+	return input_read_key();
+}
 
 /*****************************************************************************
  * SGR Mouse Parsing
