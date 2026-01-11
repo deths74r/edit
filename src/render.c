@@ -292,7 +292,7 @@ void editor_cycle_wrap_mode(void)
 	}
 
 	/* Invalidate all wrap caches */
-	buffer_invalidate_all_wrap_caches(&editor.buffer);
+	buffer_invalidate_all_wrap_caches(E_BUF);
 }
 
 void editor_cycle_wrap_indicator(void)
@@ -358,22 +358,22 @@ const char *wrap_indicator_string(enum wrap_indicator indicator)
 
 uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 {
-	if (row >= editor.buffer.line_count) {
+	if (row >= E_BUF->line_count) {
 		return 0;
 	}
 
-	struct line *line = &editor.buffer.lines[row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[row];
+	line_warm(line, E_BUF);
 
 	/*
 	 * Hybrid mode: compute reveal range if this is the cursor line.
 	 * Cells in the reveal range are counted even if hideable.
 	 */
-	bool hybrid_active = editor.hybrid_mode &&
-	                     syntax_is_markdown_file(editor.buffer.filename);
+	bool hybrid_active = E_CTX->hybrid_mode &&
+	                     syntax_is_markdown_file(E_BUF->filename);
 	uint32_t reveal_start = UINT32_MAX;
 	uint32_t reveal_end = 0;
-	if (hybrid_active && row == editor.cursor_row) {
+	if (hybrid_active && row == E_CTX->cursor_row) {
 		md_should_reveal_element(line, column, &reveal_start, &reveal_end);
 	}
 
@@ -397,7 +397,7 @@ uint32_t editor_get_render_column(uint32_t row, uint32_t column)
 			}
 		}
 
-		uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, i);
+		uint32_t grapheme_end = cursor_next_grapheme(line, E_BUF, i);
 
 		/* Don't count grapheme if cursor is in the middle of it */
 		if (grapheme_end > column) {

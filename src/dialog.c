@@ -1351,8 +1351,8 @@ char *open_file_dialog(void)
 	/* Start in directory of current file, or current working directory */
 	char start_path[PATH_MAX];
 	start_path[0] = '\0';
-	if (editor.buffer.filename) {
-		char *parent = path_get_parent(editor.buffer.filename);
+	if (E_BUF->filename) {
+		char *parent = path_get_parent(E_BUF->filename);
 		if (parent) {
 			strncpy(start_path, parent, PATH_MAX - 1);
 			start_path[PATH_MAX - 1] = '\0';

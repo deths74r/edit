@@ -64,20 +64,32 @@ static struct quit_prompt_state quit_prompt = {0};
  */
 void editor_init(void)
 {
-	buffer_init(&editor.buffer);
-	editor.cursor_row = 0;
-	editor.cursor_column = 0;
-	editor.row_offset = 0;
-	editor.column_offset = 0;
+	/* Initialize context array - start with one context */
+	editor.context_count = 1;
+	editor.active_context = 0;
+
+	/* Initialize first context (per-buffer state) */
+	buffer_init(E_BUF);
+	E_CTX->cursor_row = 0;
+	E_CTX->cursor_column = 0;
+	E_CTX->row_offset = 0;
+	E_CTX->column_offset = 0;
+	E_CTX->gutter_width = 0;
+	E_CTX->selection_anchor_row = 0;
+	E_CTX->selection_anchor_column = 0;
+	E_CTX->selection_active = false;
+	E_CTX->cursor_count = 0;
+	E_CTX->primary_cursor = 0;
+	E_CTX->hybrid_mode = false;
+	E_CTX->link_preview_active = false;
+	memset(&E_CTX->search, 0, sizeof(E_CTX->search));
+
+	/* Initialize global state */
 	editor.screen_rows = 0;
 	editor.screen_columns = 0;
-	editor.gutter_width = 0;
 	editor.show_line_numbers = true;
 	editor.status_message[0] = '\0';
 	editor.status_message_time = 0;
-	editor.selection_anchor_row = 0;
-	editor.selection_anchor_column = 0;
-	editor.selection_active = false;
 	editor.wrap_mode = WRAP_WORD;
 	editor.wrap_indicator = WRAP_INDICATOR_RETURN;
 	editor.show_whitespace = false;
@@ -87,8 +99,6 @@ void editor_init(void)
 	editor.color_column = 0;
 	editor.color_column_style = COLOR_COLUMN_SOLID;
 	editor.theme_indicator = THEME_INDICATOR_CHECK;
-	editor.cursor_count = 0;
-	editor.primary_cursor = 0;
 	editor.fuzzy_max_depth = 10;
 	editor.fuzzy_max_files = 10000;
 	editor.fuzzy_case_sensitive = false;
@@ -117,13 +127,13 @@ void editor_init(void)
 void editor_perform_exit(void)
 {
 	terminal_clear_screen();
-	if (!editor.buffer.is_modified) {
+	if (!E_BUF->is_modified) {
 		autosave_remove_swap();
 	}
 	search_cleanup();
 	worker_shutdown();
 	clipboard_cleanup();
-	buffer_free(&editor.buffer);
+	buffer_free(E_BUF);
 	themes_free();
 	free(active_theme.name);
 	exit(0);
@@ -155,12 +165,12 @@ void editor_set_status_message(const char *format, ...)
 void editor_update_gutter_width(void)
 {
 	if (!editor.show_line_numbers) {
-		editor.gutter_width = 0;
+		E_CTX->gutter_width = 0;
 		return;
 	}
 
 	/* Calculate digits needed for largest line number */
-	uint32_t max_line = editor.buffer.line_count;
+	uint32_t max_line = E_BUF->line_count;
 	uint32_t digits = 1;
 	while (max_line >= DECIMAL_BASE) {
 		max_line /= DECIMAL_BASE;
@@ -171,7 +181,7 @@ void editor_update_gutter_width(void)
 	if (digits < MINIMUM_GUTTER_DIGITS) {
 		digits = MINIMUM_GUTTER_DIGITS;
 	}
-	editor.gutter_width = digits + GUTTER_PADDING;
+	E_CTX->gutter_width = digits + GUTTER_PADDING;
 }
 
 /*
@@ -186,7 +196,7 @@ void editor_update_screen_size(void)
 		editor.screen_columns = cols;
 	}
 	editor_update_gutter_width();
-	buffer_invalidate_all_wrap_caches(&editor.buffer);
+	buffer_invalidate_all_wrap_caches(E_BUF);
 }
 
 /*
@@ -194,10 +204,10 @@ void editor_update_screen_size(void)
  */
 uint16_t editor_get_text_width(void)
 {
-	if (editor.screen_columns <= editor.gutter_width) {
+	if (editor.screen_columns <= E_CTX->gutter_width) {
 		return 1;
 	}
-	return editor.screen_columns - editor.gutter_width;
+	return editor.screen_columns - E_CTX->gutter_width;
 }
 
 /*****************************************************************************
@@ -265,9 +275,9 @@ void editor_cycle_color_column_style(void)
  */
 void selection_start(void)
 {
-	editor.selection_anchor_row = editor.cursor_row;
-	editor.selection_anchor_column = editor.cursor_column;
-	editor.selection_active = true;
+	E_CTX->selection_anchor_row = E_CTX->cursor_row;
+	E_CTX->selection_anchor_column = E_CTX->cursor_column;
+	E_CTX->selection_active = true;
 }
 
 /*
@@ -276,18 +286,18 @@ void selection_start(void)
 void selection_get_range(uint32_t *start_row, uint32_t *start_col,
                          uint32_t *end_row, uint32_t *end_col)
 {
-	if (editor.selection_anchor_row < editor.cursor_row ||
-	    (editor.selection_anchor_row == editor.cursor_row &&
-	     editor.selection_anchor_column <= editor.cursor_column)) {
-		*start_row = editor.selection_anchor_row;
-		*start_col = editor.selection_anchor_column;
-		*end_row = editor.cursor_row;
-		*end_col = editor.cursor_column;
+	if (E_CTX->selection_anchor_row < E_CTX->cursor_row ||
+	    (E_CTX->selection_anchor_row == E_CTX->cursor_row &&
+	     E_CTX->selection_anchor_column <= E_CTX->cursor_column)) {
+		*start_row = E_CTX->selection_anchor_row;
+		*start_col = E_CTX->selection_anchor_column;
+		*end_row = E_CTX->cursor_row;
+		*end_col = E_CTX->cursor_column;
 	} else {
-		*start_row = editor.cursor_row;
-		*start_col = editor.cursor_column;
-		*end_row = editor.selection_anchor_row;
-		*end_col = editor.selection_anchor_column;
+		*start_row = E_CTX->cursor_row;
+		*start_col = E_CTX->cursor_column;
+		*end_row = E_CTX->selection_anchor_row;
+		*end_col = E_CTX->selection_anchor_column;
 	}
 }
 
@@ -296,7 +306,7 @@ void selection_get_range(uint32_t *start_row, uint32_t *start_col,
  */
 void selection_clear(void)
 {
-	editor.selection_active = false;
+	E_CTX->selection_active = false;
 }
 
 /*
@@ -304,11 +314,11 @@ void selection_clear(void)
  */
 bool selection_is_empty(void)
 {
-	if (!editor.selection_active) {
+	if (!E_CTX->selection_active) {
 		return true;
 	}
-	return (editor.cursor_row == editor.selection_anchor_row &&
-	        editor.cursor_column == editor.selection_anchor_column);
+	return (E_CTX->cursor_row == E_CTX->selection_anchor_row &&
+	        E_CTX->cursor_column == E_CTX->selection_anchor_column);
 }
 
 /*****************************************************************************
@@ -337,18 +347,18 @@ static int cursor_compare(const void *a, const void *b)
  */
 static void multicursor_enter(void)
 {
-	if (editor.cursor_count > 0) {
+	if (E_CTX->cursor_count > 0) {
 		return;
 	}
 
-	editor.cursors[0].row = editor.cursor_row;
-	editor.cursors[0].column = editor.cursor_column;
-	editor.cursors[0].anchor_row = editor.selection_anchor_row;
-	editor.cursors[0].anchor_column = editor.selection_anchor_column;
-	editor.cursors[0].has_selection = editor.selection_active;
+	E_CTX->cursors[0].row = E_CTX->cursor_row;
+	E_CTX->cursors[0].column = E_CTX->cursor_column;
+	E_CTX->cursors[0].anchor_row = E_CTX->selection_anchor_row;
+	E_CTX->cursors[0].anchor_column = E_CTX->selection_anchor_column;
+	E_CTX->cursors[0].has_selection = E_CTX->selection_active;
 
-	editor.cursor_count = 1;
-	editor.primary_cursor = 0;
+	E_CTX->cursor_count = 1;
+	E_CTX->primary_cursor = 0;
 }
 
 /*
@@ -356,18 +366,18 @@ static void multicursor_enter(void)
  */
 void editor_multi_cursor_exit(void)
 {
-	if (editor.cursor_count == 0) {
+	if (E_CTX->cursor_count == 0) {
 		return;
 	}
 
-	struct cursor *primary = &editor.cursors[editor.primary_cursor];
-	editor.cursor_row = primary->row;
-	editor.cursor_column = primary->column;
-	editor.selection_anchor_row = primary->anchor_row;
-	editor.selection_anchor_column = primary->anchor_column;
-	editor.selection_active = primary->has_selection;
+	struct cursor *primary = &E_CTX->cursors[E_CTX->primary_cursor];
+	E_CTX->cursor_row = primary->row;
+	E_CTX->cursor_column = primary->column;
+	E_CTX->selection_anchor_row = primary->anchor_row;
+	E_CTX->selection_anchor_column = primary->anchor_column;
+	E_CTX->selection_active = primary->has_selection;
 
-	editor.cursor_count = 0;
+	E_CTX->cursor_count = 0;
 
 	editor_set_status_message("Exited multi-cursor mode");
 }
@@ -377,29 +387,29 @@ void editor_multi_cursor_exit(void)
  */
 void editor_cursors_sort_and_merge(void)
 {
-	if (editor.cursor_count <= 1) {
+	if (E_CTX->cursor_count <= 1) {
 		return;
 	}
 
-	qsort(editor.cursors, editor.cursor_count,
+	qsort(E_CTX->cursors, E_CTX->cursor_count,
 	      sizeof(struct cursor), cursor_compare);
 
 	uint32_t write_index = 1;
-	for (uint32_t read_index = 1; read_index < editor.cursor_count; read_index++) {
-		struct cursor *prev = &editor.cursors[write_index - 1];
-		struct cursor *curr = &editor.cursors[read_index];
+	for (uint32_t read_index = 1; read_index < E_CTX->cursor_count; read_index++) {
+		struct cursor *prev = &E_CTX->cursors[write_index - 1];
+		struct cursor *curr = &E_CTX->cursors[read_index];
 
 		if (curr->row != prev->row || curr->column != prev->column) {
 			if (write_index != read_index) {
-				editor.cursors[write_index] = *curr;
+				E_CTX->cursors[write_index] = *curr;
 			}
 			write_index++;
 		}
 	}
-	editor.cursor_count = write_index;
+	E_CTX->cursor_count = write_index;
 
-	if (editor.primary_cursor >= editor.cursor_count) {
-		editor.primary_cursor = editor.cursor_count - 1;
+	if (E_CTX->primary_cursor >= E_CTX->cursor_count) {
+		E_CTX->primary_cursor = E_CTX->cursor_count - 1;
 	}
 }
 
@@ -408,7 +418,7 @@ void editor_cursors_sort_and_merge(void)
  */
 bool editor_has_multi_cursor(void)
 {
-	return editor.cursor_count > 1;
+	return E_CTX->cursor_count > 1;
 }
 
 /*
@@ -416,23 +426,23 @@ bool editor_has_multi_cursor(void)
  */
 void editor_add_cursor(uint32_t row, uint32_t col)
 {
-	if (editor.cursor_count == 0) {
+	if (E_CTX->cursor_count == 0) {
 		multicursor_enter();
 	}
 
-	if (editor.cursor_count >= MAX_CURSORS) {
+	if (E_CTX->cursor_count >= MAX_CURSORS) {
 		editor_set_status_message("Maximum cursors reached (%d)", MAX_CURSORS);
 		return;
 	}
 
-	struct cursor *c = &editor.cursors[editor.cursor_count];
+	struct cursor *c = &E_CTX->cursors[E_CTX->cursor_count];
 	c->row = row;
 	c->column = col;
 	c->anchor_row = row;
 	c->anchor_column = col;
 	c->has_selection = false;
 
-	editor.cursor_count++;
+	E_CTX->cursor_count++;
 	editor_cursors_sort_and_merge();
 }
 
@@ -445,12 +455,12 @@ void editor_add_cursor(uint32_t row, uint32_t col)
  */
 void editor_undo(void)
 {
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	uint32_t new_row, new_col;
-	if (undo_perform(&editor.buffer, &new_row, &new_col)) {
-		editor.cursor_row = new_row;
-		editor.cursor_column = new_col;
+	if (undo_perform(E_BUF, &new_row, &new_col)) {
+		E_CTX->cursor_row = new_row;
+		E_CTX->cursor_column = new_col;
 		selection_clear();
 		editor_set_status_message("Undo");
 	} else {
@@ -463,12 +473,12 @@ void editor_undo(void)
  */
 void editor_redo(void)
 {
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	uint32_t new_row, new_col;
-	if (redo_perform(&editor.buffer, &new_row, &new_col)) {
-		editor.cursor_row = new_row;
-		editor.cursor_column = new_col;
+	if (redo_perform(E_BUF, &new_row, &new_col)) {
+		E_CTX->cursor_row = new_row;
+		E_CTX->cursor_column = new_col;
 		selection_clear();
 		editor_set_status_message("Redo");
 	} else {
@@ -510,9 +520,9 @@ bool goto_handle_key(int key)
 		goto_line.active = false;
 		if (goto_line.input_length > 0) {
 			long line_num = strtol(goto_line.input, NULL, 10);
-			if (line_num > 0 && (uint32_t)line_num <= editor.buffer.line_count) {
-				editor.cursor_row = line_num - 1;
-				editor.cursor_column = 0;
+			if (line_num > 0 && (uint32_t)line_num <= E_BUF->line_count) {
+				E_CTX->cursor_row = line_num - 1;
+				E_CTX->cursor_column = 0;
 				selection_clear();
 				editor_set_status_message("Line %ld", line_num);
 			} else {
@@ -571,8 +581,8 @@ void save_as_enter(void)
 	save_as.active = true;
 	save_as.confirm_overwrite = false;
 
-	if (editor.buffer.filename) {
-		strncpy(save_as.path, editor.buffer.filename, sizeof(save_as.path) - 1);
+	if (E_BUF->filename) {
+		strncpy(save_as.path, E_BUF->filename, sizeof(save_as.path) - 1);
 		save_as.path[sizeof(save_as.path) - 1] = '\0';
 		save_as.path_length = strlen(save_as.path);
 	} else {
@@ -617,11 +627,11 @@ static bool save_as_execute(void)
 		return false;
 	}
 
-	free(editor.buffer.filename);
-	editor.buffer.filename = new_filename;
+	free(E_BUF->filename);
+	E_BUF->filename = new_filename;
 
 	/* Save the file */
-	int ret = file_save(&editor.buffer);
+	int ret = file_save(E_BUF);
 	if (ret) {
 		editor_set_status_message("Save failed: %s", edit_strerror(ret));
 		return false;
@@ -736,12 +746,12 @@ bool quit_prompt_handle_key(int key)
 
 	if (key == 'y' || key == 'Y') {
 		quit_prompt.active = false;
-		if (editor.buffer.filename == NULL) {
+		if (E_BUF->filename == NULL) {
 			editor_set_status_message("No filename. Use Ctrl-Shift-S to Save As, then quit.");
 			return true;
 		}
 		editor_save();
-		if (!editor.buffer.is_modified) {
+		if (!E_BUF->is_modified) {
 			editor_perform_exit();
 		}
 		return true;
@@ -791,25 +801,25 @@ bool reload_prompt_is_active(void)
  */
 void editor_reload_file(void)
 {
-	if (editor.buffer.filename == NULL)
+	if (E_BUF->filename == NULL)
 		return;
 
 	/* Save filename before freeing buffer */
-	char *filename = edit_strdup(editor.buffer.filename);
+	char *filename = edit_strdup(E_BUF->filename);
 	if (IS_ERR(filename)) {
 		editor_set_status_message("Reload failed: out of memory");
 		return;
 	}
 
 	/* Save cursor position for restoration */
-	uint32_t saved_row = editor.cursor_row;
-	uint32_t saved_column = editor.cursor_column;
+	uint32_t saved_row = E_CTX->cursor_row;
+	uint32_t saved_column = E_CTX->cursor_column;
 
 	/* Free current buffer and reload */
-	buffer_free(&editor.buffer);
-	buffer_init(&editor.buffer);
+	buffer_free(E_BUF);
+	buffer_init(E_BUF);
 
-	int ret = file_open(&editor.buffer, filename);
+	int ret = file_open(E_BUF, filename);
 	if (ret) {
 		editor_set_status_message("Reload failed: %s", edit_strerror(ret));
 		free(filename);
@@ -818,10 +828,10 @@ void editor_reload_file(void)
 	free(filename);
 
 	/* Restore cursor position, clamped to new file bounds */
-	if (saved_row >= editor.buffer.line_count)
-		saved_row = editor.buffer.line_count > 0 ? editor.buffer.line_count - 1 : 0;
-	editor.cursor_row = saved_row;
-	editor.cursor_column = saved_column;
+	if (saved_row >= E_BUF->line_count)
+		saved_row = E_BUF->line_count > 0 ? E_BUF->line_count - 1 : 0;
+	E_CTX->cursor_row = saved_row;
+	E_CTX->cursor_column = saved_column;
 
 	editor_set_status_message("File reloaded");
 }
@@ -844,8 +854,8 @@ bool reload_prompt_handle_key(int key)
 		reload_prompt.active = false;
 		/* Update stored mtime so we don't prompt again for this change */
 		struct stat st;
-		if (stat(editor.buffer.filename, &st) == 0)
-			editor.buffer.file_mtime = st.st_mtime;
+		if (stat(E_BUF->filename, &st) == 0)
+			E_BUF->file_mtime = st.st_mtime;
 		editor_set_status_message("Keeping local version");
 		return true;
 	}

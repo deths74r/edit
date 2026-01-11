@@ -151,8 +151,8 @@ int worker_process_warm_lines(struct task *task, struct task_result *result)
 	uint32_t end_row = task->warm.end_row;
 
 	/* Validate range */
-	if (end_row > editor.buffer.line_count) {
-		end_row = editor.buffer.line_count;
+	if (end_row > E_BUF->line_count) {
+		end_row = E_BUF->line_count;
 	}
 	if (start_row >= end_row) {
 		result->warm.lines_warmed = 0;
@@ -174,7 +174,7 @@ int worker_process_warm_lines(struct task *task, struct task_result *result)
 			}
 		}
 
-		struct line *line = &editor.buffer.lines[row];
+		struct line *line = &E_BUF->lines[row];
 
 		/* Skip if not cold */
 		if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
@@ -197,7 +197,7 @@ int worker_process_warm_lines(struct task *task, struct task_result *result)
 		}
 
 		/* Warm the line */
-		int err = line_warm_from_worker(line, &editor.buffer);
+		int err = line_warm_from_worker(line, E_BUF);
 
 		line_release_warming(line);
 
@@ -413,8 +413,8 @@ int worker_process_search(struct task *task, struct task_result *result)
 	bool whole_word = task->search.whole_word;
 
 	/* Validate range */
-	if (end_row == 0 || end_row > editor.buffer.line_count) {
-		end_row = editor.buffer.line_count;
+	if (end_row == 0 || end_row > E_BUF->line_count) {
+		end_row = E_BUF->line_count;
 	}
 	if (start_row >= end_row) {
 		result->search.match_count = 0;
@@ -470,10 +470,10 @@ int worker_process_search(struct task *task, struct task_result *result)
 			search_results_update_progress(rows_searched, end_row - start_row);
 		}
 
-		struct line *line = &editor.buffer.lines[row];
+		struct line *line = &E_BUF->lines[row];
 
 		int matches = search_line_for_matches(
-			line, &editor.buffer, row, pattern,
+			line, E_BUF, row, pattern,
 			use_regex, case_sensitive, whole_word,
 			regex_valid ? &compiled_regex : NULL
 		);
@@ -570,7 +570,7 @@ int worker_process_replace_all(struct task *task, struct task_result *result)
 	bool case_sensitive = task->replace.case_sensitive;
 	bool whole_word = task->replace.whole_word;
 
-	uint32_t total_rows = editor.buffer.line_count;
+	uint32_t total_rows = E_BUF->line_count;
 
 	/* Compile regex if needed */
 	regex_t compiled_regex;
@@ -614,14 +614,14 @@ int worker_process_replace_all(struct task *task, struct task_result *result)
 			replace_results_update_progress(rows_searched, total_rows);
 		}
 
-		struct line *line = &editor.buffer.lines[row];
+		struct line *line = &E_BUF->lines[row];
 
 		/* Ensure line is warm */
 		int temp = line_get_temperature(line);
 		if (temp == LINE_TEMPERATURE_COLD) {
 			if (line_try_claim_warming(line)) {
 				if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
-					int __attribute__((unused)) err = line_warm_from_worker(line, &editor.buffer);
+					int __attribute__((unused)) err = line_warm_from_worker(line, E_BUF);
 				}
 				line_release_warming(line);
 			}
@@ -909,10 +909,10 @@ static void editor_request_background_warming(void)
 	}
 
 	/* Calculate current viewport */
-	uint32_t viewport_start = editor.row_offset;
-	uint32_t viewport_end = editor.row_offset + editor.screen_rows;
-	if (viewport_end > editor.buffer.line_count) {
-		viewport_end = editor.buffer.line_count;
+	uint32_t viewport_start = E_CTX->row_offset;
+	uint32_t viewport_end = E_CTX->row_offset + editor.screen_rows;
+	if (viewport_end > E_BUF->line_count) {
+		viewport_end = E_BUF->line_count;
 	}
 
 	/* Check if viewport changed significantly */
@@ -935,14 +935,14 @@ static void editor_request_background_warming(void)
 	uint32_t warm_start = (viewport_start > lookahead) ?
 	                      (viewport_start - lookahead) : 0;
 	uint32_t warm_end = viewport_end + lookahead;
-	if (warm_end > editor.buffer.line_count) {
-		warm_end = editor.buffer.line_count;
+	if (warm_end > E_BUF->line_count) {
+		warm_end = E_BUF->line_count;
 	}
 
 	/* Check if there are cold lines in range */
 	bool has_cold_lines = false;
 	for (uint32_t row = warm_start; row < warm_end && !has_cold_lines; row++) {
-		if (line_get_temperature(&editor.buffer.lines[row]) == LINE_TEMPERATURE_COLD) {
+		if (line_get_temperature(&E_BUF->lines[row]) == LINE_TEMPERATURE_COLD) {
 			has_cold_lines = true;
 		}
 	}
@@ -1026,7 +1026,7 @@ void emergency_save(void)
 		return;
 	in_emergency_save = true;
 
-	struct buffer *buffer = &editor.buffer;
+	struct buffer *buffer = E_BUF;
 
 	/* Nothing to save? */
 	if (buffer->line_count == 0 || !buffer->is_modified)
@@ -1364,18 +1364,18 @@ static int cursor_compare(const void *a, const void *b)
  */
 static void multicursor_enter(void)
 {
-	if (editor.cursor_count > 0) {
+	if (E_CTX->cursor_count > 0) {
 		return;  /* Already in multi-cursor mode */
 	}
 
-	editor.cursors[0].row = editor.cursor_row;
-	editor.cursors[0].column = editor.cursor_column;
-	editor.cursors[0].anchor_row = editor.selection_anchor_row;
-	editor.cursors[0].anchor_column = editor.selection_anchor_column;
-	editor.cursors[0].has_selection = editor.selection_active;
+	E_CTX->cursors[0].row = E_CTX->cursor_row;
+	E_CTX->cursors[0].column = E_CTX->cursor_column;
+	E_CTX->cursors[0].anchor_row = E_CTX->selection_anchor_row;
+	E_CTX->cursors[0].anchor_column = E_CTX->selection_anchor_column;
+	E_CTX->cursors[0].has_selection = E_CTX->selection_active;
 
-	editor.cursor_count = 1;
-	editor.primary_cursor = 0;
+	E_CTX->cursor_count = 1;
+	E_CTX->primary_cursor = 0;
 }
 
 /*
@@ -1383,19 +1383,19 @@ static void multicursor_enter(void)
  */
 static void multicursor_exit(void)
 {
-	if (editor.cursor_count == 0) {
+	if (E_CTX->cursor_count == 0) {
 		return;
 	}
 
 	/* Copy primary cursor back to legacy fields */
-	struct cursor *primary = &editor.cursors[editor.primary_cursor];
-	editor.cursor_row = primary->row;
-	editor.cursor_column = primary->column;
-	editor.selection_anchor_row = primary->anchor_row;
-	editor.selection_anchor_column = primary->anchor_column;
-	editor.selection_active = primary->has_selection;
+	struct cursor *primary = &E_CTX->cursors[E_CTX->primary_cursor];
+	E_CTX->cursor_row = primary->row;
+	E_CTX->cursor_column = primary->column;
+	E_CTX->selection_anchor_row = primary->anchor_row;
+	E_CTX->selection_anchor_column = primary->anchor_column;
+	E_CTX->selection_active = primary->has_selection;
 
-	editor.cursor_count = 0;
+	E_CTX->cursor_count = 0;
 
 	editor_set_status_message("Exited multi-cursor mode");
 }
@@ -1405,32 +1405,32 @@ static void multicursor_exit(void)
  */
 static void multicursor_normalize(void)
 {
-	if (editor.cursor_count <= 1) {
+	if (E_CTX->cursor_count <= 1) {
 		return;
 	}
 
 	/* Sort by position */
-	qsort(editor.cursors, editor.cursor_count,
+	qsort(E_CTX->cursors, E_CTX->cursor_count,
 	      sizeof(struct cursor), cursor_compare);
 
 	/* Remove duplicates (cursors at same position) */
 	uint32_t write_index = 1;
-	for (uint32_t read_index = 1; read_index < editor.cursor_count; read_index++) {
-		struct cursor *prev = &editor.cursors[write_index - 1];
-		struct cursor *curr = &editor.cursors[read_index];
+	for (uint32_t read_index = 1; read_index < E_CTX->cursor_count; read_index++) {
+		struct cursor *prev = &E_CTX->cursors[write_index - 1];
+		struct cursor *curr = &E_CTX->cursors[read_index];
 
 		if (curr->row != prev->row || curr->column != prev->column) {
 			if (write_index != read_index) {
-				editor.cursors[write_index] = *curr;
+				E_CTX->cursors[write_index] = *curr;
 			}
 			write_index++;
 		}
 	}
-	editor.cursor_count = write_index;
+	E_CTX->cursor_count = write_index;
 
 	/* Ensure primary cursor index is valid */
-	if (editor.primary_cursor >= editor.cursor_count) {
-		editor.primary_cursor = editor.cursor_count - 1;
+	if (E_CTX->primary_cursor >= E_CTX->cursor_count) {
+		E_CTX->primary_cursor = E_CTX->cursor_count - 1;
 	}
 }
 
@@ -1442,31 +1442,31 @@ static bool multicursor_add(uint32_t row, uint32_t column,
                             uint32_t anchor_row, uint32_t anchor_column,
                             bool has_selection)
 {
-	if (editor.cursor_count == 0) {
+	if (E_CTX->cursor_count == 0) {
 		multicursor_enter();
 	}
 
-	if (editor.cursor_count >= MAX_CURSORS) {
+	if (E_CTX->cursor_count >= MAX_CURSORS) {
 		editor_set_status_message("Maximum cursors reached (%d)", MAX_CURSORS);
 		return false;
 	}
 
 	/* Check for duplicate position */
-	for (uint32_t i = 0; i < editor.cursor_count; i++) {
-		if (editor.cursors[i].anchor_row == anchor_row &&
-		    editor.cursors[i].anchor_column == anchor_column) {
+	for (uint32_t i = 0; i < E_CTX->cursor_count; i++) {
+		if (E_CTX->cursors[i].anchor_row == anchor_row &&
+		    E_CTX->cursors[i].anchor_column == anchor_column) {
 			return false;  /* Already have cursor here */
 		}
 	}
 
-	struct cursor *new_cursor = &editor.cursors[editor.cursor_count];
+	struct cursor *new_cursor = &E_CTX->cursors[E_CTX->cursor_count];
 	new_cursor->row = row;
 	new_cursor->column = column;
 	new_cursor->anchor_row = anchor_row;
 	new_cursor->anchor_column = anchor_column;
 	new_cursor->has_selection = has_selection;
 
-	editor.cursor_count++;
+	E_CTX->cursor_count++;
 
 	return true;
 }
@@ -1476,12 +1476,12 @@ static bool multicursor_add(uint32_t row, uint32_t column,
  */
 static bool multicursor_selection_contains(uint32_t row, uint32_t column)
 {
-	if (editor.cursor_count == 0) {
+	if (E_CTX->cursor_count == 0) {
 		return false;
 	}
 
-	for (uint32_t i = 0; i < editor.cursor_count; i++) {
-		struct cursor *cursor = &editor.cursors[i];
+	for (uint32_t i = 0; i < E_CTX->cursor_count; i++) {
+		struct cursor *cursor = &E_CTX->cursors[i];
 		if (!cursor->has_selection) {
 			continue;
 		}
@@ -1525,9 +1525,9 @@ static bool multicursor_selection_contains(uint32_t row, uint32_t column)
  */
 static int multicursor_cursor_at(uint32_t row, uint32_t column)
 {
-	for (uint32_t i = 0; i < editor.cursor_count; i++) {
-		if (editor.cursors[i].row == row &&
-		    editor.cursors[i].column == column) {
+	for (uint32_t i = 0; i < E_CTX->cursor_count; i++) {
+		if (E_CTX->cursors[i].row == row &&
+		    E_CTX->cursors[i].column == column) {
 			return (int)i;
 		}
 	}
@@ -1542,7 +1542,7 @@ static int multicursor_cursor_at(uint32_t row, uint32_t column)
  * selection is active or if the position is outside the selected range. */
 static bool selection_contains(uint32_t row, uint32_t column)
 {
-	if (!editor.selection_active) {
+	if (!E_CTX->selection_active) {
 		return false;
 	}
 
@@ -1582,7 +1582,7 @@ static bool selection_contains(uint32_t row, uint32_t column)
  */
 char *selection_get_text(size_t *out_length)
 {
-	if (!editor.selection_active || selection_is_empty()) {
+	if (!E_CTX->selection_active || selection_is_empty()) {
 		*out_length = 0;
 		return NULL;
 	}
@@ -1593,8 +1593,8 @@ char *selection_get_text(size_t *out_length)
 	/* Estimate buffer size (4 bytes per codepoint max + newlines) */
 	size_t capacity = 0;
 	for (uint32_t row = start_row; row <= end_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 		capacity += line->cell_count * 4 + 1;
 	}
 	capacity += 1;  /* Null terminator */
@@ -1608,8 +1608,8 @@ char *selection_get_text(size_t *out_length)
 	size_t offset = 0;
 
 	for (uint32_t row = start_row; row <= end_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		uint32_t col_start = (row == start_row) ? start_col : 0;
 		uint32_t col_end = (row == end_row) ? end_col : line->cell_count;
@@ -1871,8 +1871,8 @@ static bool screen_row_to_line_segment(uint32_t screen_row,
 {
 	if (editor.wrap_mode == WRAP_NONE) {
 		/* No wrap: direct mapping */
-		uint32_t file_row = screen_row + editor.row_offset;
-		if (file_row >= editor.buffer.line_count) {
+		uint32_t file_row = screen_row + E_CTX->row_offset;
+		if (file_row >= E_BUF->line_count) {
 			return false;
 		}
 		*out_line = file_row;
@@ -1881,13 +1881,13 @@ static bool screen_row_to_line_segment(uint32_t screen_row,
 	}
 
 	/* With wrap: iterate through lines and segments */
-	uint32_t file_row = editor.row_offset;
+	uint32_t file_row = E_CTX->row_offset;
 	uint16_t segment = 0;
 	uint32_t screen_pos = 0;
 
-	while (file_row < editor.buffer.line_count && screen_pos <= screen_row) {
-		struct line *line = &editor.buffer.lines[file_row];
-		line_ensure_wrap_cache(line, &editor.buffer);
+	while (file_row < E_BUF->line_count && screen_pos <= screen_row) {
+		struct line *line = &E_BUF->lines[file_row];
+		line_ensure_wrap_cache(line, E_BUF);
 
 		/* Check each segment of this line */
 		for (segment = 0; segment < line->wrap_segment_count; segment++) {
@@ -1913,8 +1913,8 @@ static uint32_t calculate_max_row_offset(void)
 {
 	if (editor.wrap_mode == WRAP_NONE) {
 		/* Simple case: 1 line = 1 screen row */
-		if (editor.buffer.line_count > editor.screen_rows) {
-			return editor.buffer.line_count - editor.screen_rows;
+		if (E_BUF->line_count > editor.screen_rows) {
+			return E_BUF->line_count - editor.screen_rows;
 		}
 		return 0;
 	}
@@ -1924,12 +1924,12 @@ static uint32_t calculate_max_row_offset(void)
 	 * until we exceed screen_rows. The line after that is max_offset.
 	 */
 	uint32_t screen_rows_from_end = 0;
-	uint32_t candidate = editor.buffer.line_count;
+	uint32_t candidate = E_BUF->line_count;
 
 	while (candidate > 0) {
 		candidate--;
-		struct line *line = &editor.buffer.lines[candidate];
-		line_ensure_wrap_cache(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[candidate];
+		line_ensure_wrap_cache(line, E_BUF);
 		screen_rows_from_end += line->wrap_segment_count;
 
 		if (screen_rows_from_end >= editor.screen_rows) {
@@ -1949,10 +1949,10 @@ static uint32_t calculate_max_row_offset(void)
  */
 static uint32_t editor_get_line_length(uint32_t row)
 {
-	if (row >= editor.buffer.line_count) {
+	if (row >= E_BUF->line_count) {
 		return 0;
 	}
-	return line_get_cell_count(&editor.buffer.lines[row], &editor.buffer);
+	return line_get_cell_count(&E_BUF->lines[row], E_BUF);
 }
 
 /*
@@ -1963,15 +1963,15 @@ static uint32_t editor_get_line_length(uint32_t row)
 static void editor_scroll(void)
 {
 	/* Vertical scrolling (skip if selection active - allow cursor off-screen) */
-	if (!editor.selection_active) {
-		if (editor.cursor_row < editor.row_offset) {
-			editor.row_offset = editor.cursor_row;
+	if (!E_CTX->selection_active) {
+		if (E_CTX->cursor_row < E_CTX->row_offset) {
+			E_CTX->row_offset = E_CTX->cursor_row;
 		}
 
 		if (editor.wrap_mode == WRAP_NONE) {
 			/* No wrap: simple check */
-			if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
-				editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+			if (E_CTX->cursor_row >= E_CTX->row_offset + editor.screen_rows) {
+				E_CTX->row_offset = E_CTX->cursor_row - editor.screen_rows + 1;
 			}
 		} else {
 			/*
@@ -1979,15 +1979,15 @@ static void editor_scroll(void)
 			 * if it's past the visible area.
 			 */
 			uint32_t screen_row = 0;
-			for (uint32_t row = editor.row_offset;
-			     row <= editor.cursor_row && row < editor.buffer.line_count;
+			for (uint32_t row = E_CTX->row_offset;
+			     row <= E_CTX->cursor_row && row < E_BUF->line_count;
 			     row++) {
-				struct line *line = &editor.buffer.lines[row];
-				line_ensure_wrap_cache(line, &editor.buffer);
-				if (row == editor.cursor_row) {
+				struct line *line = &E_BUF->lines[row];
+				line_ensure_wrap_cache(line, E_BUF);
+				if (row == E_CTX->cursor_row) {
 					/* Add cursor's segment within this line */
 					uint16_t cursor_segment = line_get_segment_for_column(
-						line, &editor.buffer, editor.cursor_column);
+						line, E_BUF, E_CTX->cursor_column);
 					screen_row += cursor_segment + 1;
 				} else {
 					screen_row += line->wrap_segment_count;
@@ -1996,11 +1996,11 @@ static void editor_scroll(void)
 
 			/* If cursor is past visible area, scroll down */
 			while (screen_row > editor.screen_rows &&
-			       editor.row_offset < editor.buffer.line_count) {
-				struct line *line = &editor.buffer.lines[editor.row_offset];
-				line_ensure_wrap_cache(line, &editor.buffer);
+			       E_CTX->row_offset < E_BUF->line_count) {
+				struct line *line = &E_BUF->lines[E_CTX->row_offset];
+				line_ensure_wrap_cache(line, E_BUF);
 				screen_row -= line->wrap_segment_count;
-				editor.row_offset++;
+				E_CTX->row_offset++;
 			}
 		}
 	}
@@ -2008,17 +2008,17 @@ static void editor_scroll(void)
 	/* Horizontal scrolling - only applies in WRAP_NONE mode */
 	if (editor.wrap_mode == WRAP_NONE) {
 		uint32_t render_column = editor_get_render_column(
-			editor.cursor_row, editor.cursor_column);
-		uint32_t text_area_width = editor.screen_columns - editor.gutter_width;
-		if (render_column < editor.column_offset) {
-			editor.column_offset = render_column;
+			E_CTX->cursor_row, E_CTX->cursor_column);
+		uint32_t text_area_width = editor.screen_columns - E_CTX->gutter_width;
+		if (render_column < E_CTX->column_offset) {
+			E_CTX->column_offset = render_column;
 		}
-		if (render_column >= editor.column_offset + text_area_width) {
-			editor.column_offset = render_column - text_area_width + 1;
+		if (render_column >= E_CTX->column_offset + text_area_width) {
+			E_CTX->column_offset = render_column - text_area_width + 1;
 		}
 	} else {
 		/* In wrap mode, no horizontal scrolling needed */
-		editor.column_offset = 0;
+		E_CTX->column_offset = 0;
 	}
 
 	/* Request background warming for new viewport */
@@ -2083,65 +2083,65 @@ static void editor_move_cursor(int key)
 
 	/* Handle selection start/clear */
 	if (extend_selection) {
-		if (!editor.selection_active) {
+		if (!E_CTX->selection_active) {
 			selection_start();
 		}
 	} else {
 		selection_clear();
 	}
 
-	uint32_t line_length = editor_get_line_length(editor.cursor_row);
-	struct line *current_line = editor.cursor_row < editor.buffer.line_count
-	                            ? &editor.buffer.lines[editor.cursor_row] : NULL;
+	uint32_t line_length = editor_get_line_length(E_CTX->cursor_row);
+	struct line *current_line = E_CTX->cursor_row < E_BUF->line_count
+	                            ? &E_BUF->lines[E_CTX->cursor_row] : NULL;
 
 	switch (base_key) {
 		case KEY_ARROW_LEFT:
-			if (editor.cursor_column > 0 && current_line) {
-				editor.cursor_column = cursor_prev_grapheme(current_line, &editor.buffer, editor.cursor_column);
-			} else if (editor.cursor_row > 0) {
-				editor.cursor_row--;
-				editor.cursor_column = editor_get_line_length(editor.cursor_row);
+			if (E_CTX->cursor_column > 0 && current_line) {
+				E_CTX->cursor_column = cursor_prev_grapheme(current_line, E_BUF, E_CTX->cursor_column);
+			} else if (E_CTX->cursor_row > 0) {
+				E_CTX->cursor_row--;
+				E_CTX->cursor_column = editor_get_line_length(E_CTX->cursor_row);
 			}
 			break;
 
 		case KEY_ARROW_RIGHT:
-			if (editor.cursor_column < line_length && current_line) {
-				editor.cursor_column = cursor_next_grapheme(current_line, &editor.buffer, editor.cursor_column);
-			} else if (editor.cursor_row < editor.buffer.line_count - 1) {
-				editor.cursor_row++;
-				editor.cursor_column = 0;
+			if (E_CTX->cursor_column < line_length && current_line) {
+				E_CTX->cursor_column = cursor_next_grapheme(current_line, E_BUF, E_CTX->cursor_column);
+			} else if (E_CTX->cursor_row < E_BUF->line_count - 1) {
+				E_CTX->cursor_row++;
+				E_CTX->cursor_column = 0;
 			}
 			break;
 
 		case KEY_ARROW_UP:
 			if (editor.wrap_mode == WRAP_NONE) {
 				/* No wrap: move by logical line */
-				if (editor.cursor_row > 0) {
-					editor.cursor_row--;
+				if (E_CTX->cursor_row > 0) {
+					E_CTX->cursor_row--;
 				}
 			} else if (current_line) {
 				/* Wrap enabled: move by screen row (segment) */
 				uint16_t cur_segment = line_get_segment_for_column(
-					current_line, &editor.buffer, editor.cursor_column);
+					current_line, E_BUF, E_CTX->cursor_column);
 				uint32_t visual_col = line_get_visual_column_in_segment(
-					current_line, &editor.buffer, cur_segment,
-					editor.cursor_column);
+					current_line, E_BUF, cur_segment,
+					E_CTX->cursor_column);
 
 				if (cur_segment > 0) {
 					/* Move to previous segment of same line */
 					uint32_t new_col = line_find_column_at_visual(
-						current_line, &editor.buffer,
+						current_line, E_BUF,
 						cur_segment - 1, visual_col);
-					editor.cursor_column = new_col;
-				} else if (editor.cursor_row > 0) {
+					E_CTX->cursor_column = new_col;
+				} else if (E_CTX->cursor_row > 0) {
 					/* Move to last segment of previous line */
-					editor.cursor_row--;
-					struct line *prev_line = &editor.buffer.lines[editor.cursor_row];
-					line_ensure_wrap_cache(prev_line, &editor.buffer);
+					E_CTX->cursor_row--;
+					struct line *prev_line = &E_BUF->lines[E_CTX->cursor_row];
+					line_ensure_wrap_cache(prev_line, E_BUF);
 					uint16_t last_segment = prev_line->wrap_segment_count - 1;
 					uint32_t new_col = line_find_column_at_visual(
-						prev_line, &editor.buffer, last_segment, visual_col);
-					editor.cursor_column = new_col;
+						prev_line, E_BUF, last_segment, visual_col);
+					E_CTX->cursor_column = new_col;
 				}
 			}
 			break;
@@ -2149,66 +2149,66 @@ static void editor_move_cursor(int key)
 		case KEY_ARROW_DOWN:
 			if (editor.wrap_mode == WRAP_NONE) {
 				/* No wrap: move by logical line */
-				if (editor.cursor_row < editor.buffer.line_count - 1) {
-					editor.cursor_row++;
+				if (E_CTX->cursor_row < E_BUF->line_count - 1) {
+					E_CTX->cursor_row++;
 				}
 			} else if (current_line) {
 				/* Wrap enabled: move by screen row (segment) */
-				line_ensure_wrap_cache(current_line, &editor.buffer);
+				line_ensure_wrap_cache(current_line, E_BUF);
 				uint16_t cur_segment = line_get_segment_for_column(
-					current_line, &editor.buffer, editor.cursor_column);
+					current_line, E_BUF, E_CTX->cursor_column);
 				uint32_t visual_col = line_get_visual_column_in_segment(
-					current_line, &editor.buffer, cur_segment,
-					editor.cursor_column);
+					current_line, E_BUF, cur_segment,
+					E_CTX->cursor_column);
 
 				if (cur_segment + 1 < current_line->wrap_segment_count) {
 					/* Move to next segment of same line */
 					uint32_t new_col = line_find_column_at_visual(
-						current_line, &editor.buffer,
+						current_line, E_BUF,
 						cur_segment + 1, visual_col);
-					editor.cursor_column = new_col;
-				} else if (editor.cursor_row < editor.buffer.line_count - 1) {
+					E_CTX->cursor_column = new_col;
+				} else if (E_CTX->cursor_row < E_BUF->line_count - 1) {
 					/* Move to first segment of next line */
-					editor.cursor_row++;
-					struct line *next_line = &editor.buffer.lines[editor.cursor_row];
+					E_CTX->cursor_row++;
+					struct line *next_line = &E_BUF->lines[E_CTX->cursor_row];
 					uint32_t new_col = line_find_column_at_visual(
-						next_line, &editor.buffer, 0, visual_col);
-					editor.cursor_column = new_col;
+						next_line, E_BUF, 0, visual_col);
+					E_CTX->cursor_column = new_col;
 				}
-			} else if (editor.buffer.line_count == 0) {
+			} else if (E_BUF->line_count == 0) {
 				/* Allow being on line 0 even with empty buffer */
 			}
 			break;
 
 		case KEY_CTRL_ARROW_LEFT:
 			if (current_line) {
-				line_warm(current_line, &editor.buffer);
-				uint32_t old_col = editor.cursor_column;
-				editor.cursor_column = find_prev_word_start(current_line,
-					editor.cursor_column);
+				line_warm(current_line, E_BUF);
+				uint32_t old_col = E_CTX->cursor_column;
+				E_CTX->cursor_column = find_prev_word_start(current_line,
+					E_CTX->cursor_column);
 				/* If stuck at start of line, wrap to previous line */
-				if (editor.cursor_column == 0 && old_col == 0 &&
-				    editor.cursor_row > 0) {
-					editor.cursor_row--;
-					struct line *prev = &editor.buffer.lines[editor.cursor_row];
-					line_warm(prev, &editor.buffer);
-					editor.cursor_column = prev->cell_count;
+				if (E_CTX->cursor_column == 0 && old_col == 0 &&
+				    E_CTX->cursor_row > 0) {
+					E_CTX->cursor_row--;
+					struct line *prev = &E_BUF->lines[E_CTX->cursor_row];
+					line_warm(prev, E_BUF);
+					E_CTX->cursor_column = prev->cell_count;
 				}
 			}
 			break;
 
 		case KEY_CTRL_ARROW_RIGHT:
 			if (current_line) {
-				line_warm(current_line, &editor.buffer);
-				uint32_t old_col = editor.cursor_column;
+				line_warm(current_line, E_BUF);
+				uint32_t old_col = E_CTX->cursor_column;
 				uint32_t len = current_line->cell_count;
-				editor.cursor_column = find_next_word_start(current_line,
-					editor.cursor_column);
+				E_CTX->cursor_column = find_next_word_start(current_line,
+					E_CTX->cursor_column);
 				/* If stuck at end of line, wrap to next line */
-				if (editor.cursor_column == len && old_col == len &&
-				    editor.cursor_row < editor.buffer.line_count - 1) {
-					editor.cursor_row++;
-					editor.cursor_column = 0;
+				if (E_CTX->cursor_column == len && old_col == len &&
+				    E_CTX->cursor_row < E_BUF->line_count - 1) {
+					E_CTX->cursor_row++;
+					E_CTX->cursor_column = 0;
 				}
 			}
 			break;
@@ -2216,76 +2216,76 @@ static void editor_move_cursor(int key)
 		case KEY_HOME:
 			if (editor.wrap_mode == WRAP_NONE || !current_line) {
 				/* No wrap: go to start of logical line */
-				editor.cursor_column = 0;
+				E_CTX->cursor_column = 0;
 			} else {
 				/* Wrap enabled: go to start of current segment */
 				uint16_t segment = line_get_segment_for_column(
-					current_line, &editor.buffer, editor.cursor_column);
+					current_line, E_BUF, E_CTX->cursor_column);
 				uint32_t segment_start = line_get_segment_start(
-					current_line, &editor.buffer, segment);
-				if (editor.cursor_column == segment_start && segment > 0) {
+					current_line, E_BUF, segment);
+				if (E_CTX->cursor_column == segment_start && segment > 0) {
 					/* Already at segment start, go to previous segment start */
 					segment_start = line_get_segment_start(
-						current_line, &editor.buffer, segment - 1);
+						current_line, E_BUF, segment - 1);
 				}
-				editor.cursor_column = segment_start;
+				E_CTX->cursor_column = segment_start;
 			}
 			break;
 
 		case KEY_END:
 			if (editor.wrap_mode == WRAP_NONE || !current_line) {
 				/* No wrap: go to end of logical line */
-				editor.cursor_column = line_length;
+				E_CTX->cursor_column = line_length;
 			} else {
 				/* Wrap enabled: go to end of current segment */
-				line_ensure_wrap_cache(current_line, &editor.buffer);
+				line_ensure_wrap_cache(current_line, E_BUF);
 				uint16_t segment = line_get_segment_for_column(
-					current_line, &editor.buffer, editor.cursor_column);
+					current_line, E_BUF, E_CTX->cursor_column);
 				uint32_t segment_end = line_get_segment_end(
-					current_line, &editor.buffer, segment);
-				if (editor.cursor_column == segment_end &&
+					current_line, E_BUF, segment);
+				if (E_CTX->cursor_column == segment_end &&
 				    segment + 1 < current_line->wrap_segment_count) {
 					/* Already at segment end, go to next segment end */
 					segment_end = line_get_segment_end(
-						current_line, &editor.buffer, segment + 1);
+						current_line, E_BUF, segment + 1);
 				}
-				editor.cursor_column = segment_end;
+				E_CTX->cursor_column = segment_end;
 			}
 			break;
 
 		case KEY_PAGE_UP:
-			if (editor.cursor_row > editor.screen_rows) {
-				editor.cursor_row -= editor.screen_rows;
+			if (E_CTX->cursor_row > editor.screen_rows) {
+				E_CTX->cursor_row -= editor.screen_rows;
 			} else {
-				editor.cursor_row = 0;
+				E_CTX->cursor_row = 0;
 			}
 			break;
 
 		case KEY_PAGE_DOWN:
-			if (editor.cursor_row + editor.screen_rows < editor.buffer.line_count) {
-				editor.cursor_row += editor.screen_rows;
-			} else if (editor.buffer.line_count > 0) {
-				editor.cursor_row = editor.buffer.line_count - 1;
+			if (E_CTX->cursor_row + editor.screen_rows < E_BUF->line_count) {
+				E_CTX->cursor_row += editor.screen_rows;
+			} else if (E_BUF->line_count > 0) {
+				E_CTX->cursor_row = E_BUF->line_count - 1;
 			}
 			break;
 	}
 
 	/* Snap cursor to end of line if it's past the line length */
-	line_length = editor_get_line_length(editor.cursor_row);
-	if (editor.cursor_column > line_length) {
-		editor.cursor_column = line_length;
+	line_length = editor_get_line_length(E_CTX->cursor_row);
+	if (E_CTX->cursor_column > line_length) {
+		E_CTX->cursor_column = line_length;
 	}
 	/*
 	 * Sync multi-cursor positions with primary cursor movement.
 	 * Calculate the delta from the primary cursor's old position and
 	 * apply it to all cursors in the array.
 	 */
-	if (editor.cursor_count > 0) {
-		struct cursor *primary = &editor.cursors[editor.primary_cursor];
-		int32_t row_delta = (int32_t)editor.cursor_row - (int32_t)primary->row;
-		int32_t col_delta = (int32_t)editor.cursor_column - (int32_t)primary->column;
-		for (uint32_t i = 0; i < editor.cursor_count; i++) {
-			struct cursor *cursor = &editor.cursors[i];
+	if (E_CTX->cursor_count > 0) {
+		struct cursor *primary = &E_CTX->cursors[E_CTX->primary_cursor];
+		int32_t row_delta = (int32_t)E_CTX->cursor_row - (int32_t)primary->row;
+		int32_t col_delta = (int32_t)E_CTX->cursor_column - (int32_t)primary->column;
+		for (uint32_t i = 0; i < E_CTX->cursor_count; i++) {
+			struct cursor *cursor = &E_CTX->cursors[i];
 			/* Calculate new position with bounds checking */
 			int32_t new_row = (int32_t)cursor->row + row_delta;
 			int32_t new_col = (int32_t)cursor->column + col_delta;
@@ -2293,8 +2293,8 @@ static void editor_move_cursor(int key)
 			if (new_row < 0) {
 				new_row = 0;
 			}
-			if (new_row >= (int32_t)editor.buffer.line_count) {
-				new_row = editor.buffer.line_count - 1;
+			if (new_row >= (int32_t)E_BUF->line_count) {
+				new_row = E_BUF->line_count - 1;
 			}
 			cursor->row = (uint32_t)new_row;
 			/* Clamp column to line length */
@@ -2317,7 +2317,7 @@ static void editor_move_cursor(int key)
  */
 void editor_delete_selection(void)
 {
-	if (!editor.selection_active || selection_is_empty()) {
+	if (!E_CTX->selection_active || selection_is_empty()) {
 		return;
 	}
 
@@ -2328,32 +2328,32 @@ void editor_delete_selection(void)
 	size_t text_length;
 	char *text = selection_get_text(&text_length);
 	if (text != NULL) {
-		undo_record_delete_text(&editor.buffer, start_row, start_col,
+		undo_record_delete_text(E_BUF, start_row, start_col,
 		                        end_row, end_col, text, text_length);
 		free(text);
 	}
 
 	if (start_row == end_row) {
 		/* Single line selection - delete cells from end to start */
-		struct line *line = &editor.buffer.lines[start_row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[start_row];
+		line_warm(line, E_BUF);
 
 		for (uint32_t i = end_col; i > start_col; i--) {
 			line_delete_cell(line, start_col);
 		}
 		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(line);
-		syntax_highlight_line(line, &editor.buffer, start_row);
+		syntax_highlight_line(line, E_BUF, start_row);
 	} else {
 		/* Multi-line selection */
 		/* 1. Truncate start line at start_col */
-		struct line *start_line = &editor.buffer.lines[start_row];
-		line_warm(start_line, &editor.buffer);
+		struct line *start_line = &E_BUF->lines[start_row];
+		line_warm(start_line, E_BUF);
 		start_line->cell_count = start_col;
 
 		/* 2. Append content after end_col from end line */
-		struct line *end_line = &editor.buffer.lines[end_row];
-		line_warm(end_line, &editor.buffer);
+		struct line *end_line = &E_BUF->lines[end_row];
+		line_warm(end_line, E_BUF);
 
 		int ret = 0;
 		for (uint32_t i = end_col; i < end_line->cell_count; i++) {
@@ -2366,26 +2366,26 @@ void editor_delete_selection(void)
 
 		/* 3. Delete lines from start_row+1 to end_row inclusive */
 		for (uint32_t i = end_row; i > start_row; i--) {
-			buffer_delete_line(&editor.buffer, i);
+			buffer_delete_line(E_BUF, i);
 		}
 
 		line_set_temperature(start_line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(start_line);
-		buffer_compute_pairs(&editor.buffer);
+		buffer_compute_pairs(E_BUF);
 
 		/* Re-highlight affected lines */
-		for (uint32_t row = start_row; row < editor.buffer.line_count; row++) {
-			if (editor.buffer.lines[row].temperature != LINE_TEMPERATURE_COLD) {
-				syntax_highlight_line(&editor.buffer.lines[row], &editor.buffer, row);
+		for (uint32_t row = start_row; row < E_BUF->line_count; row++) {
+			if (E_BUF->lines[row].temperature != LINE_TEMPERATURE_COLD) {
+				syntax_highlight_line(&E_BUF->lines[row], E_BUF, row);
 			}
 		}
 	}
 
 	/* Move cursor to start of deleted region */
-	editor.cursor_row = start_row;
-	editor.cursor_column = start_col;
+	E_CTX->cursor_row = start_row;
+	E_CTX->cursor_column = start_col;
 
-	editor.buffer.is_modified = true;
+	E_BUF->is_modified = true;
 	selection_clear();
 }
 
@@ -2396,21 +2396,21 @@ void editor_delete_selection(void)
  */
 static bool editor_table_next_cell(void)
 {
-	if (!syntax_is_markdown_file(editor.buffer.filename))
+	if (!syntax_is_markdown_file(E_BUF->filename))
 		return false;
 	uint32_t start_row, end_row, separator_row;
-	if (!table_detect_bounds(&editor.buffer, editor.cursor_row,
+	if (!table_detect_bounds(E_BUF, E_CTX->cursor_row,
 				 &start_row, &end_row, &separator_row))
 		return false;
 	/* Clear selection before table navigation */
 	selection_clear();
 	/* Reformat table before navigating */
-	table_reformat(&editor.buffer, editor.cursor_row);
-	struct line *line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	table_reformat(E_BUF, E_CTX->cursor_row);
+	struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 	/* Find first pipe at or after cursor - that ends current cell */
 	for (uint32_t i = 0; i < line->cell_count; i++) {
-		if (line->cells[i].codepoint == '|' && i >= editor.cursor_column) {
+		if (line->cells[i].codepoint == '|' && i >= E_CTX->cursor_column) {
 			/* This pipe ends current cell, move to next cell */
 			if (i + 1 < line->cell_count) {
 				uint32_t next_cell_start = i + 1;
@@ -2418,29 +2418,29 @@ static bool editor_table_next_cell(void)
 				if (next_cell_start < line->cell_count &&
 				    line->cells[next_cell_start].codepoint == ' ')
 					next_cell_start++;
-				editor.cursor_column = next_cell_start;
+				E_CTX->cursor_column = next_cell_start;
 				return true;
 			}
 			break;  /* No next cell, try next row */
 		}
 	}
 	/* No next cell on this row - try next content row */
-	uint32_t next_row = editor.cursor_row + 1;
+	uint32_t next_row = E_CTX->cursor_row + 1;
 	if (next_row == separator_row)
 		next_row++;  /* Skip separator */
 
 	if (next_row <= end_row) {
-		editor.cursor_row = next_row;
-		line = &editor.buffer.lines[editor.cursor_row];
-		line_warm(line, &editor.buffer);
+		E_CTX->cursor_row = next_row;
+		line = &E_BUF->lines[E_CTX->cursor_row];
+		line_warm(line, E_BUF);
 		/* Find first cell (after first |) */
 		for (uint32_t i = 0; i < line->cell_count; i++) {
 			if (line->cells[i].codepoint == '|') {
-				editor.cursor_column = i + 1;
+				E_CTX->cursor_column = i + 1;
 				/* Skip leading space */
-				if (editor.cursor_column < line->cell_count &&
-				    line->cells[editor.cursor_column].codepoint == ' ')
-					editor.cursor_column++;
+				if (E_CTX->cursor_column < line->cell_count &&
+				    line->cells[E_CTX->cursor_column].codepoint == ' ')
+					E_CTX->cursor_column++;
 				return true;
 			}
 		}
@@ -2448,8 +2448,8 @@ static bool editor_table_next_cell(void)
 
 	/* At end of table - create a new row */
 	/* Count columns from current line */
-	line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 	uint32_t col_count = 0;
 	for (uint32_t i = 0; i < line->cell_count; i++) {
 		if (line->cells[i].codepoint == '|')
@@ -2462,48 +2462,48 @@ static bool editor_table_next_cell(void)
 		return true;
 
 	/* Insert new line after current row */
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Move to end of current line and insert newline */
-	editor.cursor_column = line->cell_count;
-	undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
-	int ret = buffer_insert_newline_checked(&editor.buffer, editor.cursor_row,
-	                                         editor.cursor_column);
+	E_CTX->cursor_column = line->cell_count;
+	undo_record_insert_newline(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
+	int ret = buffer_insert_newline_checked(E_BUF, E_CTX->cursor_row,
+	                                         E_CTX->cursor_column);
 	if (ret) {
-		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		return true;
 	}
 
 	/* Move to new line */
-	editor.cursor_row++;
-	editor.cursor_column = 0;
+	E_CTX->cursor_row++;
+	E_CTX->cursor_column = 0;
 
 	/* Build new row: | cell | cell | ... | */
 	for (uint32_t col = 0; col < col_count; col++) {
 		/* Insert | */
-		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, '|');
-		buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
-		                                      editor.cursor_column, '|');
-		editor.cursor_column++;
+		undo_record_insert_char(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, '|');
+		buffer_insert_cell_at_column_checked(E_BUF, E_CTX->cursor_row,
+		                                      E_CTX->cursor_column, '|');
+		E_CTX->cursor_column++;
 		/* Insert space */
-		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, ' ');
-		buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
-		                                      editor.cursor_column, ' ');
-		editor.cursor_column++;
+		undo_record_insert_char(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, ' ');
+		buffer_insert_cell_at_column_checked(E_BUF, E_CTX->cursor_row,
+		                                      E_CTX->cursor_column, ' ');
+		E_CTX->cursor_column++;
 	}
 	/* Final | */
-	undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, '|');
-	buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
-	                                      editor.cursor_column, '|');
+	undo_record_insert_char(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, '|');
+	buffer_insert_cell_at_column_checked(E_BUF, E_CTX->cursor_row,
+	                                      E_CTX->cursor_column, '|');
 
 	/* Reformat to match column widths */
-	table_reformat(&editor.buffer, editor.cursor_row);
+	table_reformat(E_BUF, E_CTX->cursor_row);
 
 	/* Move cursor to first cell */
-	line = &editor.buffer.lines[editor.cursor_row];
-	editor.cursor_column = 2;  /* After | and space */
+	line = &E_BUF->lines[E_CTX->cursor_row];
+	E_CTX->cursor_column = 2;  /* After | and space */
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 	return true;
 }
 /*
@@ -2512,22 +2512,22 @@ static bool editor_table_next_cell(void)
  */
 static bool editor_table_prev_cell(void)
 {
-	if (!syntax_is_markdown_file(editor.buffer.filename))
+	if (!syntax_is_markdown_file(E_BUF->filename))
 		return false;
 	uint32_t start_row, end_row, separator_row;
-	if (!table_detect_bounds(&editor.buffer, editor.cursor_row,
+	if (!table_detect_bounds(E_BUF, E_CTX->cursor_row,
 				 &start_row, &end_row, &separator_row))
 		return false;
 	/* Clear selection before table navigation */
 	selection_clear();
 	/* Reformat table before navigating */
-	table_reformat(&editor.buffer, editor.cursor_row);
-	struct line *line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	table_reformat(E_BUF, E_CTX->cursor_row);
+	struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 	/* Find pipe before cursor */
 	int32_t prev_pipe = -1;
 	int32_t prev_prev_pipe = -1;
-	for (uint32_t i = 0; i < line->cell_count && i < editor.cursor_column; i++) {
+	for (uint32_t i = 0; i < line->cell_count && i < E_CTX->cursor_column; i++) {
 		if (line->cells[i].codepoint == '|') {
 			prev_prev_pipe = prev_pipe;
 			prev_pipe = i;
@@ -2535,21 +2535,21 @@ static bool editor_table_prev_cell(void)
 	}
 	if (prev_prev_pipe >= 0) {
 		/* Move to previous cell */
-		editor.cursor_column = prev_prev_pipe + 1;
+		E_CTX->cursor_column = prev_prev_pipe + 1;
 		/* Skip leading space */
-		if (editor.cursor_column < line->cell_count &&
-		    line->cells[editor.cursor_column].codepoint == ' ')
-			editor.cursor_column++;
+		if (E_CTX->cursor_column < line->cell_count &&
+		    line->cells[E_CTX->cursor_column].codepoint == ' ')
+			E_CTX->cursor_column++;
 		return true;
 	}
 	/* At first cell - try previous content row */
-	uint32_t prev_row = editor.cursor_row - 1;
+	uint32_t prev_row = E_CTX->cursor_row - 1;
 	if (prev_row == separator_row && prev_row > start_row)
 		prev_row--;  /* Skip separator */
 	if (prev_row >= start_row && prev_row != separator_row) {
-		editor.cursor_row = prev_row;
-		line = &editor.buffer.lines[editor.cursor_row];
-		line_warm(line, &editor.buffer);
+		E_CTX->cursor_row = prev_row;
+		line = &E_BUF->lines[E_CTX->cursor_row];
+		line_warm(line, E_BUF);
 		/* Find last cell (before last |) */
 		int32_t last_pipe = -1;
 		int32_t second_last_pipe = -1;
@@ -2560,11 +2560,11 @@ static bool editor_table_prev_cell(void)
 			}
 		}
 		if (second_last_pipe >= 0) {
-			editor.cursor_column = second_last_pipe + 1;
+			E_CTX->cursor_column = second_last_pipe + 1;
 			/* Skip leading space */
-			if (editor.cursor_column < line->cell_count &&
-			    line->cells[editor.cursor_column].codepoint == ' ')
-				editor.cursor_column++;
+			if (E_CTX->cursor_column < line->cell_count &&
+			    line->cells[E_CTX->cursor_column].codepoint == ' ')
+				E_CTX->cursor_column++;
 			return true;
 		}
 	}
@@ -2577,24 +2577,24 @@ static bool editor_table_prev_cell(void)
  */
 static void editor_insert_character(uint32_t codepoint)
 {
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Delete selection first if active */
-	if (editor.selection_active && !selection_is_empty()) {
+	if (E_CTX->selection_active && !selection_is_empty()) {
 		editor_delete_selection();
 	}
 
-	undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
-	int ret = buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
-	                                                editor.cursor_column, codepoint);
+	undo_record_insert_char(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, codepoint);
+	int ret = buffer_insert_cell_at_column_checked(E_BUF, E_CTX->cursor_row,
+	                                                E_CTX->cursor_column, codepoint);
 	if (ret) {
 		editor_set_status_message("Insert failed: %s", edit_strerror(ret));
-		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		return;
 	}
-	editor.cursor_column++;
+	E_CTX->cursor_column++;
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 }
 
 /*
@@ -2605,7 +2605,7 @@ static void editor_insert_character(uint32_t codepoint)
  */
 static void editor_insert_newline(void)
 {
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/*
 	 * Capture leading whitespace before any modifications. We limit the
@@ -2615,9 +2615,9 @@ static void editor_insert_newline(void)
 	uint32_t indent_count = 0;
 	uint32_t indent_chars[256];
 
-	if (editor.cursor_row < editor.buffer.line_count) {
-		struct line *line = &editor.buffer.lines[editor.cursor_row];
-		line_warm(line, &editor.buffer);
+	if (E_CTX->cursor_row < E_BUF->line_count) {
+		struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+		line_warm(line, E_BUF);
 
 		while (indent_count < line->cell_count && indent_count < 256) {
 			uint32_t codepoint = line->cells[indent_count].codepoint;
@@ -2629,19 +2629,19 @@ static void editor_insert_newline(void)
 		}
 
 		/* Don't copy more indent than cursor position */
-		if (indent_count > editor.cursor_column) {
-			indent_count = editor.cursor_column;
+		if (indent_count > E_CTX->cursor_column) {
+			indent_count = E_CTX->cursor_column;
 		}
 	}
 
 	/* Delete selection first if active */
-	if (editor.selection_active && !selection_is_empty()) {
+	if (E_CTX->selection_active && !selection_is_empty()) {
 		editor_delete_selection();
 		/* After deletion, re-evaluate indent based on new cursor position */
 		indent_count = 0;
-		if (editor.cursor_row < editor.buffer.line_count) {
-			struct line *line = &editor.buffer.lines[editor.cursor_row];
-			line_warm(line, &editor.buffer);
+		if (E_CTX->cursor_row < E_BUF->line_count) {
+			struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+			line_warm(line, E_BUF);
 
 			while (indent_count < line->cell_count && indent_count < 256) {
 				uint32_t codepoint = line->cells[indent_count].codepoint;
@@ -2652,38 +2652,38 @@ static void editor_insert_newline(void)
 				indent_count++;
 			}
 
-			if (indent_count > editor.cursor_column) {
-				indent_count = editor.cursor_column;
+			if (indent_count > E_CTX->cursor_column) {
+				indent_count = E_CTX->cursor_column;
 			}
 		}
 	}
 
-	undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
-	int ret = buffer_insert_newline_checked(&editor.buffer, editor.cursor_row,
-	                                         editor.cursor_column);
+	undo_record_insert_newline(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
+	int ret = buffer_insert_newline_checked(E_BUF, E_CTX->cursor_row,
+	                                         E_CTX->cursor_column);
 	if (ret) {
 		editor_set_status_message("Cannot insert line: %s", edit_strerror(ret));
-		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		return;
 	}
-	editor.cursor_row++;
-	editor.cursor_column = 0;
+	E_CTX->cursor_row++;
+	E_CTX->cursor_column = 0;
 
 	/* Check if previous line was a table separator - if so, complete the table */
-	if (syntax_is_markdown_file(editor.buffer.filename) && editor.cursor_row > 0) {
-		struct line *prev_line = &editor.buffer.lines[editor.cursor_row - 1];
-		line_warm(prev_line, &editor.buffer);
+	if (syntax_is_markdown_file(E_BUF->filename) && E_CTX->cursor_row > 0) {
+		struct line *prev_line = &E_BUF->lines[E_CTX->cursor_row - 1];
+		line_warm(prev_line, E_BUF);
 
 		if (md_is_table_separator(prev_line)) {
 			uint32_t start_row, end_row, separator_row;
-			if (table_detect_bounds(&editor.buffer, editor.cursor_row - 1,
+			if (table_detect_bounds(E_BUF, E_CTX->cursor_row - 1,
 						&start_row, &end_row, &separator_row)) {
 				/* Valid table detected - reformat it */
-				table_reformat(&editor.buffer, editor.cursor_row - 1);
+				table_reformat(E_BUF, E_CTX->cursor_row - 1);
 
 				/* Count columns from separator row */
-				prev_line = &editor.buffer.lines[separator_row];
-				line_warm(prev_line, &editor.buffer);
+				prev_line = &E_BUF->lines[separator_row];
+				line_warm(prev_line, E_BUF);
 				uint32_t col_count = 0;
 				for (uint32_t i = 0; i < prev_line->cell_count; i++) {
 					if (prev_line->cells[i].codepoint == '|')
@@ -2695,33 +2695,33 @@ static void editor_insert_newline(void)
 				if (col_count > 0) {
 					/* Build new content row on current line */
 					/* Insert | at start */
-					undo_record_insert_char(&editor.buffer, editor.cursor_row, 0, '|');
-					buffer_insert_cell_at_column_checked(&editor.buffer,
-									     editor.cursor_row, 0, '|');
+					undo_record_insert_char(E_BUF, E_CTX->cursor_row, 0, '|');
+					buffer_insert_cell_at_column_checked(E_BUF,
+									     E_CTX->cursor_row, 0, '|');
 
 					/* For each column, insert space + | */
 					uint32_t pos = 1;
 					for (uint32_t c = 0; c < col_count; c++) {
-						undo_record_insert_char(&editor.buffer,
-									editor.cursor_row, pos, ' ');
-						buffer_insert_cell_at_column_checked(&editor.buffer,
-										     editor.cursor_row,
+						undo_record_insert_char(E_BUF,
+									E_CTX->cursor_row, pos, ' ');
+						buffer_insert_cell_at_column_checked(E_BUF,
+										     E_CTX->cursor_row,
 										     pos++, ' ');
-						undo_record_insert_char(&editor.buffer,
-									editor.cursor_row, pos, '|');
-						buffer_insert_cell_at_column_checked(&editor.buffer,
-										     editor.cursor_row,
+						undo_record_insert_char(E_BUF,
+									E_CTX->cursor_row, pos, '|');
+						buffer_insert_cell_at_column_checked(E_BUF,
+										     E_CTX->cursor_row,
 										     pos++, '|');
 					}
 
 					/* Reformat to get proper column widths */
-					table_reformat(&editor.buffer, editor.cursor_row);
+					table_reformat(E_BUF, E_CTX->cursor_row);
 
 					/* Position cursor in first cell (after | and space) */
-					editor.cursor_column = 2;
+					E_CTX->cursor_column = 2;
 
-					undo_end_group(&editor.buffer, editor.cursor_row,
-						       editor.cursor_column);
+					undo_end_group(E_BUF, E_CTX->cursor_row,
+						       E_CTX->cursor_column);
 					return;  /* Skip auto-indent */
 				}
 			}
@@ -2730,15 +2730,15 @@ static void editor_insert_newline(void)
 
 	/* Insert auto-indent characters on the new line */
 	for (uint32_t i = 0; i < indent_count; i++) {
-		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, indent_chars[i]);
-		ret = buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
-		                                            editor.cursor_column, indent_chars[i]);
+		undo_record_insert_char(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, indent_chars[i]);
+		ret = buffer_insert_cell_at_column_checked(E_BUF, E_CTX->cursor_row,
+		                                            E_CTX->cursor_column, indent_chars[i]);
 		if (ret) {
 			editor_set_status_message("Auto-indent failed: %s", edit_strerror(ret));
-			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+			undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 			return;
 		}
-		editor.cursor_column++;
+		E_CTX->cursor_column++;
 	}
 	/*
 	 * Markdown list continuation: auto-insert list markers on Enter.
@@ -2746,9 +2746,9 @@ static void editor_insert_newline(void)
 	 * If the previous line was an empty list item (just marker, no content),
 	 * we remove the marker instead of adding a new one.
 	 */
-	if (syntax_is_markdown_file(editor.buffer.filename) && editor.cursor_row > 0) {
-		struct line *prev_line = &editor.buffer.lines[editor.cursor_row - 1];
-		line_warm(prev_line, &editor.buffer);
+	if (syntax_is_markdown_file(E_BUF->filename) && E_CTX->cursor_row > 0) {
+		struct line *prev_line = &E_BUF->lines[E_CTX->cursor_row - 1];
+		line_warm(prev_line, E_BUF);
 		/* Scan for list marker in previous line */
 		uint32_t marker_start = UINT32_MAX;
 		uint32_t marker_end = 0;
@@ -2782,8 +2782,8 @@ static void editor_insert_newline(void)
 				 */
 				uint32_t delete_count = prev_line->cell_count - marker_start;
 				for (uint32_t i = 0; i < delete_count; i++) {
-					undo_record_delete_char(&editor.buffer,
-						editor.cursor_row - 1, marker_start,
+					undo_record_delete_char(E_BUF,
+						E_CTX->cursor_row - 1, marker_start,
 						prev_line->cells[marker_start].codepoint);
 					line_delete_cell(prev_line, marker_start);
 				}
@@ -2842,20 +2842,20 @@ static void editor_insert_newline(void)
 				}
 				/* Insert the list marker on the new line */
 				for (uint32_t i = 0; i < list_marker_count; i++) {
-					undo_record_insert_char(&editor.buffer,
-						editor.cursor_row, editor.cursor_column,
+					undo_record_insert_char(E_BUF,
+						E_CTX->cursor_row, E_CTX->cursor_column,
 						list_marker[i]);
-					buffer_insert_cell_at_column_checked(&editor.buffer,
-						editor.cursor_row, editor.cursor_column,
+					buffer_insert_cell_at_column_checked(E_BUF,
+						E_CTX->cursor_row, E_CTX->cursor_column,
 						list_marker[i]);
-					editor.cursor_column++;
+					E_CTX->cursor_column++;
 				}
 			}
 		}
 	}
 
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 }
 
 /*
@@ -2866,40 +2866,40 @@ static void editor_insert_newline(void)
 static void editor_delete_character(void)
 {
 	/* Delete selection if active */
-	if (editor.selection_active && !selection_is_empty()) {
-		undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	if (E_CTX->selection_active && !selection_is_empty()) {
+		undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		editor_delete_selection();
-		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		return;
 	}
 
-	if (editor.cursor_row >= editor.buffer.line_count) {
+	if (E_CTX->cursor_row >= E_BUF->line_count) {
 		return;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
-	struct line *line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 
-	if (editor.cursor_column < line->cell_count) {
+	if (E_CTX->cursor_column < line->cell_count) {
 		/* Deleting a character - record it before deletion */
-		uint32_t codepoint = line->cells[editor.cursor_column].codepoint;
-		undo_record_delete_char(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
-	} else if (editor.cursor_row + 1 < editor.buffer.line_count) {
+		uint32_t codepoint = line->cells[E_CTX->cursor_column].codepoint;
+		undo_record_delete_char(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, codepoint);
+	} else if (E_CTX->cursor_row + 1 < E_BUF->line_count) {
 		/* Joining with next line - record newline deletion */
-		undo_record_delete_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		undo_record_delete_newline(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 	}
 
-	int ret = buffer_delete_grapheme_at_column_checked(&editor.buffer, editor.cursor_row,
-	                                                     editor.cursor_column);
+	int ret = buffer_delete_grapheme_at_column_checked(E_BUF, E_CTX->cursor_row,
+	                                                     E_CTX->cursor_column);
 	if (ret) {
 		editor_set_status_message("Delete failed: %s", edit_strerror(ret));
-		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		return;
 	}
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 }
 
 /*
@@ -2911,56 +2911,56 @@ static void editor_delete_character(void)
 static void editor_handle_backspace(void)
 {
 	/* Delete selection if active */
-	if (editor.selection_active && !selection_is_empty()) {
-		undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	if (E_CTX->selection_active && !selection_is_empty()) {
+		undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		editor_delete_selection();
-		undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+		undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 		return;
 	}
 
-	if (editor.cursor_row == 0 && editor.cursor_column == 0) {
+	if (E_CTX->cursor_row == 0 && E_CTX->cursor_column == 0) {
 		return;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	int ret;
-	if (editor.cursor_column > 0) {
-		struct line *line = &editor.buffer.lines[editor.cursor_row];
-		line_warm(line, &editor.buffer);
-		uint32_t new_column = cursor_prev_grapheme(line, &editor.buffer, editor.cursor_column);
+	if (E_CTX->cursor_column > 0) {
+		struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+		line_warm(line, E_BUF);
+		uint32_t new_column = cursor_prev_grapheme(line, E_BUF, E_CTX->cursor_column);
 		/* Record the character we're about to delete */
 		uint32_t codepoint = line->cells[new_column].codepoint;
-		undo_record_delete_char(&editor.buffer, editor.cursor_row, new_column, codepoint);
-		editor.cursor_column = new_column;
-		ret = buffer_delete_grapheme_at_column_checked(&editor.buffer, editor.cursor_row,
-		                                                editor.cursor_column);
+		undo_record_delete_char(E_BUF, E_CTX->cursor_row, new_column, codepoint);
+		E_CTX->cursor_column = new_column;
+		ret = buffer_delete_grapheme_at_column_checked(E_BUF, E_CTX->cursor_row,
+		                                                E_CTX->cursor_column);
 		if (ret) {
 			editor_set_status_message("Delete failed: %s", edit_strerror(ret));
-			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+			undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 			return;
 		}
 	} else {
 		/* Join with previous line - record newline deletion at end of previous line */
-		uint32_t previous_line_length = editor_get_line_length(editor.cursor_row - 1);
-		undo_record_delete_newline(&editor.buffer, editor.cursor_row - 1, previous_line_length);
-		struct line *previous_line = &editor.buffer.lines[editor.cursor_row - 1];
-		struct line *current_line = &editor.buffer.lines[editor.cursor_row];
-		line_warm(previous_line, &editor.buffer);
-		line_warm(current_line, &editor.buffer);
+		uint32_t previous_line_length = editor_get_line_length(E_CTX->cursor_row - 1);
+		undo_record_delete_newline(E_BUF, E_CTX->cursor_row - 1, previous_line_length);
+		struct line *previous_line = &E_BUF->lines[E_CTX->cursor_row - 1];
+		struct line *current_line = &E_BUF->lines[E_CTX->cursor_row];
+		line_warm(previous_line, E_BUF);
+		line_warm(current_line, E_BUF);
 		ret = line_append_cells_from_line_checked(previous_line, current_line);
 		if (ret) {
 			editor_set_status_message("Join lines failed: %s", edit_strerror(ret));
-			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+			undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 			return;
 		}
 		line_set_temperature(previous_line, LINE_TEMPERATURE_HOT);
-		buffer_delete_line(&editor.buffer, editor.cursor_row);
-		editor.cursor_row--;
-		editor.cursor_column = previous_line_length;
+		buffer_delete_line(E_BUF, E_CTX->cursor_row);
+		E_CTX->cursor_row--;
+		E_CTX->cursor_column = previous_line_length;
 	}
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 }
 
@@ -2974,7 +2974,7 @@ static void editor_handle_backspace(void)
  */
 static void multicursor_insert_character(uint32_t codepoint)
 {
-	if (editor.cursor_count == 0) {
+	if (E_CTX->cursor_count == 0) {
 		editor_insert_character(codepoint);
 		return;
 	}
@@ -2982,18 +2982,18 @@ static void multicursor_insert_character(uint32_t codepoint)
 	/* Sort cursors so reverse iteration processes bottom-to-top */
 	multicursor_normalize();
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Process in reverse order (bottom to top) so positions stay valid */
-	for (int i = (int)editor.cursor_count - 1; i >= 0; i--) {
-		struct cursor *cursor = &editor.cursors[i];
+	for (int i = (int)E_CTX->cursor_count - 1; i >= 0; i--) {
+		struct cursor *cursor = &E_CTX->cursors[i];
 
 		/* TODO: Delete selection at this cursor if any */
 
 		/* Insert character */
-		undo_record_insert_char(&editor.buffer, cursor->row,
+		undo_record_insert_char(E_BUF, cursor->row,
 		                        cursor->column, codepoint);
-		buffer_insert_cell_at_column(&editor.buffer, cursor->row,
+		buffer_insert_cell_at_column(E_BUF, cursor->row,
 		                             cursor->column, codepoint);
 
 		/* Update cursor position */
@@ -3008,23 +3008,23 @@ static void multicursor_insert_character(uint32_t codepoint)
 		 * j > i means higher column positions already processed.
 		 * They need to shift right because we just inserted before them.
 		 */
-		for (int j = i + 1; j < (int)editor.cursor_count; j++) {
-			if (editor.cursors[j].row == cursor->row) {
-				editor.cursors[j].column++;
-				if (editor.cursors[j].anchor_row == cursor->row) {
-					editor.cursors[j].anchor_column++;
+		for (int j = i + 1; j < (int)E_CTX->cursor_count; j++) {
+			if (E_CTX->cursors[j].row == cursor->row) {
+				E_CTX->cursors[j].column++;
+				if (E_CTX->cursors[j].anchor_row == cursor->row) {
+					E_CTX->cursors[j].anchor_column++;
 				}
 			}
 		}
 	}
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Update primary cursor in legacy fields for rendering */
-	struct cursor *primary = &editor.cursors[editor.primary_cursor];
-	editor.cursor_row = primary->row;
-	editor.cursor_column = primary->column;
+	struct cursor *primary = &E_CTX->cursors[E_CTX->primary_cursor];
+	E_CTX->cursor_row = primary->row;
+	E_CTX->cursor_column = primary->column;
 }
 
 /*
@@ -3033,7 +3033,7 @@ static void multicursor_insert_character(uint32_t codepoint)
  */
 static void multicursor_backspace(void)
 {
-	if (editor.cursor_count == 0) {
+	if (E_CTX->cursor_count == 0) {
 		editor_handle_backspace();
 		return;
 	}
@@ -3041,11 +3041,11 @@ static void multicursor_backspace(void)
 	/* Sort cursors so reverse iteration processes bottom-to-top */
 	multicursor_normalize();
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Process in reverse order */
-	for (int i = (int)editor.cursor_count - 1; i >= 0; i--) {
-		struct cursor *cursor = &editor.cursors[i];
+	for (int i = (int)E_CTX->cursor_count - 1; i >= 0; i--) {
+		struct cursor *cursor = &E_CTX->cursors[i];
 
 		/* TODO: Delete selection at this cursor if any */
 
@@ -3055,13 +3055,13 @@ static void multicursor_backspace(void)
 
 		if (cursor->column > 0) {
 			/* Delete character before cursor on same line */
-			struct line *line = &editor.buffer.lines[cursor->row];
-			line_warm(line, &editor.buffer);
+			struct line *line = &E_BUF->lines[cursor->row];
+			line_warm(line, E_BUF);
 
 			uint32_t delete_column = cursor->column - 1;
 			uint32_t deleted_codepoint = line->cells[delete_column].codepoint;
 
-			undo_record_delete_char(&editor.buffer, cursor->row,
+			undo_record_delete_char(E_BUF, cursor->row,
 			                        delete_column, deleted_codepoint);
 			line_delete_cell(line, delete_column);
 
@@ -3070,18 +3070,18 @@ static void multicursor_backspace(void)
 
 			/* Update line metadata */
 			neighbor_compute_line(line);
-			syntax_highlight_line(line, &editor.buffer, cursor->row);
+			syntax_highlight_line(line, E_BUF, cursor->row);
 			line_invalidate_wrap_cache(line);
 
 			/* Adjust later cursors on same line (already processed) */
-			for (int j = i + 1; j < (int)editor.cursor_count; j++) {
-				if (editor.cursors[j].row == cursor->row &&
-				    editor.cursors[j].column > delete_column) {
-					editor.cursors[j].column--;
+			for (int j = i + 1; j < (int)E_CTX->cursor_count; j++) {
+				if (E_CTX->cursors[j].row == cursor->row &&
+				    E_CTX->cursors[j].column > delete_column) {
+					E_CTX->cursors[j].column--;
 				}
-				if (editor.cursors[j].anchor_row == cursor->row &&
-				    editor.cursors[j].anchor_column > delete_column) {
-					editor.cursors[j].anchor_column--;
+				if (E_CTX->cursors[j].anchor_row == cursor->row &&
+				    E_CTX->cursors[j].anchor_column > delete_column) {
+					E_CTX->cursors[j].anchor_column--;
 				}
 			}
 		} else {
@@ -3090,16 +3090,16 @@ static void multicursor_backspace(void)
 		}
 	}
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	multicursor_normalize();
 
 	/* Update primary cursor in legacy fields */
-	if (editor.cursor_count > 0) {
-		struct cursor *primary = &editor.cursors[editor.primary_cursor];
-		editor.cursor_row = primary->row;
-		editor.cursor_column = primary->column;
+	if (E_CTX->cursor_count > 0) {
+		struct cursor *primary = &E_CTX->cursors[E_CTX->primary_cursor];
+		E_CTX->cursor_row = primary->row;
+		E_CTX->cursor_column = primary->column;
 	}
 }
 
@@ -3114,17 +3114,17 @@ static void multicursor_backspace(void)
  */
 void editor_save(void)
 {
-	if (editor.buffer.filename == NULL) {
+	if (E_BUF->filename == NULL) {
 		editor_set_status_message("No filename specified");
 		return;
 	}
 	/* Cannot save to stdin - prompt user to use Save As */
-	if (strcmp(editor.buffer.filename, "<stdin>") == 0) {
+	if (strcmp(E_BUF->filename, "<stdin>") == 0) {
 		editor_set_status_message("Use Alt+Shift+S or F12 to Save As");
 		return;
 	}
 
-	int ret = file_save(&editor.buffer);
+	int ret = file_save(E_BUF);
 	if (ret) {
 		editor_set_status_message("Save failed: %s", edit_strerror(ret));
 	} else {
@@ -3139,18 +3139,18 @@ void editor_save(void)
  */
 static uint32_t screen_column_to_cell(uint32_t row, uint32_t target_visual_column)
 {
-	if (row >= editor.buffer.line_count) {
+	if (row >= E_BUF->line_count) {
 		return 0;
 	}
 
-	struct line *line = &editor.buffer.lines[row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[row];
+	line_warm(line, E_BUF);
 
 	uint32_t visual_column = 0;
 	uint32_t cell_index = 0;
 
 	while (cell_index < line->cell_count && visual_column < target_visual_column) {
-		uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, cell_index);
+		uint32_t grapheme_end = cursor_next_grapheme(line, E_BUF, cell_index);
 		int width = grapheme_display_width(line, cell_index, grapheme_end, visual_column);
 
 		/* If clicking in the middle of a wide character, round to nearest */
@@ -3174,12 +3174,12 @@ static uint32_t screen_column_to_cell(uint32_t row, uint32_t target_visual_colum
  */
 static bool editor_select_word(uint32_t row, uint32_t column)
 {
-	if (row >= editor.buffer.line_count) {
+	if (row >= E_BUF->line_count) {
 		return false;
 	}
 
-	struct line *line = &editor.buffer.lines[row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[row];
+	line_warm(line, E_BUF);
 
 	if (line->cell_count == 0) {
 		return false;
@@ -3194,7 +3194,7 @@ static bool editor_select_word(uint32_t row, uint32_t column)
 
 	/* Don't select whitespace as a "word" */
 	if (click_class == CHAR_CLASS_WHITESPACE) {
-		editor.cursor_column = column;
+		E_CTX->cursor_column = column;
 		selection_clear();
 		return false;
 	}
@@ -3221,11 +3221,11 @@ static bool editor_select_word(uint32_t row, uint32_t column)
 	word_end++;  /* End is exclusive */
 
 	/* Set selection */
-	editor.selection_anchor_row = row;
-	editor.selection_anchor_column = word_start;
-	editor.cursor_row = row;
-	editor.cursor_column = word_end;
-	editor.selection_active = true;
+	E_CTX->selection_anchor_row = row;
+	E_CTX->selection_anchor_column = word_start;
+	E_CTX->cursor_row = row;
+	E_CTX->cursor_column = word_end;
+	E_CTX->selection_active = true;
 	return true;
 }
 
@@ -3234,18 +3234,18 @@ static bool editor_select_word(uint32_t row, uint32_t column)
  */
 static void editor_select_line(uint32_t row)
 {
-	if (row >= editor.buffer.line_count) {
+	if (row >= E_BUF->line_count) {
 		return;
 	}
 
-	struct line *line = &editor.buffer.lines[row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[row];
+	line_warm(line, E_BUF);
 
-	editor.selection_anchor_row = row;
-	editor.selection_anchor_column = 0;
-	editor.cursor_row = row;
-	editor.cursor_column = line->cell_count;
-	editor.selection_active = true;
+	E_CTX->selection_anchor_row = row;
+	E_CTX->selection_anchor_column = 0;
+	E_CTX->cursor_row = row;
+	E_CTX->cursor_column = line->cell_count;
+	E_CTX->selection_active = true;
 }
 
 /* Forward declarations for search functions used by select next occurrence */
@@ -3260,18 +3260,18 @@ static uint32_t search_query_cell_count(const char *query, uint32_t query_len);
  */
 static bool editor_select_word_at_cursor(void)
 {
-	if (editor.cursor_row >= editor.buffer.line_count) {
+	if (E_CTX->cursor_row >= E_BUF->line_count) {
 		return false;
 	}
 
-	struct line *line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 
 	if (line->cell_count == 0) {
 		return false;
 	}
 
-	uint32_t column = editor.cursor_column;
+	uint32_t column = E_CTX->cursor_column;
 
 	/* Clamp to line length */
 	if (column >= line->cell_count) {
@@ -3295,7 +3295,7 @@ static bool editor_select_word_at_cursor(void)
 		}
 	}
 
-	return editor_select_word(editor.cursor_row, column);
+	return editor_select_word(E_CTX->cursor_row, column);
 }
 
 /*
@@ -3317,7 +3317,7 @@ static bool find_next_occurrence(const char *text, size_t text_length,
 	bool wrapped = false;
 
 	while (true) {
-		if (row >= editor.buffer.line_count) {
+		if (row >= E_BUF->line_count) {
 			if (!wrap || wrapped) {
 				return false;
 			}
@@ -3327,12 +3327,12 @@ static bool find_next_occurrence(const char *text, size_t text_length,
 			wrapped = true;
 		}
 
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		/* Search this line from column onwards */
 		while (column < line->cell_count) {
-			if (search_matches_at(line, &editor.buffer, column, text, text_length)) {
+			if (search_matches_at(line, E_BUF, column, text, text_length)) {
 				*out_row = row;
 				*out_column = column;
 				return true;
@@ -3357,7 +3357,7 @@ static bool find_next_occurrence(const char *text, size_t text_length,
  */
 static void editor_select_next_occurrence(void)
 {
-	if (!editor.selection_active || selection_is_empty()) {
+	if (!E_CTX->selection_active || selection_is_empty()) {
 		/*
 		 * No selection - select word under cursor.
 		 */
@@ -3412,9 +3412,9 @@ static void editor_select_next_occurrence(void)
 
 	/* Determine search start position */
 	uint32_t search_row, search_column;
-	if (editor.cursor_count > 0) {
+	if (E_CTX->cursor_count > 0) {
 		/* Multi-cursor mode: search after the last cursor */
-		struct cursor *last = &editor.cursors[editor.cursor_count - 1];
+		struct cursor *last = &E_CTX->cursors[E_CTX->cursor_count - 1];
 		search_row = last->row;
 		search_column = last->column;
 	} else {
@@ -3434,10 +3434,10 @@ static void editor_select_next_occurrence(void)
 
 		/* Check if we already have a cursor here */
 		bool already_exists = false;
-		if (editor.cursor_count > 0) {
-			for (uint32_t i = 0; i < editor.cursor_count; i++) {
-				if (editor.cursors[i].anchor_row == found_row &&
-				    editor.cursors[i].anchor_column == found_column) {
+		if (E_CTX->cursor_count > 0) {
+			for (uint32_t i = 0; i < E_CTX->cursor_count; i++) {
+				if (E_CTX->cursors[i].anchor_row == found_row &&
+				    E_CTX->cursors[i].anchor_column == found_column) {
 					already_exists = true;
 					break;
 				}
@@ -3445,7 +3445,7 @@ static void editor_select_next_occurrence(void)
 		}
 
 		if (is_original || already_exists) {
-			uint32_t count = editor.cursor_count > 0 ? editor.cursor_count : 1;
+			uint32_t count = E_CTX->cursor_count > 0 ? E_CTX->cursor_count : 1;
 			editor_set_status_message("%u cursor%s (all occurrences)",
 			                          count, count > 1 ? "s" : "");
 		} else {
@@ -3453,9 +3453,9 @@ static void editor_select_next_occurrence(void)
 			uint32_t new_cursor_column = found_column + selection_cells;
 
 			/* Clamp to line length */
-			if (found_row < editor.buffer.line_count) {
-				struct line *line = &editor.buffer.lines[found_row];
-				line_warm(line, &editor.buffer);
+			if (found_row < E_BUF->line_count) {
+				struct line *line = &E_BUF->lines[found_row];
+				line_warm(line, E_BUF);
 				if (new_cursor_column > line->cell_count) {
 					new_cursor_column = line->cell_count;
 				}
@@ -3467,13 +3467,13 @@ static void editor_select_next_occurrence(void)
 				multicursor_normalize();
 
 				editor_set_status_message("%u cursors",
-				                          editor.cursor_count);
+				                          E_CTX->cursor_count);
 
 				/* Scroll to show new cursor if needed */
-				if (found_row < editor.row_offset) {
-					editor.row_offset = found_row;
-				} else if (found_row >= editor.row_offset + editor.screen_rows) {
-					editor.row_offset = found_row - editor.screen_rows + 1;
+				if (found_row < E_CTX->row_offset) {
+					E_CTX->row_offset = found_row;
+				} else if (found_row >= E_CTX->row_offset + editor.screen_rows) {
+					E_CTX->row_offset = found_row - editor.screen_rows + 1;
 				}
 			}
 		}
@@ -3559,11 +3559,11 @@ static uint32_t calculate_adaptive_scroll(int direction)
  */
 static void editor_toggle_task_checkbox(uint32_t row, uint32_t checkbox_col)
 {
-	if (row >= editor.buffer.line_count)
+	if (row >= E_BUF->line_count)
 		return;
 
-	struct line *line = &editor.buffer.lines[row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[row];
+	line_warm(line, E_BUF);
 
 	/* checkbox_col points to '[', inner char is at checkbox_col + 1 */
 	uint32_t inner_col = checkbox_col + 1;
@@ -3584,10 +3584,10 @@ static void editor_toggle_task_checkbox(uint32_t row, uint32_t checkbox_col)
 	/* Update line state */
 	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	neighbor_compute_line(line);
-	syntax_highlight_line(line, &editor.buffer, row);
+	syntax_highlight_line(line, E_BUF, row);
 	line_invalidate_wrap_cache(line);
 
-	editor.buffer.is_modified = true;
+	E_BUF->is_modified = true;
 }
 
 /*
@@ -3605,10 +3605,10 @@ void editor_handle_mouse(struct mouse_input *mouse)
 
 			/* Account for gutter in screen column */
 			uint32_t screen_col = mouse->column;
-			if (screen_col < editor.gutter_width) {
+			if (screen_col < E_CTX->gutter_width) {
 				screen_col = 0;
 			} else {
-				screen_col -= editor.gutter_width;
+				screen_col -= E_CTX->gutter_width;
 			}
 
 			/* Map screen row to logical line and segment */
@@ -3618,18 +3618,18 @@ void editor_handle_mouse(struct mouse_input *mouse)
 				 * In wrap mode, visual position is just screen_col.
 				 * In no-wrap mode, add column_offset.
 				 */
-				struct line *line = &editor.buffer.lines[file_row];
+				struct line *line = &E_BUF->lines[file_row];
 				if (editor.wrap_mode != WRAP_NONE) {
 					cell_col = line_find_column_at_visual(
-						line, &editor.buffer, segment, screen_col);
+						line, E_BUF, segment, screen_col);
 				} else {
 					cell_col = screen_column_to_cell(
-						file_row, screen_col + editor.column_offset);
+						file_row, screen_col + E_CTX->column_offset);
 				}
 			} else {
 				/* Click below content: go to last line */
-				if (editor.buffer.line_count > 0) {
-					file_row = editor.buffer.line_count - 1;
+				if (E_BUF->line_count > 0) {
+					file_row = E_BUF->line_count - 1;
 				} else {
 					file_row = 0;
 				}
@@ -3652,14 +3652,14 @@ void editor_handle_mouse(struct mouse_input *mouse)
 
 			if (click_count == 2) {
 				/* Check if clicking on a task checkbox */
-				struct line *line = &editor.buffer.lines[file_row];
+				struct line *line = &E_BUF->lines[file_row];
 				uint32_t checkbox_col;
-				if (syntax_is_markdown_file(editor.buffer.filename) &&
+				if (syntax_is_markdown_file(E_BUF->filename) &&
 				    md_is_task_checkbox(line, cell_col, &checkbox_col)) {
 					editor_toggle_task_checkbox(file_row, checkbox_col);
 				} else {
 					/* Double-click: select word using neighbor layer */
-					editor.cursor_row = file_row;
+					E_CTX->cursor_row = file_row;
 					editor_select_word(file_row, cell_col);
 				}
 			} else if (click_count >= 3) {
@@ -3668,8 +3668,8 @@ void editor_handle_mouse(struct mouse_input *mouse)
 				click_count = 0;  /* Reset */
 			} else {
 				/* Single click: position cursor and start selection */
-				editor.cursor_row = file_row;
-				editor.cursor_column = cell_col;
+				E_CTX->cursor_row = file_row;
+				E_CTX->cursor_column = cell_col;
 				selection_start();
 			}
 			break;
@@ -3682,37 +3682,37 @@ void editor_handle_mouse(struct mouse_input *mouse)
 			uint32_t cell_col;
 
 			uint32_t screen_col = mouse->column;
-			if (screen_col < editor.gutter_width) {
+			if (screen_col < E_CTX->gutter_width) {
 				screen_col = 0;
 			} else {
-				screen_col -= editor.gutter_width;
+				screen_col -= E_CTX->gutter_width;
 			}
 
 			/* Map screen row to logical line and segment */
 			if (screen_row_to_line_segment(mouse->row, &file_row, &segment)) {
-				struct line *line = &editor.buffer.lines[file_row];
+				struct line *line = &E_BUF->lines[file_row];
 				if (editor.wrap_mode != WRAP_NONE) {
 					cell_col = line_find_column_at_visual(
-						line, &editor.buffer, segment, screen_col);
+						line, E_BUF, segment, screen_col);
 				} else {
 					cell_col = screen_column_to_cell(
-						file_row, screen_col + editor.column_offset);
+						file_row, screen_col + E_CTX->column_offset);
 				}
 			} else {
 				/* Drag below content: clamp to last line */
-				if (editor.buffer.line_count > 0) {
-					file_row = editor.buffer.line_count - 1;
+				if (E_BUF->line_count > 0) {
+					file_row = E_BUF->line_count - 1;
 				} else {
 					file_row = 0;
 				}
 				cell_col = 0;
 			}
 
-			editor.cursor_row = file_row;
-			editor.cursor_column = cell_col;
+			E_CTX->cursor_row = file_row;
+			E_CTX->cursor_column = cell_col;
 
 			/* Ensure selection is active during drag */
-			if (!editor.selection_active) {
+			if (!E_CTX->selection_active) {
 				selection_start();
 			}
 			break;
@@ -3734,18 +3734,18 @@ void editor_handle_mouse(struct mouse_input *mouse)
 
 			uint32_t scroll_amount = calculate_adaptive_scroll(-1);
 
-			if (editor.row_offset >= scroll_amount) {
-				editor.row_offset -= scroll_amount;
+			if (E_CTX->row_offset >= scroll_amount) {
+				E_CTX->row_offset -= scroll_amount;
 			} else {
-				editor.row_offset = 0;
+				E_CTX->row_offset = 0;
 			}
 
 			/* Keep cursor on screen (only if no selection) */
-			if (!editor.selection_active) {
-				if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
-					editor.cursor_row = editor.row_offset + editor.screen_rows - 1;
-					if (editor.cursor_row >= editor.buffer.line_count && editor.buffer.line_count > 0) {
-						editor.cursor_row = editor.buffer.line_count - 1;
+			if (!E_CTX->selection_active) {
+				if (E_CTX->cursor_row >= E_CTX->row_offset + editor.screen_rows) {
+					E_CTX->cursor_row = E_CTX->row_offset + editor.screen_rows - 1;
+					if (E_CTX->cursor_row >= E_BUF->line_count && E_BUF->line_count > 0) {
+						E_CTX->cursor_row = E_BUF->line_count - 1;
 					}
 				}
 			}
@@ -3767,16 +3767,16 @@ void editor_handle_mouse(struct mouse_input *mouse)
 			/* Calculate maximum valid offset (wrap-aware) */
 			uint32_t max_offset = calculate_max_row_offset();
 
-			if (editor.row_offset + scroll_amount <= max_offset) {
-				editor.row_offset += scroll_amount;
+			if (E_CTX->row_offset + scroll_amount <= max_offset) {
+				E_CTX->row_offset += scroll_amount;
 			} else {
-				editor.row_offset = max_offset;
+				E_CTX->row_offset = max_offset;
 			}
 
 			/* Keep cursor on screen (only if no selection) */
-			if (!editor.selection_active) {
-				if (editor.cursor_row < editor.row_offset) {
-					editor.cursor_row = editor.row_offset;
+			if (!E_CTX->selection_active) {
+				if (E_CTX->cursor_row < E_CTX->row_offset) {
+					E_CTX->cursor_row = E_CTX->row_offset;
 				}
 			}
 			break;
@@ -3804,10 +3804,10 @@ static void search_enter(void)
 	search.replace_text[0] = '\0';
 	search.replace_length = 0;
 	search.editing_replace = false;
-	search.saved_cursor_row = editor.cursor_row;
-	search.saved_cursor_column = editor.cursor_column;
-	search.saved_row_offset = editor.row_offset;
-	search.saved_column_offset = editor.column_offset;
+	search.saved_cursor_row = E_CTX->cursor_row;
+	search.saved_cursor_column = E_CTX->cursor_column;
+	search.saved_row_offset = E_CTX->row_offset;
+	search.saved_column_offset = E_CTX->column_offset;
 	search.has_match = false;
 	search.direction = 1;
 }
@@ -3825,10 +3825,10 @@ static void replace_enter(void)
 	search.replace_text[0] = '\0';
 	search.replace_length = 0;
 	search.editing_replace = false;
-	search.saved_cursor_row = editor.cursor_row;
-	search.saved_cursor_column = editor.cursor_column;
-	search.saved_row_offset = editor.row_offset;
-	search.saved_column_offset = editor.column_offset;
+	search.saved_cursor_row = E_CTX->cursor_row;
+	search.saved_cursor_column = E_CTX->cursor_column;
+	search.saved_row_offset = E_CTX->row_offset;
+	search.saved_column_offset = E_CTX->column_offset;
 	search.has_match = false;
 	search.direction = 1;
 }
@@ -3839,10 +3839,10 @@ static void replace_enter(void)
 static void search_exit(bool restore_position)
 {
 	if (restore_position) {
-		editor.cursor_row = search.saved_cursor_row;
-		editor.cursor_column = search.saved_cursor_column;
-		editor.row_offset = search.saved_row_offset;
-		editor.column_offset = search.saved_column_offset;
+		E_CTX->cursor_row = search.saved_cursor_row;
+		E_CTX->cursor_column = search.saved_cursor_column;
+		E_CTX->row_offset = search.saved_row_offset;
+		E_CTX->column_offset = search.saved_column_offset;
 	}
 
 	/* Free compiled regex */
@@ -4165,15 +4165,15 @@ void search_center_on_match(void)
 	uint32_t half_screen = editor.screen_rows / 2;
 
 	if (target_row >= half_screen) {
-		editor.row_offset = target_row - half_screen;
+		E_CTX->row_offset = target_row - half_screen;
 	} else {
-		editor.row_offset = 0;
+		E_CTX->row_offset = 0;
 	}
 
 	/* Clamp to valid range (wrap-aware) */
 	uint32_t max_offset = calculate_max_row_offset();
-	if (editor.row_offset > max_offset) {
-		editor.row_offset = max_offset;
+	if (E_CTX->row_offset > max_offset) {
+		E_CTX->row_offset = max_offset;
 	}
 }
 
@@ -4188,20 +4188,20 @@ bool search_find_next(bool wrap)
 		return false;
 	}
 
-	uint32_t start_row = editor.cursor_row;
-	uint32_t start_col = editor.cursor_column + 1;
+	uint32_t start_row = E_CTX->cursor_row;
+	uint32_t start_col = E_CTX->cursor_column + 1;
 
 	/* Search from current position to end of file */
-	for (uint32_t row = start_row; row < editor.buffer.line_count; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+	for (uint32_t row = start_row; row < E_BUF->line_count; row++) {
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		uint32_t col_start = (row == start_row) ? start_col : 0;
 
 		for (uint32_t col = col_start; col < line->cell_count; col++) {
-			if (search_matches_at(line, &editor.buffer, col, search.query, search.query_length)) {
-				editor.cursor_row = row;
-				editor.cursor_column = col;
+			if (search_matches_at(line, E_BUF, col, search.query, search.query_length)) {
+				E_CTX->cursor_row = row;
+				E_CTX->cursor_column = col;
 				search.match_row = row;
 				search.match_column = col;
 				search.has_match = true;
@@ -4214,15 +4214,15 @@ bool search_find_next(bool wrap)
 	/* Wrap around to beginning */
 	if (wrap) {
 		for (uint32_t row = 0; row <= start_row; row++) {
-			struct line *line = &editor.buffer.lines[row];
-			line_warm(line, &editor.buffer);
+			struct line *line = &E_BUF->lines[row];
+			line_warm(line, E_BUF);
 
 			uint32_t col_end = (row == start_row) ? start_col : line->cell_count;
 
 			for (uint32_t col = 0; col < col_end; col++) {
-				if (search_matches_at(line, &editor.buffer, col, search.query, search.query_length)) {
-					editor.cursor_row = row;
-					editor.cursor_column = col;
+				if (search_matches_at(line, E_BUF, col, search.query, search.query_length)) {
+					E_CTX->cursor_row = row;
+					E_CTX->cursor_column = col;
 					search.match_row = row;
 					search.match_column = col;
 					search.has_match = true;
@@ -4247,21 +4247,21 @@ bool search_find_previous(bool wrap)
 		return false;
 	}
 
-	int32_t start_row = (int32_t)editor.cursor_row;
-	int32_t start_col = (int32_t)editor.cursor_column - 1;
+	int32_t start_row = (int32_t)E_CTX->cursor_row;
+	int32_t start_col = (int32_t)E_CTX->cursor_column - 1;
 
 	/* Search from current position to beginning of file */
 	for (int32_t row = start_row; row >= 0; row--) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		int32_t col_start = (row == start_row) ? start_col : (int32_t)line->cell_count - 1;
 		if (col_start < 0) continue;
 
 		for (int32_t col = col_start; col >= 0; col--) {
-			if (search_matches_at(line, &editor.buffer, (uint32_t)col, search.query, search.query_length)) {
-				editor.cursor_row = (uint32_t)row;
-				editor.cursor_column = (uint32_t)col;
+			if (search_matches_at(line, E_BUF, (uint32_t)col, search.query, search.query_length)) {
+				E_CTX->cursor_row = (uint32_t)row;
+				E_CTX->cursor_column = (uint32_t)col;
 				search.match_row = (uint32_t)row;
 				search.match_column = (uint32_t)col;
 				search.has_match = true;
@@ -4272,18 +4272,18 @@ bool search_find_previous(bool wrap)
 	}
 
 	/* Wrap around to end */
-	if (wrap && editor.buffer.line_count > 0) {
-		for (int32_t row = (int32_t)editor.buffer.line_count - 1; row >= start_row; row--) {
-			struct line *line = &editor.buffer.lines[row];
-			line_warm(line, &editor.buffer);
+	if (wrap && E_BUF->line_count > 0) {
+		for (int32_t row = (int32_t)E_BUF->line_count - 1; row >= start_row; row--) {
+			struct line *line = &E_BUF->lines[row];
+			line_warm(line, E_BUF);
 
 			int32_t col_start = (row == start_row) ? start_col : (int32_t)line->cell_count - 1;
 			if (col_start < 0) continue;
 
 			for (int32_t col = col_start; col >= 0; col--) {
-				if (search_matches_at(line, &editor.buffer, (uint32_t)col, search.query, search.query_length)) {
-					editor.cursor_row = (uint32_t)row;
-					editor.cursor_column = (uint32_t)col;
+				if (search_matches_at(line, E_BUF, (uint32_t)col, search.query, search.query_length)) {
+					E_CTX->cursor_row = (uint32_t)row;
+					E_CTX->cursor_column = (uint32_t)col;
 					search.match_row = (uint32_t)row;
 					search.match_column = (uint32_t)col;
 					search.has_match = true;
@@ -4310,8 +4310,8 @@ static void search_update(void)
 
 	if (search.query_length == 0) {
 		/* No query - restore to saved position and cancel async search */
-		editor.cursor_row = search.saved_cursor_row;
-		editor.cursor_column = search.saved_cursor_column;
+		E_CTX->cursor_row = search.saved_cursor_row;
+		E_CTX->cursor_column = search.saved_cursor_column;
 		search.has_match = false;
 		search_async_cancel();
 		search_async_clear_results();
@@ -4329,16 +4329,16 @@ static void search_update(void)
 	/* Synchronous search for small files */
 
 	/* Start search from saved position */
-	editor.cursor_row = search.saved_cursor_row;
-	editor.cursor_column = search.saved_cursor_column;
+	E_CTX->cursor_row = search.saved_cursor_row;
+	E_CTX->cursor_column = search.saved_cursor_column;
 
 	/* First check if there's a match at current position */
-	if (editor.cursor_row < editor.buffer.line_count) {
-		struct line *line = &editor.buffer.lines[editor.cursor_row];
-		if (search_matches_at(line, &editor.buffer, editor.cursor_column,
+	if (E_CTX->cursor_row < E_BUF->line_count) {
+		struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+		if (search_matches_at(line, E_BUF, E_CTX->cursor_column,
 		                      search.query, search.query_length)) {
-			search.match_row = editor.cursor_row;
-			search.match_column = editor.cursor_column;
+			search.match_row = E_CTX->cursor_row;
+			search.match_column = E_CTX->cursor_column;
 			search.has_match = true;
 			search_center_on_match();
 			return;
@@ -4470,15 +4470,15 @@ static bool search_replace_current(void)
 		return false;
 	}
 
-	if (editor.cursor_row >= editor.buffer.line_count) {
+	if (E_CTX->cursor_row >= E_BUF->line_count) {
 		return false;
 	}
 
-	struct line *line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 
 	/* Get match length - use search_match_length_at for regex support */
-	uint32_t match_cells = search_match_length_at(line, editor.cursor_column);
+	uint32_t match_cells = search_match_length_at(line, E_CTX->cursor_column);
 	if (match_cells == 0) {
 		return false;
 	}
@@ -4490,7 +4490,7 @@ static bool search_replace_current(void)
 		/* Build line string for backreference extraction */
 		size_t string_length;
 		uint32_t *byte_to_cell;
-		char *line_string = line_to_string(line, editor.cursor_column,
+		char *line_string = line_to_string(line, E_CTX->cursor_column,
 		                                   &byte_to_cell, &string_length);
 
 		if (line_string) {
@@ -4515,14 +4515,14 @@ static bool search_replace_current(void)
 		return false;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Delete the match characters (from end to start for correct undo) */
 	for (uint32_t i = 0; i < match_cells; i++) {
-		uint32_t delete_position = editor.cursor_column + match_cells - 1 - i;
+		uint32_t delete_position = E_CTX->cursor_column + match_cells - 1 - i;
 		if (delete_position < line->cell_count) {
 			uint32_t codepoint = line->cells[delete_position].codepoint;
-			undo_record_delete_char(&editor.buffer, editor.cursor_row,
+			undo_record_delete_char(E_BUF, E_CTX->cursor_row,
 			                        delete_position, codepoint);
 
 			/* Shift cells left */
@@ -4537,7 +4537,7 @@ static bool search_replace_current(void)
 
 	/* Insert replacement text */
 	const char *r = final_replacement;
-	uint32_t insert_position = editor.cursor_column;
+	uint32_t insert_position = E_CTX->cursor_column;
 
 	while (*r) {
 		uint32_t codepoint;
@@ -4547,7 +4547,7 @@ static bool search_replace_current(void)
 		}
 		r += bytes;
 
-		undo_record_insert_char(&editor.buffer, editor.cursor_row,
+		undo_record_insert_char(E_BUF, E_CTX->cursor_row,
 		                        insert_position, codepoint);
 
 		/* Make room and insert */
@@ -4555,7 +4555,7 @@ static bool search_replace_current(void)
 		if (ret) {
 			editor_set_status_message("Replace failed: %s", edit_strerror(ret));
 			free(final_replacement);
-			undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+			undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 			return false;
 		}
 
@@ -4578,11 +4578,11 @@ static bool search_replace_current(void)
 	/* Recompute line metadata */
 	line_set_temperature(line, LINE_TEMPERATURE_HOT);
 	neighbor_compute_line(line);
-	syntax_highlight_line(line, &editor.buffer, editor.cursor_row);
+	syntax_highlight_line(line, E_BUF, E_CTX->cursor_row);
 	line_invalidate_wrap_cache(line);
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	return true;
 }
@@ -4596,7 +4596,7 @@ static void search_replace_and_next(void)
 		/* Move cursor past the replacement */
 		uint32_t replace_cells = replace_count_cells(search.replace_text,
 		                                              search.replace_length);
-		editor.cursor_column += replace_cells;
+		E_CTX->cursor_column += replace_cells;
 
 		/* Find next match */
 		if (!search_find_next(true)) {
@@ -4616,17 +4616,17 @@ static void search_replace_all(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	uint32_t count = 0;
 
 	/* Save current position */
-	uint32_t saved_row = editor.cursor_row;
-	uint32_t saved_column = editor.cursor_column;
+	uint32_t saved_row = E_CTX->cursor_row;
+	uint32_t saved_column = E_CTX->cursor_column;
 
 	/* Start from beginning of file */
-	editor.cursor_row = 0;
-	editor.cursor_column = 0;
+	E_CTX->cursor_row = 0;
+	E_CTX->cursor_column = 0;
 
 	/* Find and replace all matches without wrapping */
 	while (search_find_next(false)) {
@@ -4636,27 +4636,27 @@ static void search_replace_all(void)
 			/* Move past replacement to avoid infinite loop */
 			uint32_t replace_cells = replace_count_cells(search.replace_text,
 			                                              search.replace_length);
-			editor.cursor_column += replace_cells;
+			E_CTX->cursor_column += replace_cells;
 		} else {
 			/* No replacement made, move forward to avoid infinite loop */
-			editor.cursor_column++;
-			if (editor.cursor_row < editor.buffer.line_count) {
-				struct line *line = &editor.buffer.lines[editor.cursor_row];
-				line_warm(line, &editor.buffer);
-				if (editor.cursor_column >= line->cell_count) {
-					editor.cursor_row++;
-					editor.cursor_column = 0;
+			E_CTX->cursor_column++;
+			if (E_CTX->cursor_row < E_BUF->line_count) {
+				struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+				line_warm(line, E_BUF);
+				if (E_CTX->cursor_column >= line->cell_count) {
+					E_CTX->cursor_row++;
+					E_CTX->cursor_column = 0;
 				}
 			}
 		}
 	}
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Restore cursor to beginning if no replacements, or keep at last position */
 	if (count == 0) {
-		editor.cursor_row = saved_row;
-		editor.cursor_column = saved_column;
+		E_CTX->cursor_row = saved_row;
+		E_CTX->cursor_column = saved_column;
 	}
 
 	search.has_match = false;
@@ -4673,12 +4673,12 @@ static int search_match_type(uint32_t row, uint32_t column)
 		return 0;
 	}
 
-	if (row >= editor.buffer.line_count) {
+	if (row >= E_BUF->line_count) {
 		return 0;
 	}
 
-	struct line *line = &editor.buffer.lines[row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[row];
+	line_warm(line, E_BUF);
 
 	/*
 	 * For regex, matches can have variable length, so we need to check
@@ -4811,7 +4811,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	 */
 	uint32_t reveal_start = UINT32_MAX;
 	uint32_t reveal_end = 0;
-	if (editor.hybrid_mode && is_cursor_line &&
+	if (E_CTX->hybrid_mode && is_cursor_line &&
 	    syntax_is_markdown_file(buffer->filename)) {
 		/* Ensure element cache is populated for HOT lines that were
 		 * highlighted before hybrid mode was enabled */
@@ -4819,7 +4819,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 			md_compute_elements(line);
 			md_mark_hideable_cells(line);
 		}
-		md_should_reveal_element(line, editor.cursor_column, &reveal_start, &reveal_end);
+		md_should_reveal_element(line, E_CTX->cursor_column, &reveal_start, &reveal_end);
 	}
 	/*
 	 * Hybrid mode: Check if cursor is inside a code block.
@@ -4828,9 +4828,9 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	 * no special background.
 	 */
 	bool cursor_in_code_block = false;
-	if (editor.hybrid_mode && syntax_is_markdown_file(buffer->filename) &&
-	    editor.cursor_row < buffer->line_count) {
-		struct line *cursor_line = &buffer->lines[editor.cursor_row];
+	if (E_CTX->hybrid_mode && syntax_is_markdown_file(buffer->filename) &&
+	    E_CTX->cursor_row < buffer->line_count) {
+		struct line *cursor_line = &buffer->lines[E_CTX->cursor_row];
 		uint32_t cursor_cell_count = line_get_cell_count(cursor_line, buffer);
 		if (cursor_cell_count > 0) {
 			uint16_t cursor_syntax = cursor_line->cells[0].syntax;
@@ -4845,7 +4845,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	 * Hybrid mode: render [language] label for code fence opening lines.
 	 * This replaces the raw ```language with a clean [language] indicator.
 	 */
-	if (editor.hybrid_mode && line->cell_count > 0 &&
+	if (E_CTX->hybrid_mode && line->cell_count > 0 &&
 	    line->cells[0].syntax == SYNTAX_MD_CODE_FENCE_OPEN &&
 	    syntax_is_markdown_file(buffer->filename) &&
 	    reveal_start == UINT32_MAX &&  /* Not revealing this element */
@@ -4892,7 +4892,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	/*
 	 * Hybrid mode: hide closing fence lines entirely.
 	 */
-	if (editor.hybrid_mode && line->cell_count > 0 &&
+	if (E_CTX->hybrid_mode && line->cell_count > 0 &&
 	    line->cells[0].syntax == SYNTAX_MD_CODE_FENCE_CLOSE &&
 	    syntax_is_markdown_file(buffer->filename) &&
 	    reveal_start == UINT32_MAX &&  /* Not revealing */
@@ -4911,7 +4911,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		 * Hybrid mode: skip hideable cells unless cursor is revealing them
 		 * or cursor is inside a code block (show entire block raw).
 		 */
-		if (editor.hybrid_mode && (flags & CELL_FLAG_HIDEABLE) &&
+		if (E_CTX->hybrid_mode && (flags & CELL_FLAG_HIDEABLE) &&
 		    syntax_is_markdown_file(buffer->filename) &&
 		    !cursor_in_code_block) {
 			/* Check if this cell is in the reveal range */
@@ -4929,7 +4929,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 		 */
 		int highlight = 0;
 		int cursor_idx = multicursor_cursor_at(file_row, cell_index);
-		if (cursor_idx >= 0 && (uint32_t)cursor_idx != editor.primary_cursor) {
+		if (cursor_idx >= 0 && (uint32_t)cursor_idx != E_CTX->primary_cursor) {
 			highlight = 5;  /* Secondary cursor - inverted colors */
 		} else {
 			int match_type = search_match_type(file_row, cell_index);
@@ -4977,7 +4977,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 				default: /* Token background, cursor line, or normal */
 					if (is_cursor_line) {
 						bg = active_theme.cursor_line;
-					} else if (!editor.hybrid_mode &&
+					} else if (!E_CTX->hybrid_mode &&
 					           (syntax == SYNTAX_MD_CODE_BLOCK ||
 					            syntax == SYNTAX_MD_CODE_FENCE_OPEN ||
 					            syntax == SYNTAX_MD_CODE_FENCE_CLOSE)) {
@@ -5005,7 +5005,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 
 			/* Add text attributes (strikethrough only in hybrid mode) */
 			text_attr attr = style->attr;
-			if (editor.hybrid_mode && syntax == SYNTAX_MD_STRIKETHROUGH) {
+			if (E_CTX->hybrid_mode && syntax == SYNTAX_MD_STRIKETHROUGH) {
 				attr |= ATTR_STRIKE;
 			}
 			length += attr_to_escape(attr, escape + length, sizeof(escape) - length);
@@ -5093,7 +5093,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 					uint32_t output_codepoint = line->cells[gi].codepoint;
 
 					/* Hybrid mode substitutions */
-					if (editor.hybrid_mode) {
+					if (E_CTX->hybrid_mode) {
 						enum syntax_token gi_syntax = line->cells[gi].syntax;
 						bool in_reveal = (gi >= reveal_start && gi < reveal_end);
 
@@ -5163,7 +5163,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	 */
 	if (rendered_width < max_width) {
 		int cursor_idx = multicursor_cursor_at(file_row, line->cell_count);
-		if (cursor_idx >= 0 && (uint32_t)cursor_idx != editor.primary_cursor) {
+		if (cursor_idx >= 0 && (uint32_t)cursor_idx != E_CTX->primary_cursor) {
 			/* Render secondary cursor at end of line with inverted space */
 			struct style *style = &active_theme.syntax[SYNTAX_NORMAL];
 			struct syntax_color fg_color = is_cursor_line
@@ -5182,7 +5182,7 @@ static void render_line_content(struct output_buffer *output, struct line *line,
 	 * Hybrid mode: extend code block background to terminal width.
 	 * This creates a visual "box" effect for code blocks.
 	 */
-	if (editor.hybrid_mode && syntax_is_markdown_file(buffer->filename) &&
+	if (E_CTX->hybrid_mode && syntax_is_markdown_file(buffer->filename) &&
 	    line->cell_count > 0 && !cursor_in_code_block) {
 		uint16_t first_syntax = line->cells[0].syntax;
 		if (first_syntax == SYNTAX_MD_CODE_BLOCK ||
@@ -5291,14 +5291,14 @@ static void render_draw_rows(struct output_buffer *output)
 	static const int welcome_art_width = 28;  /* Display width of ASCII art */
 	uint32_t welcome_start = (editor.screen_rows > (uint32_t)welcome_art_lines)
 	                         ? (editor.screen_rows - welcome_art_lines) / 2 : 0;
-	int text_area_width = editor.screen_columns - editor.gutter_width;
+	int text_area_width = editor.screen_columns - E_CTX->gutter_width;
 
 	/*
 	 * Track current position in the buffer.
 	 * file_row = logical line index
 	 * segment = which segment of that line (0 = first/only)
 	 */
-	uint32_t file_row = editor.row_offset;
+	uint32_t file_row = E_CTX->row_offset;
 	uint16_t segment = 0;
 
 	/*
@@ -5306,21 +5306,21 @@ static void render_draw_rows(struct output_buffer *output)
 	 * the current screen row as "cursor line".
 	 */
 	uint16_t cursor_segment = 0;
-	if (editor.cursor_row < editor.buffer.line_count) {
-		struct line *cursor_line = &editor.buffer.lines[editor.cursor_row];
+	if (E_CTX->cursor_row < E_BUF->line_count) {
+		struct line *cursor_line = &E_BUF->lines[E_CTX->cursor_row];
 		cursor_segment = line_get_segment_for_column(cursor_line,
-		                                             &editor.buffer,
-		                                             editor.cursor_column);
+		                                             E_BUF,
+		                                             E_CTX->cursor_column);
 	}
 
 	for (uint32_t screen_row = 0; screen_row < editor.screen_rows; screen_row++) {
 		output_buffer_append_string(output, ESCAPE_CLEAR_LINE);
 
-		bool is_empty_buffer = (editor.buffer.line_count == 1 &&
-		                        editor.buffer.lines[0].cell_count == 0);
+		bool is_empty_buffer = (E_BUF->line_count == 1 &&
+		                        E_BUF->lines[0].cell_count == 0);
 		bool is_empty_buffer_first_line = (is_empty_buffer && file_row == 0);
 
-		if (file_row >= editor.buffer.line_count && !is_empty_buffer_first_line) {
+		if (file_row >= E_BUF->line_count && !is_empty_buffer_first_line) {
 			/* Empty line past end of file */
 			int welcome_line = (int)screen_row - (int)welcome_start;
 			if (is_empty_buffer && welcome_line >= 0 && welcome_line < welcome_art_lines) {
@@ -5335,7 +5335,7 @@ static void render_draw_rows(struct output_buffer *output)
 				int padding = (text_area_width - line_width) / 2;
 				if (padding < 0) padding = 0;
 
-				for (uint32_t i = 0; i < editor.gutter_width; i++) {
+				for (uint32_t i = 0; i < E_CTX->gutter_width; i++) {
 					output_buffer_append_string(output, " ");
 				}
 				for (int i = 0; i < padding; i++) {
@@ -5346,7 +5346,7 @@ static void render_draw_rows(struct output_buffer *output)
 				/* Draw color column marker on empty lines */
 				uint32_t col_pos = editor.color_column - 1;
 				if (col_pos < (uint32_t)text_area_width) {
-					for (uint32_t i = 0; i < editor.gutter_width + col_pos; i++) {
+					for (uint32_t i = 0; i < E_CTX->gutter_width + col_pos; i++) {
 						output_buffer_append_string(output, " ");
 					}
 					const char *col_char = color_column_char(editor.color_column_style);
@@ -5373,23 +5373,23 @@ static void render_draw_rows(struct output_buffer *output)
 					output_buffer_append_string(output, col_escape);
 				}
 			}
-		} else if (file_row < editor.buffer.line_count) {
-			struct line *line = &editor.buffer.lines[file_row];
+		} else if (file_row < E_BUF->line_count) {
+			struct line *line = &E_BUF->lines[file_row];
 
 			/* Ensure line is warmed before rendering */
-			ensure_line_warm_for_render(line, &editor.buffer, file_row);
+			ensure_line_warm_for_render(line, E_BUF, file_row);
 
-			line_ensure_wrap_cache(line, &editor.buffer);
+			line_ensure_wrap_cache(line, E_BUF);
 
 			/*
 			 * Determine if this screen row should have cursor line highlight.
 			 * Only highlight the segment containing the cursor.
 			 */
 			bool is_cursor_line_segment =
-				(file_row == editor.cursor_row && segment == cursor_segment);
+				(file_row == E_CTX->cursor_row && segment == cursor_segment);
 
 			/* Draw gutter: line number for segment 0, indicator for continuations */
-			if (editor.show_line_numbers && editor.gutter_width > 0) {
+			if (editor.show_line_numbers && E_CTX->gutter_width > 0) {
 				if (segment == 0) {
 					/* First segment: show line number */
 					struct style *ln_style = is_cursor_line_segment
@@ -5404,9 +5404,9 @@ static void render_draw_rows(struct output_buffer *output)
 
 					char line_number_buffer[16];
 					snprintf(line_number_buffer, sizeof(line_number_buffer),
-					         "%-*u ", editor.gutter_width - 1, file_row + 1);
+					         "%-*u ", E_CTX->gutter_width - 1, file_row + 1);
 					output_buffer_append(output, line_number_buffer,
-					                     editor.gutter_width);
+					                     E_CTX->gutter_width);
 				} else {
 					/* Continuation: show wrap indicator */
 					struct syntax_color wrap_bg = is_cursor_line_segment
@@ -5420,7 +5420,7 @@ static void render_draw_rows(struct output_buffer *output)
 
 					const char *indicator = wrap_indicator_string(editor.wrap_indicator);
 					/* Pad to align indicator same as line numbers (with trailing space) */
-					for (uint32_t i = 0; i < editor.gutter_width - 2; i++) {
+					for (uint32_t i = 0; i < E_CTX->gutter_width - 2; i++) {
 						output_buffer_append_string(output, " ");
 					}
 					output_buffer_append_string(output, indicator);
@@ -5429,8 +5429,8 @@ static void render_draw_rows(struct output_buffer *output)
 			}
 
 			/* Calculate segment bounds */
-			uint32_t start_cell = line_get_segment_start(line, &editor.buffer, segment);
-			uint32_t end_cell = line_get_segment_end(line, &editor.buffer, segment);
+			uint32_t start_cell = line_get_segment_start(line, E_BUF, segment);
+			uint32_t end_cell = line_get_segment_end(line, E_BUF, segment);
 
 			/*
 			 * For WRAP_NONE mode, use horizontal scrolling.
@@ -5438,12 +5438,12 @@ static void render_draw_rows(struct output_buffer *output)
 			 */
 			if (editor.wrap_mode == WRAP_NONE) {
 				/* No wrap: use column_offset for horizontal scrolling */
-				render_line_content(output, line, &editor.buffer, file_row,
-				                    editor.column_offset, UINT32_MAX,
+				render_line_content(output, line, E_BUF, file_row,
+				                    E_CTX->column_offset, UINT32_MAX,
 				                    text_area_width, is_cursor_line_segment);
 			} else {
 				/* Wrap enabled: render this segment */
-				render_line_content(output, line, &editor.buffer, file_row,
+				render_line_content(output, line, E_BUF, file_row,
 				                    start_cell, end_cell,
 				                    text_area_width, is_cursor_line_segment);
 			}
@@ -5458,7 +5458,7 @@ static void render_draw_rows(struct output_buffer *output)
 					uint32_t line_visual_width = 0;
 					uint32_t idx = 0;
 					while (idx < line->cell_count) {
-						uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, idx);
+						uint32_t grapheme_end = cursor_next_grapheme(line, E_BUF, idx);
 						int w = grapheme_display_width(line, idx, grapheme_end, line_visual_width);
 						line_visual_width += w;
 						idx = grapheme_end;
@@ -5536,10 +5536,10 @@ static void render_draw_rows(struct output_buffer *output)
 				 * Calculate where we are and if the color column is visible.
 				 */
 				uint32_t line_visual_width = 0;
-				line_warm(line, &editor.buffer);
+				line_warm(line, E_BUF);
 				uint32_t idx = 0;
 				while (idx < line->cell_count) {
-					uint32_t grapheme_end = cursor_next_grapheme(line, &editor.buffer, idx);
+					uint32_t grapheme_end = cursor_next_grapheme(line, E_BUF, idx);
 					int w = grapheme_display_width(line, idx, grapheme_end, line_visual_width);
 					line_visual_width += w;
 					idx = grapheme_end;
@@ -5615,7 +5615,7 @@ static void render_draw_status_bar(struct output_buffer *output)
 	output_buffer_append_string(output, color_escape);
 
 	/* Filename with its own style */
-	const char *filename = editor.buffer.filename ? editor.buffer.filename : "[No Name]";
+	const char *filename = E_BUF->filename ? E_BUF->filename : "[No Name]";
 	char filename_buf[104];
 	int filename_len = snprintf(filename_buf, sizeof(filename_buf), " %.100s", filename);
 
@@ -5627,7 +5627,7 @@ static void render_draw_status_bar(struct output_buffer *output)
 	int current_pos = filename_len;
 
 	/* Modified indicator with its own style */
-	if (editor.buffer.is_modified) {
+	if (E_BUF->is_modified) {
 		escape_len = style_to_escape(&active_theme.status_modified, color_escape,
 		                             sizeof(color_escape));
 		output_buffer_append(output, color_escape, escape_len);
@@ -5639,27 +5639,27 @@ static void render_draw_status_bar(struct output_buffer *output)
 	char right_status[256];
 	int right_length;
 
-	if (editor.link_preview_active && editor.link_url_preview[0] != '\0') {
+	if (E_CTX->link_preview_active && E_CTX->link_url_preview[0] != '\0') {
 		/* Show link URL in status bar */
 		int max_url_len = (int)editor.screen_columns - current_pos - 8;
 		if (max_url_len < 20) max_url_len = 20;
 		if (max_url_len > 200) max_url_len = 200;
 
-		size_t url_len = strlen(editor.link_url_preview);
+		size_t url_len = strlen(E_CTX->link_url_preview);
 		if ((int)url_len > max_url_len) {
 			/* Truncate with ellipsis */
 			right_length = snprintf(right_status, sizeof(right_status),
-			                        "%.200s... ", editor.link_url_preview);
+			                        "%.200s... ", E_CTX->link_url_preview);
 			right_status[max_url_len] = '\0';
 			right_length = (int)strlen(right_status);
 		} else {
 			right_length = snprintf(right_status, sizeof(right_status),
-			                        "%s ", editor.link_url_preview);
+			                        "%s ", E_CTX->link_url_preview);
 		}
 	} else {
 		/* Normal position indicator */
 		right_length = snprintf(right_status, sizeof(right_status), "%u/%u ",
-		                        editor.cursor_row + 1, editor.buffer.line_count);
+		                        E_CTX->cursor_row + 1, E_BUF->line_count);
 	}
 
 	/* Fill with base status bar style */
@@ -5876,39 +5876,39 @@ int __must_check render_refresh_screen(void)
 
 	if (editor.wrap_mode == WRAP_NONE) {
 		/* No wrap: simple calculation */
-		cursor_screen_row = (editor.cursor_row - editor.row_offset) + 1;
+		cursor_screen_row = (E_CTX->cursor_row - E_CTX->row_offset) + 1;
 		uint32_t render_column = editor_get_render_column(
-			editor.cursor_row, editor.cursor_column);
-		cursor_screen_col = (render_column - editor.column_offset) +
-		                    editor.gutter_width + 1;
+			E_CTX->cursor_row, E_CTX->cursor_column);
+		cursor_screen_col = (render_column - E_CTX->column_offset) +
+		                    E_CTX->gutter_width + 1;
 	} else {
 		/*
 		 * Wrap enabled: sum screen rows from row_offset to cursor_row,
 		 * then add the cursor's segment within its line.
 		 */
 		cursor_screen_row = 1;  /* 1-based terminal rows */
-		for (uint32_t row = editor.row_offset; row < editor.cursor_row &&
-		     row < editor.buffer.line_count; row++) {
-			struct line *line = &editor.buffer.lines[row];
-			line_ensure_wrap_cache(line, &editor.buffer);
+		for (uint32_t row = E_CTX->row_offset; row < E_CTX->cursor_row &&
+		     row < E_BUF->line_count; row++) {
+			struct line *line = &E_BUF->lines[row];
+			line_ensure_wrap_cache(line, E_BUF);
 			cursor_screen_row += line->wrap_segment_count;
 		}
 
 		/* Add the segment offset within cursor's line */
-		if (editor.cursor_row < editor.buffer.line_count) {
-			struct line *cursor_line = &editor.buffer.lines[editor.cursor_row];
-			line_ensure_wrap_cache(cursor_line, &editor.buffer);
+		if (E_CTX->cursor_row < E_BUF->line_count) {
+			struct line *cursor_line = &E_BUF->lines[E_CTX->cursor_row];
+			line_ensure_wrap_cache(cursor_line, E_BUF);
 			uint16_t cursor_segment = line_get_segment_for_column(
-				cursor_line, &editor.buffer, editor.cursor_column);
+				cursor_line, E_BUF, E_CTX->cursor_column);
 			cursor_screen_row += cursor_segment;
 
 			/* Column is visual position within segment */
 			uint32_t visual_col = line_get_visual_column_in_segment(
-				cursor_line, &editor.buffer, cursor_segment,
-				editor.cursor_column);
-			cursor_screen_col = visual_col + editor.gutter_width + 1;
+				cursor_line, E_BUF, cursor_segment,
+				E_CTX->cursor_column);
+			cursor_screen_col = visual_col + E_CTX->gutter_width + 1;
 		} else {
-			cursor_screen_col = editor.gutter_width + 1;
+			cursor_screen_col = E_CTX->gutter_width + 1;
 		}
 	}
 
@@ -5931,32 +5931,32 @@ int __must_check render_refresh_screen(void)
 static bool editor_open_file(const char *path)
 {
 	/* Clear existing buffer */
-	buffer_free(&editor.buffer);
+	buffer_free(E_BUF);
 
 	/* Reset editor state */
-	editor.cursor_row = 0;
-	editor.cursor_column = 0;
-	editor.row_offset = 0;
-	editor.column_offset = 0;
-	editor.selection_active = false;
+	E_CTX->cursor_row = 0;
+	E_CTX->cursor_column = 0;
+	E_CTX->row_offset = 0;
+	E_CTX->column_offset = 0;
+	E_CTX->selection_active = false;
 
 	/* Exit multi-cursor mode if active */
-	if (editor.cursor_count > 0) {
+	if (E_CTX->cursor_count > 0) {
 		multicursor_exit();
 	}
 
 	/* Initialize new buffer */
-	buffer_init(&editor.buffer);
+	buffer_init(E_BUF);
 
 	/* Load the file */
-	int ret = file_open(&editor.buffer, path);
+	int ret = file_open(E_BUF, path);
 	if (ret) {
 		/* Failed to load - show error with reason */
 		editor_set_status_message("Cannot open file: %s", edit_strerror(ret));
 		return false;
 	}
 
-	editor_set_status_message("Opened: %s (%u lines)", path, editor.buffer.line_count);
+	editor_set_status_message("Opened: %s (%u lines)", path, E_BUF->line_count);
 
 	/* Start background warming for the new file */
 	editor_request_background_warming();
@@ -5972,7 +5972,7 @@ static void editor_command_open_file(void)
 {
 	/* Warn about unsaved changes */
 	static bool warned = false;
-	if (editor.buffer.is_modified && !warned) {
+	if (E_BUF->is_modified && !warned) {
 		editor_set_status_message("Unsaved changes! Press Ctrl+O again to open anyway");
 		warned = true;
 		return;
@@ -6013,17 +6013,17 @@ static void editor_toggle_help(void)
 			editor.previous_file = NULL;
 		} else {
 			/* No previous file - just create new buffer */
-			buffer_free(&editor.buffer);
-			buffer_init(&editor.buffer);
-			editor.cursor_row = 0;
-			editor.cursor_column = 0;
+			buffer_free(E_BUF);
+			buffer_init(E_BUF);
+			E_CTX->cursor_row = 0;
+			E_CTX->cursor_column = 0;
 		}
 		editor.help_file_open = false;
 	} else {
 		/* Open help - save current file path first */
-		if (editor.buffer.filename) {
+		if (E_BUF->filename) {
 			free(editor.previous_file);
-			editor.previous_file = strdup(editor.buffer.filename);
+			editor.previous_file = strdup(E_BUF->filename);
 		} else {
 			free(editor.previous_file);
 			editor.previous_file = NULL;
@@ -6256,21 +6256,21 @@ static bool search_handle_key(int key)
  */
 static void editor_select_all(void)
 {
-	if (editor.buffer.line_count == 0) {
+	if (E_BUF->line_count == 0) {
 		return;
 	}
 
 	/* Anchor at start */
-	editor.selection_anchor_row = 0;
-	editor.selection_anchor_column = 0;
+	E_CTX->selection_anchor_row = 0;
+	E_CTX->selection_anchor_column = 0;
 
 	/* Cursor at end */
-	editor.cursor_row = editor.buffer.line_count - 1;
-	struct line *last_line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(last_line, &editor.buffer);
-	editor.cursor_column = last_line->cell_count;
+	E_CTX->cursor_row = E_BUF->line_count - 1;
+	struct line *last_line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(last_line, E_BUF);
+	E_CTX->cursor_column = last_line->cell_count;
 
-	editor.selection_active = true;
+	E_CTX->selection_active = true;
 	editor_set_status_message("Selected all");
 }
 
@@ -6279,19 +6279,19 @@ static void editor_select_all(void)
  */
 static void editor_delete_line(void)
 {
-	if (editor.buffer.line_count == 0) {
+	if (E_BUF->line_count == 0) {
 		return;
 	}
 
-	uint32_t row = editor.cursor_row;
-	if (row >= editor.buffer.line_count) {
-		row = editor.buffer.line_count - 1;
+	uint32_t row = E_CTX->cursor_row;
+	if (row >= E_BUF->line_count) {
+		row = E_BUF->line_count - 1;
 	}
 
-	struct line *line = &editor.buffer.lines[row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[row];
+	line_warm(line, E_BUF);
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Build text to save for undo: line content + newline (if not last line) */
 	size_t text_capacity = line->cell_count * 4 + 2;
@@ -6307,36 +6307,36 @@ static void editor_delete_line(void)
 				text_len += bytes;
 			}
 		}
-		if (row < editor.buffer.line_count - 1) {
+		if (row < E_BUF->line_count - 1) {
 			text[text_len++] = '\n';
 		}
 		text[text_len] = '\0';
 
 		/* Record the deletion - from start of this line to start of next line */
-		uint32_t end_row = (row < editor.buffer.line_count - 1) ? row + 1 : row;
-		uint32_t end_col = (row < editor.buffer.line_count - 1) ? 0 : line->cell_count;
-		undo_record_delete_text(&editor.buffer, row, 0, end_row, end_col, text, text_len);
+		uint32_t end_row = (row < E_BUF->line_count - 1) ? row + 1 : row;
+		uint32_t end_col = (row < E_BUF->line_count - 1) ? 0 : line->cell_count;
+		undo_record_delete_text(E_BUF, row, 0, end_row, end_col, text, text_len);
 		free(text);
 	}
 
 	/* Delete the line */
-	buffer_delete_line(&editor.buffer, row);
+	buffer_delete_line(E_BUF, row);
 
 	/* Handle empty buffer */
-	if (editor.buffer.line_count == 0) {
-		buffer_ensure_capacity(&editor.buffer, 1);
-		line_init(&editor.buffer.lines[0]);
-		editor.buffer.line_count = 1;
+	if (E_BUF->line_count == 0) {
+		buffer_ensure_capacity(E_BUF, 1);
+		line_init(&E_BUF->lines[0]);
+		E_BUF->line_count = 1;
 	}
 
 	/* Adjust cursor */
-	if (editor.cursor_row >= editor.buffer.line_count) {
-		editor.cursor_row = editor.buffer.line_count - 1;
+	if (E_CTX->cursor_row >= E_BUF->line_count) {
+		E_CTX->cursor_row = E_BUF->line_count - 1;
 	}
-	editor.cursor_column = 0;
+	E_CTX->cursor_column = 0;
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 	selection_clear();
 
 	editor_set_status_message("Line deleted");
@@ -6347,53 +6347,53 @@ static void editor_delete_line(void)
  */
 static void editor_duplicate_line(void)
 {
-	if (editor.buffer.line_count == 0) {
+	if (E_BUF->line_count == 0) {
 		return;
 	}
 
-	uint32_t row = editor.cursor_row;
-	if (row >= editor.buffer.line_count) {
-		row = editor.buffer.line_count - 1;
+	uint32_t row = E_CTX->cursor_row;
+	if (row >= E_BUF->line_count) {
+		row = E_BUF->line_count - 1;
 	}
 
-	struct line *source = &editor.buffer.lines[row];
-	line_warm(source, &editor.buffer);
+	struct line *source = &E_BUF->lines[row];
+	line_warm(source, E_BUF);
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Save cursor at end of line, insert newline (creates a new line) */
-	uint32_t saved_col = editor.cursor_column;
+	uint32_t saved_col = E_CTX->cursor_column;
 
-	editor.cursor_row = row;
-	editor.cursor_column = source->cell_count;
+	E_CTX->cursor_row = row;
+	E_CTX->cursor_column = source->cell_count;
 
 	/* Record and insert newline */
-	undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
-	buffer_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_record_insert_newline(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
+	buffer_insert_newline(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Move to the new line */
-	editor.cursor_row = row + 1;
-	editor.cursor_column = 0;
+	E_CTX->cursor_row = row + 1;
+	E_CTX->cursor_column = 0;
 
 	/* Re-get source pointer (may have moved due to realloc) */
-	source = &editor.buffer.lines[row];
+	source = &E_BUF->lines[row];
 
 	/* Copy each character from source into the new line */
 	for (uint32_t i = 0; i < source->cell_count; i++) {
 		uint32_t codepoint = source->cells[i].codepoint;
-		undo_record_insert_char(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
-		buffer_insert_cell_at_column(&editor.buffer, editor.cursor_row, editor.cursor_column, codepoint);
-		editor.cursor_column++;
+		undo_record_insert_char(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, codepoint);
+		buffer_insert_cell_at_column(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column, codepoint);
+		E_CTX->cursor_column++;
 	}
 
 	/* Restore cursor column on the duplicated line */
-	struct line *dest = &editor.buffer.lines[row + 1];
-	editor.cursor_column = saved_col;
-	if (editor.cursor_column > dest->cell_count) {
-		editor.cursor_column = dest->cell_count;
+	struct line *dest = &E_BUF->lines[row + 1];
+	E_CTX->cursor_column = saved_col;
+	if (E_CTX->cursor_column > dest->cell_count) {
+		E_CTX->cursor_column = dest->cell_count;
 	}
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	editor_set_status_message("Line duplicated");
 }
@@ -6443,15 +6443,15 @@ static bool is_matchable_bracket(uint32_t codepoint)
  */
 static void editor_jump_to_match(void)
 {
-	if (editor.cursor_row >= editor.buffer.line_count) {
+	if (E_CTX->cursor_row >= E_BUF->line_count) {
 		editor_set_status_message("No bracket found");
 		return;
 	}
 
-	struct line *line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 
-	uint32_t search_column = editor.cursor_column;
+	uint32_t search_column = E_CTX->cursor_column;
 	uint32_t match_row, match_column;
 	bool found = false;
 
@@ -6461,8 +6461,8 @@ static void editor_jump_to_match(void)
 	 */
 	if (search_column < line->cell_count &&
 	    is_matchable_bracket(line->cells[search_column].codepoint)) {
-		found = buffer_find_pair_partner(&editor.buffer,
-		                                 editor.cursor_row, search_column,
+		found = buffer_find_pair_partner(E_BUF,
+		                                 E_CTX->cursor_row, search_column,
 		                                 &match_row, &match_column);
 	}
 
@@ -6470,8 +6470,8 @@ static void editor_jump_to_match(void)
 	if (!found) {
 		for (uint32_t column = search_column + 1; column < line->cell_count; column++) {
 			if (is_matchable_bracket(line->cells[column].codepoint)) {
-				found = buffer_find_pair_partner(&editor.buffer,
-				                                 editor.cursor_row, column,
+				found = buffer_find_pair_partner(E_BUF,
+				                                 E_CTX->cursor_row, column,
 				                                 &match_row, &match_column);
 				if (found) {
 					break;
@@ -6482,14 +6482,14 @@ static void editor_jump_to_match(void)
 
 	if (found) {
 		selection_clear();
-		editor.cursor_row = match_row;
-		editor.cursor_column = match_column;
+		E_CTX->cursor_row = match_row;
+		E_CTX->cursor_column = match_column;
 
 		/* Ensure cursor is visible by scrolling if needed */
-		if (editor.cursor_row < editor.row_offset) {
-			editor.row_offset = editor.cursor_row;
-		} else if (editor.cursor_row >= editor.row_offset + editor.screen_rows) {
-			editor.row_offset = editor.cursor_row - editor.screen_rows + 1;
+		if (E_CTX->cursor_row < E_CTX->row_offset) {
+			E_CTX->row_offset = E_CTX->cursor_row;
+		} else if (E_CTX->cursor_row >= E_CTX->row_offset + editor.screen_rows) {
+			E_CTX->row_offset = E_CTX->cursor_row - editor.screen_rows + 1;
 		}
 
 		editor_set_status_message("Jumped to match");
@@ -6507,19 +6507,19 @@ static void editor_toggle_comment(void)
 {
 	uint32_t start_row, end_row;
 
-	if (editor.selection_active && !selection_is_empty()) {
+	if (E_CTX->selection_active && !selection_is_empty()) {
 		uint32_t start_column, end_column;
 		selection_get_range(&start_row, &start_column, &end_row, &end_column);
 	} else {
-		start_row = editor.cursor_row;
-		end_row = editor.cursor_row;
+		start_row = E_CTX->cursor_row;
+		end_row = E_CTX->cursor_row;
 	}
 
-	if (start_row >= editor.buffer.line_count) {
+	if (start_row >= E_BUF->line_count) {
 		return;
 	}
-	if (end_row >= editor.buffer.line_count) {
-		end_row = editor.buffer.line_count - 1;
+	if (end_row >= E_BUF->line_count) {
+		end_row = E_BUF->line_count - 1;
 	}
 
 	/*
@@ -6530,8 +6530,8 @@ static void editor_toggle_comment(void)
 	bool has_content = false;
 
 	for (uint32_t row = start_row; row <= end_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		/* Skip empty lines for this check */
 		uint32_t first_non_whitespace = 0;
@@ -6559,7 +6559,7 @@ static void editor_toggle_comment(void)
 
 	bool should_comment = !all_commented;
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/*
 	 * Find the minimum indent across all lines with content. We insert
@@ -6568,7 +6568,7 @@ static void editor_toggle_comment(void)
 	uint32_t min_indent = UINT32_MAX;
 	if (should_comment) {
 		for (uint32_t row = start_row; row <= end_row; row++) {
-			struct line *line = &editor.buffer.lines[row];
+			struct line *line = &E_BUF->lines[row];
 
 			/* Skip empty lines */
 			if (line->cell_count == 0) {
@@ -6595,8 +6595,8 @@ static void editor_toggle_comment(void)
 	}
 
 	for (uint32_t row = start_row; row <= end_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		if (should_comment) {
 			/* Skip empty lines */
@@ -6648,13 +6648,13 @@ static void editor_toggle_comment(void)
 			line_set_temperature(line, LINE_TEMPERATURE_HOT);
 
 			/* Record for undo (in reverse order for correct undo sequence) */
-			undo_record_insert_char(&editor.buffer, row, insert_position, '/');
-			undo_record_insert_char(&editor.buffer, row, insert_position + 1, '/');
-			undo_record_insert_char(&editor.buffer, row, insert_position + 2, ' ');
+			undo_record_insert_char(E_BUF, row, insert_position, '/');
+			undo_record_insert_char(E_BUF, row, insert_position + 1, '/');
+			undo_record_insert_char(E_BUF, row, insert_position + 2, ' ');
 
 			/* Adjust cursor if on this line */
-			if (row == editor.cursor_row && editor.cursor_column >= insert_position) {
-				editor.cursor_column += 3;
+			if (row == E_CTX->cursor_row && E_CTX->cursor_column >= insert_position) {
+				E_CTX->cursor_column += 3;
 			}
 		} else {
 			/* Remove // (and optional trailing space) */
@@ -6674,7 +6674,7 @@ static void editor_toggle_comment(void)
 			for (uint32_t i = chars_to_remove; i > 0; i--) {
 				uint32_t delete_position = comment_start + i - 1;
 				uint32_t codepoint = line->cells[delete_position].codepoint;
-				undo_record_delete_char(&editor.buffer, row, delete_position, codepoint);
+				undo_record_delete_char(E_BUF, row, delete_position, codepoint);
 			}
 
 			/* Shift cells left to remove the comment */
@@ -6686,23 +6686,23 @@ static void editor_toggle_comment(void)
 			line_set_temperature(line, LINE_TEMPERATURE_HOT);
 
 			/* Adjust cursor if on this line */
-			if (row == editor.cursor_row && editor.cursor_column > comment_start) {
-				if (editor.cursor_column >= comment_start + chars_to_remove) {
-					editor.cursor_column -= chars_to_remove;
+			if (row == E_CTX->cursor_row && E_CTX->cursor_column > comment_start) {
+				if (E_CTX->cursor_column >= comment_start + chars_to_remove) {
+					E_CTX->cursor_column -= chars_to_remove;
 				} else {
-					editor.cursor_column = comment_start;
+					E_CTX->cursor_column = comment_start;
 				}
 			}
 		}
 
 		/* Recompute line metadata */
 		neighbor_compute_line(line);
-		syntax_highlight_line(line, &editor.buffer, row);
+		syntax_highlight_line(line, E_BUF, row);
 		line_invalidate_wrap_cache(line);
 	}
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	uint32_t count = end_row - start_row + 1;
 	editor_set_status_message("%s %u line%s",
@@ -6716,32 +6716,32 @@ static void editor_toggle_comment(void)
  */
 static void editor_move_line_up(void)
 {
-	if (editor.buffer.line_count < 2) {
+	if (E_BUF->line_count < 2) {
 		return;
 	}
 
-	uint32_t row = editor.cursor_row;
+	uint32_t row = E_CTX->cursor_row;
 	if (row == 0) {
 		return;
 	}
-	if (row >= editor.buffer.line_count) {
-		row = editor.buffer.line_count - 1;
+	if (row >= E_BUF->line_count) {
+		row = E_BUF->line_count - 1;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Swap with line above */
-	buffer_swap_lines(&editor.buffer, row, row - 1);
+	buffer_swap_lines(E_BUF, row, row - 1);
 
 	/* Invalidate wrap caches */
-	line_invalidate_wrap_cache(&editor.buffer.lines[row]);
-	line_invalidate_wrap_cache(&editor.buffer.lines[row - 1]);
+	line_invalidate_wrap_cache(&E_BUF->lines[row]);
+	line_invalidate_wrap_cache(&E_BUF->lines[row - 1]);
 
 	/* Move cursor up */
-	editor.cursor_row--;
+	E_CTX->cursor_row--;
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	editor_set_status_message("Line moved up");
 }
@@ -6751,29 +6751,29 @@ static void editor_move_line_up(void)
  */
 static void editor_move_line_down(void)
 {
-	if (editor.buffer.line_count < 2) {
+	if (E_BUF->line_count < 2) {
 		return;
 	}
 
-	uint32_t row = editor.cursor_row;
-	if (row >= editor.buffer.line_count - 1) {
+	uint32_t row = E_CTX->cursor_row;
+	if (row >= E_BUF->line_count - 1) {
 		return;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Swap with line below */
-	buffer_swap_lines(&editor.buffer, row, row + 1);
+	buffer_swap_lines(E_BUF, row, row + 1);
 
 	/* Invalidate wrap caches */
-	line_invalidate_wrap_cache(&editor.buffer.lines[row]);
-	line_invalidate_wrap_cache(&editor.buffer.lines[row + 1]);
+	line_invalidate_wrap_cache(&E_BUF->lines[row]);
+	line_invalidate_wrap_cache(&E_BUF->lines[row + 1]);
 
 	/* Move cursor down */
-	editor.cursor_row++;
+	E_CTX->cursor_row++;
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	editor_set_status_message("Line moved down");
 }
@@ -6786,26 +6786,26 @@ static void editor_indent_lines(void)
 {
 	uint32_t start_row, end_row;
 
-	if (editor.selection_active && !selection_is_empty()) {
+	if (E_CTX->selection_active && !selection_is_empty()) {
 		uint32_t start_col, end_col;
 		selection_get_range(&start_row, &start_col, &end_row, &end_col);
 	} else {
-		start_row = editor.cursor_row;
-		end_row = editor.cursor_row;
+		start_row = E_CTX->cursor_row;
+		end_row = E_CTX->cursor_row;
 	}
 
-	if (start_row >= editor.buffer.line_count) {
+	if (start_row >= E_BUF->line_count) {
 		return;
 	}
-	if (end_row >= editor.buffer.line_count) {
-		end_row = editor.buffer.line_count - 1;
+	if (end_row >= E_BUF->line_count) {
+		end_row = E_BUF->line_count - 1;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	for (uint32_t row = start_row; row <= end_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		/* Skip empty lines */
 		if (line->cell_count == 0) {
@@ -6813,7 +6813,7 @@ static void editor_indent_lines(void)
 		}
 
 		/* Record for undo before inserting */
-		undo_record_insert_char(&editor.buffer, row, 0, '\t');
+		undo_record_insert_char(E_BUF, row, 0, '\t');
 
 		/* Insert tab at position 0 */
 		line_insert_cell(line, 0, '\t');
@@ -6821,25 +6821,25 @@ static void editor_indent_lines(void)
 
 		/* Recompute line metadata */
 		neighbor_compute_line(line);
-		syntax_highlight_line(line, &editor.buffer, row);
+		syntax_highlight_line(line, E_BUF, row);
 		line_invalidate_wrap_cache(line);
 	}
 
 	/* Adjust cursor column to account for inserted tab */
-	if (editor.cursor_row >= start_row && editor.cursor_row <= end_row) {
-		editor.cursor_column++;
+	if (E_CTX->cursor_row >= start_row && E_CTX->cursor_row <= end_row) {
+		E_CTX->cursor_column++;
 	}
 
 	/* Adjust selection anchor if needed */
-	if (editor.selection_active) {
-		if (editor.selection_anchor_row >= start_row &&
-		    editor.selection_anchor_row <= end_row) {
-			editor.selection_anchor_column++;
+	if (E_CTX->selection_active) {
+		if (E_CTX->selection_anchor_row >= start_row &&
+		    E_CTX->selection_anchor_row <= end_row) {
+			E_CTX->selection_anchor_column++;
 		}
 	}
 
-	editor.buffer.is_modified = true;
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	E_BUF->is_modified = true;
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	uint32_t count = end_row - start_row + 1;
 	editor_set_status_message("Indented %u line%s", count, count > 1 ? "s" : "");
@@ -6853,28 +6853,28 @@ static void editor_outdent_lines(void)
 {
 	uint32_t start_row, end_row;
 
-	if (editor.selection_active && !selection_is_empty()) {
+	if (E_CTX->selection_active && !selection_is_empty()) {
 		uint32_t start_col, end_col;
 		selection_get_range(&start_row, &start_col, &end_row, &end_col);
 	} else {
-		start_row = editor.cursor_row;
-		end_row = editor.cursor_row;
+		start_row = E_CTX->cursor_row;
+		end_row = E_CTX->cursor_row;
 	}
 
-	if (start_row >= editor.buffer.line_count) {
+	if (start_row >= E_BUF->line_count) {
 		return;
 	}
-	if (end_row >= editor.buffer.line_count) {
-		end_row = editor.buffer.line_count - 1;
+	if (end_row >= E_BUF->line_count) {
+		end_row = E_BUF->line_count - 1;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	uint32_t lines_modified = 0;
 
 	for (uint32_t row = start_row; row <= end_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
-		line_warm(line, &editor.buffer);
+		struct line *line = &E_BUF->lines[row];
+		line_warm(line, E_BUF);
 
 		if (line->cell_count == 0) {
 			continue;
@@ -6900,40 +6900,40 @@ static void editor_outdent_lines(void)
 
 		/* Record and delete each character */
 		for (uint32_t i = 0; i < chars_to_remove; i++) {
-			undo_record_delete_char(&editor.buffer, row, 0, line->cells[0].codepoint);
+			undo_record_delete_char(E_BUF, row, 0, line->cells[0].codepoint);
 			line_delete_cell(line, 0);
 		}
 
 		line_set_temperature(line, LINE_TEMPERATURE_HOT);
 		neighbor_compute_line(line);
-		syntax_highlight_line(line, &editor.buffer, row);
+		syntax_highlight_line(line, E_BUF, row);
 		line_invalidate_wrap_cache(line);
 		lines_modified++;
 
 		/* Adjust cursor column */
-		if (row == editor.cursor_row) {
-			if (editor.cursor_column >= chars_to_remove) {
-				editor.cursor_column -= chars_to_remove;
+		if (row == E_CTX->cursor_row) {
+			if (E_CTX->cursor_column >= chars_to_remove) {
+				E_CTX->cursor_column -= chars_to_remove;
 			} else {
-				editor.cursor_column = 0;
+				E_CTX->cursor_column = 0;
 			}
 		}
 
 		/* Adjust selection anchor if needed */
-		if (editor.selection_active && row == editor.selection_anchor_row) {
-			if (editor.selection_anchor_column >= chars_to_remove) {
-				editor.selection_anchor_column -= chars_to_remove;
+		if (E_CTX->selection_active && row == E_CTX->selection_anchor_row) {
+			if (E_CTX->selection_anchor_column >= chars_to_remove) {
+				E_CTX->selection_anchor_column -= chars_to_remove;
 			} else {
-				editor.selection_anchor_column = 0;
+				E_CTX->selection_anchor_column = 0;
 			}
 		}
 	}
 
 	if (lines_modified > 0) {
-		editor.buffer.is_modified = true;
+		E_BUF->is_modified = true;
 	}
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	editor_set_status_message("Outdented %u line%s", lines_modified,
 	                          lines_modified != 1 ? "s" : "");
@@ -6959,7 +6959,7 @@ execute_action(enum editor_action action)
 
 	/* File operations */
 	case ACTION_QUIT:
-		if (editor.buffer.is_modified) {
+		if (E_BUF->is_modified) {
 			quit_prompt_enter();
 		} else {
 			editor_perform_exit();
@@ -6979,15 +6979,15 @@ execute_action(enum editor_action action)
 		return true;
 
 	case ACTION_NEW:
-		if (editor.buffer.is_modified) {
+		if (E_BUF->is_modified) {
 			editor_set_status_message("Save changes? (y/n)");
 		}
-		buffer_free(&editor.buffer);
-		buffer_init(&editor.buffer);
-		editor.cursor_row = 0;
-		editor.cursor_column = 0;
-		editor.row_offset = 0;
-		editor.column_offset = 0;
+		buffer_free(E_BUF);
+		buffer_init(E_BUF);
+		E_CTX->cursor_row = 0;
+		E_CTX->cursor_column = 0;
+		E_CTX->row_offset = 0;
+		E_CTX->column_offset = 0;
 		selection_clear();
 		editor_set_status_message("New file");
 		return true;
@@ -7063,19 +7063,19 @@ execute_action(enum editor_action action)
 		return true;
 
 	case ACTION_MOVE_FILE_START:
-		editor.cursor_row = 0;
-		editor.cursor_column = 0;
-		editor.row_offset = 0;
-		editor.column_offset = 0;
+		E_CTX->cursor_row = 0;
+		E_CTX->cursor_column = 0;
+		E_CTX->row_offset = 0;
+		E_CTX->column_offset = 0;
 		selection_clear();
 		return true;
 
 	case ACTION_MOVE_FILE_END:
-		if (editor.buffer.line_count > 0) {
-			editor.cursor_row = editor.buffer.line_count - 1;
-			struct line *last_line = &editor.buffer.lines[editor.cursor_row];
-			line_warm(last_line, &editor.buffer);
-			editor.cursor_column = last_line->cell_count;
+		if (E_BUF->line_count > 0) {
+			E_CTX->cursor_row = E_BUF->line_count - 1;
+			struct line *last_line = &E_BUF->lines[E_CTX->cursor_row];
+			line_warm(last_line, E_BUF);
+			E_CTX->cursor_column = last_line->cell_count;
 		}
 		selection_clear();
 		return true;
@@ -7130,7 +7130,7 @@ execute_action(enum editor_action action)
 		return true;
 
 	case ACTION_SELECT_WORD:
-		editor_select_word(editor.cursor_row, editor.cursor_column);
+		editor_select_word(E_CTX->cursor_row, E_CTX->cursor_column);
 		return true;
 
 	case ACTION_ADD_CURSOR_NEXT:
@@ -7211,16 +7211,16 @@ execute_action(enum editor_action action)
 		return true;
 
 	case ACTION_TOGGLE_HYBRID_MODE:
-		if (syntax_is_markdown_file(editor.buffer.filename)) {
-			editor.hybrid_mode = !editor.hybrid_mode;
+		if (syntax_is_markdown_file(E_BUF->filename)) {
+			E_CTX->hybrid_mode = !E_CTX->hybrid_mode;
 			editor_set_status_message("Markdown %s mode",
-			                          editor.hybrid_mode ? "hybrid" : "raw");
-			for (uint32_t i = editor.row_offset;
-			     i < editor.row_offset + editor.screen_rows &&
-			     i < editor.buffer.line_count; i++) {
-				struct line *line = &editor.buffer.lines[i];
+			                          E_CTX->hybrid_mode ? "hybrid" : "raw");
+			for (uint32_t i = E_CTX->row_offset;
+			     i < E_CTX->row_offset + editor.screen_rows &&
+			     i < E_BUF->line_count; i++) {
+				struct line *line = &E_BUF->lines[i];
 				if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
-					syntax_highlight_line(line, &editor.buffer, i);
+					syntax_highlight_line(line, E_BUF, i);
 				}
 			}
 		} else {
@@ -7241,10 +7241,10 @@ execute_action(enum editor_action action)
 		editor_check_for_updates();
 		return true;
 	case ACTION_FORMAT_TABLES:
-		if (syntax_is_markdown_file(editor.buffer.filename)) {
-			int count = tables_reformat_all(&editor.buffer);
+		if (syntax_is_markdown_file(E_BUF->filename)) {
+			int count = tables_reformat_all(E_BUF);
 			if (count > 0) {
-				editor.buffer.is_modified = true;
+				E_BUF->is_modified = true;
 				editor_set_status_message("%d table(s) formatted", count);
 			} else {
 				editor_set_status_message("No tables to format");
@@ -7256,7 +7256,7 @@ execute_action(enum editor_action action)
 
 	/* Special */
 	case ACTION_ESCAPE:
-		if (editor.cursor_count > 0) {
+		if (E_CTX->cursor_count > 0) {
 			multicursor_exit();
 		} else {
 			selection_clear();
@@ -7264,7 +7264,7 @@ execute_action(enum editor_action action)
 		return true;
 
 	case ACTION_INSERT_TAB:
-		if (editor.selection_active && !selection_is_empty()) {
+		if (E_CTX->selection_active && !selection_is_empty()) {
 			editor_indent_lines();
 		} else if (!editor_table_next_cell()) {
 			editor_insert_character('\t');

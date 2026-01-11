@@ -1842,7 +1842,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 				if (count >= 3) {
 					/* This is a closing fence */
 					md_mark_to_end(line, 0, SYNTAX_MD_CODE_FENCE_CLOSE);
-					if (editor.hybrid_mode) {
+					if (E_CTX->hybrid_mode) {
 						md_compute_elements(line);
 						md_mark_hideable_cells(line);
 					}
@@ -1891,7 +1891,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 		}
 		if (count >= 3) {
 			md_mark_to_end(line, 0, SYNTAX_MD_CODE_FENCE_OPEN);
-			if (editor.hybrid_mode) {
+			if (E_CTX->hybrid_mode) {
 				md_compute_elements(line);
 				md_mark_hideable_cells(line);
 			}
@@ -1918,7 +1918,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 				SYNTAX_MD_HEADER_5, SYNTAX_MD_HEADER_6
 			};
 			md_mark_to_end(line, 0, header_tokens[level - 1]);
-			if (editor.hybrid_mode) {
+			if (E_CTX->hybrid_mode) {
 				md_compute_elements(line);
 				md_mark_hideable_cells(line);
 			}
@@ -1945,7 +1945,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 		md_mark_range(line, start, pos, SYNTAX_MD_BLOCKQUOTE);
 		inline_start = pos;
 		md_parse_inline(line, inline_start, line->cell_count);
-		if (editor.hybrid_mode) {
+		if (E_CTX->hybrid_mode) {
 			md_compute_elements(line);
 			md_mark_hideable_cells(line);
 		}
@@ -1972,7 +1972,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 
 		if (is_rule && count >= 3) {
 			md_mark_to_end(line, 0, SYNTAX_MD_HORIZONTAL_RULE);
-			if (editor.hybrid_mode) {
+			if (E_CTX->hybrid_mode) {
 				md_compute_elements(line);
 				md_mark_hideable_cells(line);
 			}
@@ -2003,7 +2003,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 				              SYNTAX_MD_TASK_MARKER);
 				inline_start = task_end;
 				md_parse_inline(line, inline_start, line->cell_count);
-				if (editor.hybrid_mode) {
+				if (E_CTX->hybrid_mode) {
 					md_compute_elements(line);
 					md_mark_hideable_cells(line);
 				}
@@ -2013,7 +2013,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 
 		inline_start = marker_end;
 		md_parse_inline(line, inline_start, line->cell_count);
-		if (editor.hybrid_mode) {
+		if (E_CTX->hybrid_mode) {
 			md_compute_elements(line);
 			md_mark_hideable_cells(line);
 		}
@@ -2038,7 +2038,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 				md_mark_range(line, num_start, pos, SYNTAX_MD_LIST_MARKER);
 				inline_start = pos;
 				md_parse_inline(line, inline_start, line->cell_count);
-				if (editor.hybrid_mode) {
+				if (E_CTX->hybrid_mode) {
 					md_compute_elements(line);
 					md_mark_hideable_cells(line);
 				}
@@ -2085,7 +2085,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 			/* Parse inline content between pipes */
 			md_parse_inline(line, 0, line->cell_count);
 		}
-		if (editor.hybrid_mode) {
+		if (E_CTX->hybrid_mode) {
 			md_compute_elements(line);
 			md_mark_hideable_cells(line);
 		}
@@ -2096,7 +2096,7 @@ void syntax_highlight_markdown_line(struct line *line, struct buffer *buffer,
 	md_parse_inline(line, 0, line->cell_count);
 
 	/* Compute element cache for hybrid rendering mode */
-	if (editor.hybrid_mode) {
+	if (E_CTX->hybrid_mode) {
 		md_compute_elements(line);
 		md_mark_hideable_cells(line);
 	}
@@ -2457,25 +2457,25 @@ bool md_extract_link_url(struct line *line, uint32_t cursor_col,
  */
 void md_update_link_preview(void)
 {
-	editor.link_preview_active = false;
-	editor.link_url_preview[0] = '\0';
+	E_CTX->link_preview_active = false;
+	E_CTX->link_url_preview[0] = '\0';
 
-	if (!editor.hybrid_mode)
+	if (!E_CTX->hybrid_mode)
 		return;
 
-	if (!syntax_is_markdown_file(editor.buffer.filename))
+	if (!syntax_is_markdown_file(E_BUF->filename))
 		return;
 
-	if (editor.cursor_row >= editor.buffer.line_count)
+	if (E_CTX->cursor_row >= E_BUF->line_count)
 		return;
 
-	struct line *line = &editor.buffer.lines[editor.cursor_row];
-	line_warm(line, &editor.buffer);
+	struct line *line = &E_BUF->lines[E_CTX->cursor_row];
+	line_warm(line, E_BUF);
 
-	if (md_extract_link_url(line, editor.cursor_column,
-	                        editor.link_url_preview,
-	                        sizeof(editor.link_url_preview))) {
-		editor.link_preview_active = true;
+	if (md_extract_link_url(line, E_CTX->cursor_column,
+	                        E_CTX->link_url_preview,
+	                        sizeof(E_CTX->link_url_preview))) {
+		E_CTX->link_preview_active = true;
 	}
 }
 

@@ -103,15 +103,15 @@ int main(int argument_count, char *argument_values[])
 
 	/* Load content from stdin pipe if available */
 	if (stdin_content != NULL) {
-		int ret = buffer_load_from_memory(&editor.buffer, stdin_content, stdin_size);
+		int ret = buffer_load_from_memory(E_BUF, stdin_content, stdin_size);
 		free(stdin_content);
 		stdin_content = NULL;
 
 		if (ret != 0) {
 			editor_set_status_message("Failed to load stdin: %s", edit_strerror(ret));
 		} else {
-			editor.buffer.filename = strdup("<stdin>");
-			editor.buffer.is_modified = true;
+			E_BUF->filename = strdup("<stdin>");
+			E_BUF->is_modified = true;
 			editor_set_status_message("Read %zu bytes from stdin", stdin_size);
 		}
 		autosave_update_path();
@@ -124,12 +124,12 @@ int main(int argument_count, char *argument_values[])
 			bool recover = autosave_prompt_recovery(filename, swap_path);
 			if (recover) {
 				/* Load from swap file */
-				int ret = file_open(&editor.buffer, swap_path);
+				int ret = file_open(E_BUF, swap_path);
 				if (ret == 0) {
 					/* Set original filename */
-					free(editor.buffer.filename);
-					editor.buffer.filename = strdup(filename);
-					editor.buffer.is_modified = true;
+					free(E_BUF->filename);
+					E_BUF->filename = strdup(filename);
+					E_BUF->is_modified = true;
 					autosave_update_path();
 					autosave_set_swap_exists(true);
 					editor_set_status_message("Recovered from swap - save to keep changes");
@@ -145,12 +145,12 @@ int main(int argument_count, char *argument_values[])
 
 		if (swap_path == NULL) {
 			/* Normal file open */
-			int ret = file_open(&editor.buffer, filename);
+			int ret = file_open(E_BUF, filename);
 			if (ret) {
 				if (ret == -ENOENT) {
 					/* File doesn't exist yet - that's OK, new file */
-					editor.buffer.filename = strdup(filename);
-					editor.buffer.is_modified = false;
+					E_BUF->filename = strdup(filename);
+					E_BUF->is_modified = false;
 				} else {
 					/* Real error - show message but continue with empty buffer */
 					editor_set_status_message("Cannot open file: %s",
@@ -196,7 +196,7 @@ int main(int argument_count, char *argument_values[])
 		/* Check for external file changes periodically */
 		if (now - last_filechange_check >= FILECHANGE_CHECK_INTERVAL_SECONDS) {
 			if (!reload_prompt_is_active() &&
-			    file_check_external_change(&editor.buffer)) {
+			    file_check_external_change(E_BUF)) {
 				reload_prompt_enter();
 			}
 			last_filechange_check = now;

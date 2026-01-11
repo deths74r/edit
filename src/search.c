@@ -182,7 +182,7 @@ bool search_should_use_async(void)
 {
 	return worker_is_initialized() &&
 	       async_search.mutex_initialized &&
-	       editor.buffer.line_count > ASYNC_SEARCH_THRESHOLD;
+	       E_BUF->line_count > ASYNC_SEARCH_THRESHOLD;
 }
 
 int search_async_get_match_state(uint32_t row, uint32_t col)
@@ -234,16 +234,16 @@ uint32_t search_async_get_progress(bool *complete, uint32_t *rows_searched,
  */
 static void search_scroll_to(uint32_t row, uint32_t col)
 {
-	editor.cursor_row = row;
-	editor.cursor_column = col;
+	E_CTX->cursor_row = row;
+	E_CTX->cursor_column = col;
 
 	/* Center vertically if out of view */
-	if (row < editor.row_offset ||
-	    row >= editor.row_offset + editor.screen_rows) {
+	if (row < E_CTX->row_offset ||
+	    row >= E_CTX->row_offset + editor.screen_rows) {
 		if (row > editor.screen_rows / 2) {
-			editor.row_offset = row - editor.screen_rows / 2;
+			E_CTX->row_offset = row - editor.screen_rows / 2;
 		} else {
-			editor.row_offset = 0;
+			E_CTX->row_offset = 0;
 		}
 	}
 }
@@ -262,8 +262,8 @@ bool search_async_next_match(void)
 	}
 
 	/* Find next match after current cursor position */
-	uint32_t cursor_row = editor.cursor_row;
-	uint32_t cursor_col = editor.cursor_column;
+	uint32_t cursor_row = E_CTX->cursor_row;
+	uint32_t cursor_col = E_CTX->cursor_column;
 	int32_t next_index = -1;
 
 	/* First, try to find a match after current position */
@@ -308,8 +308,8 @@ bool search_async_prev_match(void)
 	}
 
 	/* Find previous match before current cursor position */
-	uint32_t cursor_row = editor.cursor_row;
-	uint32_t cursor_col = editor.cursor_column;
+	uint32_t cursor_row = E_CTX->cursor_row;
+	uint32_t cursor_col = E_CTX->cursor_column;
 	int32_t prev_index = -1;
 
 	/* Search backwards */
@@ -524,7 +524,7 @@ bool search_should_use_async_replace(void)
 {
 	return worker_is_initialized() &&
 	       async_replace.mutex_initialized &&
-	       editor.buffer.line_count > ASYNC_SEARCH_THRESHOLD;
+	       E_BUF->line_count > ASYNC_SEARCH_THRESHOLD;
 }
 
 uint32_t search_async_replace_get_progress(bool *search_complete,
@@ -586,7 +586,7 @@ void search_async_replace_apply(void)
 	pthread_mutex_unlock(&async_replace.results_mutex);
 
 	/* Start undo group for all replacements */
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Apply in reverse order to preserve positions */
 	uint32_t applied = 0;
@@ -594,16 +594,16 @@ void search_async_replace_apply(void)
 		struct replacement *r = &local_replacements[i];
 
 		/* Validate row is still in range */
-		if (r->row >= editor.buffer.line_count) {
+		if (r->row >= E_BUF->line_count) {
 			free(r->replacement_text);
 			continue;
 		}
 
-		struct line *line = &editor.buffer.lines[r->row];
+		struct line *line = &E_BUF->lines[r->row];
 
 		/* Ensure line is warm */
 		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
-			line_warm(line, &editor.buffer);
+			line_warm(line, E_BUF);
 		}
 
 		/* Validate columns are still in range */
@@ -614,7 +614,7 @@ void search_async_replace_apply(void)
 
 		/* Delete the matched text */
 		if (r->end_col > r->start_col) {
-			buffer_delete_range_no_record(&editor.buffer, r->row,
+			buffer_delete_range_no_record(E_BUF, r->row,
 			                              r->start_col, r->row, r->end_col);
 		}
 
@@ -631,7 +631,7 @@ void search_async_replace_apply(void)
 					codepoint = 0xFFFD;
 					bytes = 1;
 				}
-				buffer_insert_cell_at_column(&editor.buffer, r->row, col, codepoint);
+				buffer_insert_cell_at_column(E_BUF, r->row, col, codepoint);
 				col++;
 				byte_idx += bytes;
 			}
@@ -647,7 +647,7 @@ void search_async_replace_apply(void)
 	}
 
 	/* End undo group */
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	free(local_replacements);
 
@@ -655,7 +655,7 @@ void search_async_replace_apply(void)
 
 	/* Mark buffer as modified */
 	if (applied > 0) {
-		editor.buffer.is_modified = true;
+		E_BUF->is_modified = true;
 	}
 
 	async_replace.active = false;

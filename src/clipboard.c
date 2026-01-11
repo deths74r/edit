@@ -261,7 +261,7 @@ void clipboard_cleanup(void)
  */
 void editor_copy(void)
 {
-	if (!editor.selection_active || selection_is_empty()) {
+	if (!E_CTX->selection_active || selection_is_empty()) {
 		editor_set_status_message("Nothing to copy");
 		return;
 	}
@@ -287,7 +287,7 @@ void editor_copy(void)
  */
 void editor_cut(void)
 {
-	if (!editor.selection_active || selection_is_empty()) {
+	if (!E_CTX->selection_active || selection_is_empty()) {
 		editor_set_status_message("Nothing to cut");
 		return;
 	}
@@ -324,15 +324,15 @@ void editor_paste(void)
 		return;
 	}
 
-	undo_begin_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_begin_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	/* Delete selection if active */
-	if (editor.selection_active && !selection_is_empty()) {
+	if (E_CTX->selection_active && !selection_is_empty()) {
 		editor_delete_selection();
 	}
 
 	/* Track starting row for re-highlighting */
-	uint32_t start_row = editor.cursor_row;
+	uint32_t start_row = E_CTX->cursor_row;
 
 	/* Insert text character by character, handling newlines */
 	size_t offset = 0;
@@ -350,30 +350,30 @@ void editor_paste(void)
 		}
 
 		if (codepoint == '\n') {
-			undo_record_insert_newline(&editor.buffer, editor.cursor_row, editor.cursor_column);
-			ret = buffer_insert_newline_checked(&editor.buffer, editor.cursor_row,
-			                                     editor.cursor_column);
+			undo_record_insert_newline(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
+			ret = buffer_insert_newline_checked(E_BUF, E_CTX->cursor_row,
+			                                     E_CTX->cursor_column);
 			if (ret)
 				break;
-			editor.cursor_row++;
-			editor.cursor_column = 0;
+			E_CTX->cursor_row++;
+			E_CTX->cursor_column = 0;
 		} else if (codepoint == '\r') {
 			/* Skip carriage returns (Windows line endings) */
 		} else {
-			undo_record_insert_char(&editor.buffer, editor.cursor_row,
-			                        editor.cursor_column, codepoint);
-			ret = buffer_insert_cell_at_column_checked(&editor.buffer, editor.cursor_row,
-			                                            editor.cursor_column, codepoint);
+			undo_record_insert_char(E_BUF, E_CTX->cursor_row,
+			                        E_CTX->cursor_column, codepoint);
+			ret = buffer_insert_cell_at_column_checked(E_BUF, E_CTX->cursor_row,
+			                                            E_CTX->cursor_column, codepoint);
 			if (ret)
 				break;
-			editor.cursor_column++;
+			E_CTX->cursor_column++;
 		}
 
 		chars_inserted++;
 		offset += bytes;
 	}
 
-	undo_end_group(&editor.buffer, editor.cursor_row, editor.cursor_column);
+	undo_end_group(E_BUF, E_CTX->cursor_row, E_CTX->cursor_column);
 
 	if (ret) {
 		editor_set_status_message("Paste failed after %u chars: %s",
@@ -381,16 +381,16 @@ void editor_paste(void)
 	}
 
 	/* Recompute pairs and re-highlight affected lines */
-	buffer_compute_pairs(&editor.buffer);
-	for (uint32_t row = start_row; row <= editor.cursor_row; row++) {
-		struct line *line = &editor.buffer.lines[row];
+	buffer_compute_pairs(E_BUF);
+	for (uint32_t row = start_row; row <= E_CTX->cursor_row; row++) {
+		struct line *line = &E_BUF->lines[row];
 		if (line_get_temperature(line) != LINE_TEMPERATURE_COLD) {
-			syntax_highlight_line(line, &editor.buffer, row);
+			syntax_highlight_line(line, E_BUF, row);
 		}
 	}
 
 	free(text);
-	editor.buffer.is_modified = true;
+	E_BUF->is_modified = true;
 	if (!ret)
 		editor_set_status_message("Pasted %u characters", chars_inserted);
 }

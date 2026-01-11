@@ -96,7 +96,7 @@ static void autosave_generate_swap_path(const char *filename, char *swap_path, s
  */
 void autosave_update_path(void)
 {
-	autosave_generate_swap_path(editor.buffer.filename,
+	autosave_generate_swap_path(E_BUF->filename,
 	                            autosave.swap_path,
 	                            sizeof(autosave.swap_path));
 }
@@ -117,7 +117,7 @@ struct buffer_snapshot *buffer_snapshot_create(void)
 		return NULL;
 	}
 
-	uint32_t line_count = editor.buffer.line_count;
+	uint32_t line_count = E_BUF->line_count;
 	snapshot->line_count = line_count;
 	snprintf(snapshot->swap_path, PATH_MAX, "%s", autosave.swap_path);
 
@@ -134,17 +134,17 @@ struct buffer_snapshot *buffer_snapshot_create(void)
 
 	/* Convert each line to UTF-8 string */
 	for (uint32_t row = 0; row < line_count; row++) {
-		struct line *line = &editor.buffer.lines[row];
+		struct line *line = &E_BUF->lines[row];
 
 		/* Ensure line is warm */
 		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
 			/* Use mmap content directly for cold lines */
-			if (editor.buffer.mmap_base != NULL &&
-			    line->mmap_offset + line->mmap_length <= editor.buffer.mmap_size) {
+			if (E_BUF->mmap_base != NULL &&
+			    line->mmap_offset + line->mmap_length <= E_BUF->mmap_size) {
 				snapshot->lines[row] = malloc(line->mmap_length + 1);
 				if (snapshot->lines[row]) {
 					memcpy(snapshot->lines[row],
-					       editor.buffer.mmap_base + line->mmap_offset,
+					       E_BUF->mmap_base + line->mmap_offset,
 					       line->mmap_length);
 					snapshot->lines[row][line->mmap_length] = '\0';
 				}
@@ -368,14 +368,14 @@ void autosave_check(void)
 	}
 
 	/* Don't auto-save unmodified buffers */
-	if (!editor.buffer.is_modified) {
+	if (!E_BUF->is_modified) {
 		/* Reset modify time when buffer becomes unmodified (after save) */
 		autosave.last_modify_time = 0;
 		return;
 	}
 
 	/* Don't auto-save empty buffers */
-	if (editor.buffer.line_count == 0) {
+	if (E_BUF->line_count == 0) {
 		return;
 	}
 
@@ -397,16 +397,16 @@ void autosave_check(void)
 
 	/* Estimate buffer size - skip huge files */
 	size_t estimated_size = 0;
-	uint32_t sample_count = editor.buffer.line_count < 1000 ? editor.buffer.line_count : 1000;
+	uint32_t sample_count = E_BUF->line_count < 1000 ? E_BUF->line_count : 1000;
 	for (uint32_t row = 0; row < sample_count; row++) {
-		struct line *line = &editor.buffer.lines[row];
+		struct line *line = &E_BUF->lines[row];
 		if (line_get_temperature(line) == LINE_TEMPERATURE_COLD) {
 			estimated_size += line->mmap_length;
 		} else {
 			estimated_size += line->cell_count * 2;  /* Rough estimate */
 		}
 	}
-	estimated_size = (estimated_size * editor.buffer.line_count) / sample_count;
+	estimated_size = (estimated_size * E_BUF->line_count) / sample_count;
 
 	if (estimated_size > AUTOSAVE_MAX_SIZE) {
 		log_debug("Skipping autosave: file too large (~%zu bytes)", estimated_size);

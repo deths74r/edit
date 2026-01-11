@@ -1203,6 +1203,9 @@ struct editor_state {
  */
 #define CTX(e)     (&(e)->contexts[(e)->active_context])
 #define BUF(e)     (&CTX(e)->buffer)
+/* Shortcuts assuming global editor variable (declared in edit.c) */
+#define E_CTX      (&editor.contexts[editor.active_context])
+#define E_BUF      (&E_CTX->buffer)
 
 /*
  * A single search match location.
