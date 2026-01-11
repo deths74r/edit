@@ -54,6 +54,8 @@ static struct save_as_state save_as = {0};
 
 /* Quit prompt state */
 static struct quit_prompt_state quit_prompt = {0};
+/* Close prompt state */
+static struct close_prompt_state close_prompt = {0};
 
 /*****************************************************************************
  * Editor Initialization
@@ -153,6 +155,7 @@ int editor_context_new(void)
 {
 	if (editor.context_count >= MAX_CONTEXTS) {
 		editor_set_status_message("Maximum buffers reached (%d)", MAX_CONTEXTS);
+		debug_log("context_new: FAILED - max contexts reached");
 		return -1;
 	}
 	uint32_t index = editor.context_count;
@@ -160,6 +163,7 @@ int editor_context_new(void)
 	editor.context_count++;
 	/* Recalculate screen size (tab bar may appear) */
 	editor_update_screen_size();
+	debug_log("context_new: index=%u, total=%u", index, editor.context_count);
 	return (int)index;
 }
 /*
@@ -169,21 +173,31 @@ int editor_context_new(void)
 bool editor_context_close(uint32_t index)
 {
 	if (index >= editor.context_count) {
+		debug_log("context_close: FAILED - invalid index %u (count=%u)", index, editor.context_count);
 		return false;
 	}
 	struct editor_context *ctx = &editor.contexts[index];
 	/* Can't close the last context - always keep at least one */
 	if (editor.context_count == 1) {
 		editor_set_status_message("Cannot close last buffer");
+		debug_log("context_close: FAILED - cannot close last context");
 		return false;
 	}
+	debug_log("context_close: index=%u, filename=%s, lines=%u, modified=%d",
+	          index,
+	          ctx->buffer.filename ? ctx->buffer.filename : "(unnamed)",
+	          ctx->buffer.line_count,
+	          ctx->buffer.is_modified);
 	/* Free the buffer */
 	buffer_free(&ctx->buffer);
+	debug_log("context_close: buffer_free completed");
 	/* Shift remaining contexts down */
 	for (uint32_t i = index; i < editor.context_count - 1; i++) {
 		editor.contexts[i] = editor.contexts[i + 1];
 	}
 	editor.context_count--;
+	/* Zero out the now-unused slot to prevent stale pointer access */
+	memset(&editor.contexts[editor.context_count], 0, sizeof(struct editor_context));
 	/* Adjust active context if needed */
 	if (editor.active_context >= editor.context_count) {
 		editor.active_context = editor.context_count - 1;
@@ -204,6 +218,7 @@ bool editor_context_close(uint32_t index)
 	editor_update_screen_size();
 	/* Signal main loop to skip this iteration */
 	editor.context_just_closed = true;
+	debug_log("context_close: SUCCESS - new count=%u, active=%u", editor.context_count, editor.active_context);
 	return true;
 }
 /*
@@ -284,6 +299,7 @@ void editor_perform_exit(void)
 	buffer_free(E_BUF);
 	themes_free();
 	free(active_theme.name);
+	debug_log_close();
 	exit(0);
 }
 
@@ -923,6 +939,57 @@ bool quit_prompt_handle_key(int key)
 	}
 
 	editor_set_status_message("Unsaved changes! Save before quitting? [y]es [n]o [c]ancel: ");
+	return true;
+}
+/*****************************************************************************
+ * Close Prompt
+ *****************************************************************************/
+/*
+ * Enter close prompt mode when closing a tab with unsaved changes.
+ */
+void close_prompt_enter(void)
+{
+	close_prompt.active = true;
+	editor_set_status_message("Unsaved changes! Save before closing? [y]es [n]o [c]ancel: ");
+}
+/*
+ * Check if close prompt is active.
+ */
+bool close_prompt_is_active(void)
+{
+	return close_prompt.active;
+}
+/*
+ * Handle input in close prompt mode.
+ */
+bool close_prompt_handle_key(int key)
+{
+	if (!close_prompt.active) {
+		return false;
+	}
+	if (key == 'y' || key == 'Y') {
+		close_prompt.active = false;
+		if (E_BUF->filename == NULL) {
+			editor_set_status_message("No filename. Use Ctrl-Shift-S to Save As, then close.");
+			return true;
+		}
+		editor_save();
+		if (!E_BUF->is_modified) {
+			editor_context_close(editor.active_context);
+		}
+		return true;
+	}
+	if (key == 'n' || key == 'N') {
+		close_prompt.active = false;
+		editor_context_close(editor.active_context);
+		return true;
+	}
+	if (key == 'c' || key == 'C' || key == '\x1b' || key == CONTROL_KEY('q')) {
+		close_prompt.active = false;
+		editor_set_status_message("Close cancelled");
+		return true;
+	}
+	editor_set_status_message("Unsaved changes! Save before closing? [y]es [n]o [c]ancel: ");
 	return true;
 }
 

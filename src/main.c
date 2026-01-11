@@ -99,6 +99,7 @@ int main(int argument_count, char *argument_values[])
 	signal(SIGILL, fatal_signal_handler);
 
 	editor_init();
+	debug_log_init();
 	keybinding_init();
 	editor_update_screen_size();
 
@@ -166,7 +167,7 @@ int main(int argument_count, char *argument_values[])
 	}
 
 	editor_update_gutter_width();
-	editor_set_status_message("Ctrl+O Open | Ctrl+S Save | Ctrl+Q Quit | F1 Help");
+	editor_set_status_message("Ctrl+O Open | Ctrl+S Save | Ctrl+Q Close | F1 Help");
 
 	/* Track last check times */
 	static time_t last_autosave_check = 0;

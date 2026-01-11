@@ -1004,9 +1004,26 @@ void fatal_signal_handler(int sig)
 	}
 	fprintf(stderr, "\nedit: fatal signal %s\n", sig_name);
 
+	/* Log crash to debug.log */
+	debug_log("CRASH: signal=%s", sig_name);
+	debug_log("CRASH: context_count=%u, active_context=%u",
+	          editor.context_count, editor.active_context);
+
 	/* Print editor state for debugging */
 	fprintf(stderr, "edit: state: context_count=%u, active_context=%u\n",
 	        editor.context_count, editor.active_context);
+
+	/* Log all context states to debug.log */
+	for (uint32_t i = 0; i < editor.context_count && i < MAX_CONTEXTS; i++) {
+		struct buffer *buf = &editor.contexts[i].buffer;
+		debug_log("CRASH: context[%u]: filename=%s, lines=%u, lines_ptr=%p, modified=%d",
+		          i,
+		          buf->filename ? buf->filename : "(unnamed)",
+		          buf->line_count,
+		          (void *)buf->lines,
+		          buf->is_modified);
+	}
+
 	if (editor.context_count > 0 && editor.active_context < editor.context_count) {
 		struct buffer *buf = &editor.contexts[editor.active_context].buffer;
 		fprintf(stderr, "edit: buffer: filename=%s, lines=%u, modified=%d\n",
@@ -1019,6 +1036,8 @@ void fatal_signal_handler(int sig)
 	int bt_size = backtrace(bt_buffer, 64);
 	fprintf(stderr, "edit: backtrace (%d frames):\n", bt_size);
 	backtrace_symbols_fd(bt_buffer, bt_size, STDERR_FILENO);
+
+	debug_log("CRASH: backtrace logged to stderr");
 
 	/* Attempt to save user's work */
 	emergency_save();
@@ -1161,10 +1180,12 @@ static void file_build_line_index(struct buffer *buffer)
 			line->mmap_offset = line_start;
 			line->mmap_length = line_end - line_start;
 			line_set_temperature(line, LINE_TEMPERATURE_COLD);
+			atomic_store(&line->warming_in_progress, false);
 			line->wrap_columns = NULL;
 			line->wrap_segment_count = 0;
 			line->wrap_cache_width = 0;
 			line->wrap_cache_mode = WRAP_NONE;
+			line->md_elements = NULL;
 
 			buffer->line_count++;
 			line_start = i + 1;
@@ -6140,8 +6161,8 @@ int __must_check render_refresh_screen(void)
 static bool editor_open_file(const char *path)
 {
 	/* Clear existing buffer */
+	debug_log("editor_open_file: clearing buffer for path=%s", path);
 	buffer_free(E_BUF);
-
 	/* Reset editor state */
 	E_CTX->cursor_row = 0;
 	E_CTX->cursor_column = 0;
@@ -7200,6 +7221,7 @@ execute_action(enum editor_action action)
 		if (E_BUF->is_modified) {
 			editor_set_status_message("Save changes? (y/n)");
 		}
+		debug_log("ACTION_NEW: clearing current buffer");
 		buffer_free(E_BUF);
 		buffer_init(E_BUF);
 		E_CTX->cursor_row = 0;
@@ -7479,7 +7501,21 @@ execute_action(enum editor_action action)
 		editor_context_next();
 		return true;
 	case ACTION_CONTEXT_CLOSE:
-		editor_context_close(editor.active_context);
+		if (editor.context_count == 1) {
+			/* Last tab - use quit behavior */
+			if (E_BUF->is_modified) {
+				quit_prompt_enter();
+			} else {
+				editor_perform_exit();
+			}
+		} else {
+			/* Multiple tabs - prompt if modified */
+			if (E_BUF->is_modified) {
+				close_prompt_enter();
+			} else {
+				editor_context_close(editor.active_context);
+			}
+		}
 		return true;
 	case ACTION_NEW_TAB: {
 		int idx = editor_context_new();
@@ -7565,6 +7601,8 @@ void editor_process_keypress(void)
 	if (goto_handle_key(key))
 		return;
 	if (quit_prompt_handle_key(key))
+		return;
+	if (close_prompt_handle_key(key))
 		return;
 	if (reload_prompt_handle_key(key))
 		return;

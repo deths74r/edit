@@ -318,6 +318,26 @@ static inline char * __must_check edit_strdup(const char *s)
 #endif
 
 /*****************************************************************************
+ * Debug Log File
+ *
+ * File-based debug logging for crash debugging. Writes to debug.log in the
+ * current directory. Each entry is timestamped and flushed immediately.
+ *****************************************************************************/
+
+/* Debug log file handle - opened at startup, written to on key events */
+extern FILE *debug_log_file;
+
+/* Initialize debug logging to file */
+void debug_log_init(void);
+
+/* Close debug log file */
+void debug_log_close(void);
+
+/* Write timestamped message to debug log */
+void debug_log(const char *fmt, ...);
+
+/*****************************************************************************
+ * Error String Function
  * Error String Function
  *
  * Convert error codes (both standard and custom) to human-readable strings.

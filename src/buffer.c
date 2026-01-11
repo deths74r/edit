@@ -54,6 +54,8 @@ void line_free(struct line *line)
 	if (line == NULL)
 		return;
 
+	debug_log("line_free: cells=%p, wrap_columns=%p, md_elements=%p",
+	          (void *)line->cells, (void *)line->wrap_columns, (void *)line->md_elements);
 	free(line->cells);
 	line->cells = NULL;
 	line->cell_count = 0;
@@ -61,6 +63,7 @@ void line_free(struct line *line)
 	line->mmap_offset = 0;
 	line->mmap_length = 0;
 	line_set_temperature(line, LINE_TEMPERATURE_COLD);
+	debug_log("line_free: freeing wrap_columns");
 	free(line->wrap_columns);
 	line->wrap_columns = NULL;
 	line->wrap_segment_count = 0;
@@ -68,10 +71,12 @@ void line_free(struct line *line)
 	line->wrap_cache_mode = WRAP_NONE;
 	/* Free markdown element cache */
 	if (line->md_elements) {
+		debug_log("line_free: freeing md_elements");
 		free(line->md_elements->elements);
 		free(line->md_elements);
 		line->md_elements = NULL;
 	}
+	debug_log("line_free: done");
 }
 
 /*
@@ -405,25 +410,39 @@ void buffer_init(struct buffer *buffer)
  */
 void buffer_free(struct buffer *buffer)
 {
-	if (buffer == NULL)
+	if (buffer == NULL) {
+		debug_log("buffer_free: called with NULL buffer");
 		return;
+	}
+
+	debug_log("buffer_free: filename=%s, lines=%u, lines_ptr=%p",
+	          buffer->filename ? buffer->filename : "(null)",
+	          buffer->line_count,
+	          (void *)buffer->lines);
 
 	/* Free undo history */
+	debug_log("buffer_free: freeing undo history");
 	undo_history_free(&buffer->undo_history);
 
 	/* Free all lines if lines array exists */
+	debug_log("buffer_free: freeing %u lines", buffer->line_count);
 	if (buffer->lines != NULL) {
 		for (uint32_t index = 0; index < buffer->line_count; index++) {
+			debug_log("buffer_free: line[%u] md_elements=%p", index, (void *)buffer->lines[index].md_elements);
 			line_free(&buffer->lines[index]);
 		}
+		debug_log("buffer_free: freeing lines array");
 		free(buffer->lines);
 	}
+	debug_log("buffer_free: freeing filename");
 	free(buffer->filename);
 	/* Unmap file if mapped */
 	if (buffer->mmap_base != NULL) {
+		debug_log("buffer_free: unmapping file");
 		munmap(buffer->mmap_base, buffer->mmap_size);
 	}
 	if (buffer->file_descriptor >= 0) {
+		debug_log("buffer_free: closing fd");
 		close(buffer->file_descriptor);
 	}
 
@@ -434,6 +453,7 @@ void buffer_free(struct buffer *buffer)
 	buffer->file_descriptor = -1;
 	buffer->mmap_base = NULL;
 	buffer->mmap_size = 0;
+	debug_log("buffer_free: completed");
 }
 
 /*

@@ -12,6 +12,10 @@
 
 #include "error.h"
 
+#include <stdarg.h>
+#include <time.h>
+#include <unistd.h>
+
 /*****************************************************************************
  * Error Code to String Conversion
  *
@@ -82,4 +86,63 @@ const char *edit_strerror(int err)
 
 	/* Unknown error code */
 	return "Unknown error";
+}
+
+/*****************************************************************************
+ * Debug Log File
+ *
+ * File-based debug logging for crash debugging. Writes to debug.log in the
+ * current directory. Each entry is timestamped and flushed immediately.
+ *****************************************************************************/
+FILE *debug_log_file = NULL;
+/*
+ * debug_log_init - Initialize debug logging to file.
+ *
+ * Opens debug.log in append mode in the current directory.
+ * If the file cannot be opened, logging is silently disabled.
+ */
+void debug_log_init(void)
+{
+	debug_log_file = fopen("debug.log", "a");
+	if (debug_log_file) {
+		debug_log("=== edit started (pid %d) ===", getpid());
+	}
+}
+/*
+ * debug_log_close - Close debug log file.
+ *
+ * Writes a closing message and closes the file handle.
+ */
+void debug_log_close(void)
+{
+	if (debug_log_file) {
+		debug_log("=== edit exiting ===");
+		fclose(debug_log_file);
+		debug_log_file = NULL;
+	}
+}
+/*
+ * debug_log - Write timestamped message to debug log.
+ * @fmt: printf-style format string
+ * @...: format arguments
+ *
+ * Each message is prefixed with HH:MM:SS timestamp and flushed
+ * immediately to ensure data is captured before potential crashes.
+ */
+void debug_log(const char *fmt, ...)
+{
+	if (!debug_log_file)
+		return;
+	/* Timestamp */
+	time_t now = time(NULL);
+	struct tm *tm_info = localtime(&now);
+	fprintf(debug_log_file, "[%02d:%02d:%02d] ",
+	        tm_info->tm_hour, tm_info->tm_min, tm_info->tm_sec);
+	/* Message */
+	va_list args;
+	va_start(args, fmt);
+	vfprintf(debug_log_file, fmt, args);
+	va_end(args);
+	fprintf(debug_log_file, "\n");
+	fflush(debug_log_file);  /* Ensure written before potential crash */
 }

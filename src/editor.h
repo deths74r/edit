@@ -251,6 +251,22 @@ void quit_prompt_enter(void);
  * Returns true if key was handled.
  */
 bool quit_prompt_handle_key(int key);
+/*****************************************************************************
+ * Close Prompt
+ *****************************************************************************/
+/*
+ * Enter close prompt mode when closing a tab with unsaved changes.
+ */
+void close_prompt_enter(void);
+/*
+ * Check if close prompt is active.
+ */
+bool close_prompt_is_active(void);
+/*
+ * Handle input in close prompt mode.
+ * Returns true if key was handled.
+ */
+bool close_prompt_handle_key(int key);
 
 /*****************************************************************************
  * Reload Prompt

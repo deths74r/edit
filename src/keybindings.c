@@ -161,7 +161,7 @@ keybinding_load_defaults(void)
 	binding_count = 0;
 
 	/* File operations */
-	keybinding_add(CONTROL_KEY('q'), ACTION_QUIT);
+	keybinding_add(CONTROL_KEY('q'), ACTION_CONTEXT_CLOSE);
 	keybinding_add(CONTROL_KEY('s'), ACTION_SAVE);
 	keybinding_add(KEY_ALT_SHIFT_S, ACTION_SAVE_AS);
 	keybinding_add(KEY_CTRL_O, ACTION_OPEN);
@@ -239,7 +239,6 @@ keybinding_load_defaults(void)
 	/* Buffer switching */
 	keybinding_add(KEY_ALT_ARROW_LEFT, ACTION_CONTEXT_PREV);
 	keybinding_add(KEY_ALT_ARROW_RIGHT, ACTION_CONTEXT_NEXT);
-	keybinding_add(KEY_CTRL_W, ACTION_CONTEXT_CLOSE);
 
 	/* Special keys */
 	keybinding_add(27, ACTION_ESCAPE);  /* ESC */

@@ -1376,6 +1376,10 @@ struct save_as_state {
 struct quit_prompt_state {
 	bool active;
 };
+/* Close prompt state - shown when closing tab with unsaved changes. */
+struct close_prompt_state {
+	bool active;
+};
 
 /* Reload prompt state - shown when file changes externally. */
 struct reload_prompt_state {
