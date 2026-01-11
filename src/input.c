@@ -203,6 +203,7 @@ int input_read_key(void)
 				case 'l': case 'L': return KEY_ALT_L;
 				case 't': case 'T': return KEY_ALT_T;
 				case 'm': case 'M': return KEY_ALT_M;
+				case 'o': case 'O': return KEY_ALT_O;
 				default: return '\x1b';
 			}
 		}
@@ -249,6 +250,32 @@ int input_read_key(void)
 						}
 						if (final == '~' && modifier == '2') {  /* Shift modifier */
 							if (code == 13) return KEY_SHIFT_F3;
+						}
+						/* CSI u mode: \x1b[codepoint;modifieru */
+						if (final == 'u' && modifier == '6') {  /* Ctrl+Shift */
+							if (code == 78 || code == 110) return KEY_CTRL_SHIFT_N;
+							if (code == 79 || code == 111) return KEY_CTRL_SHIFT_O;
+						}
+					} else if (digit3 >= '0' && digit3 <= '9') {
+						/* Three-digit code: \x1b[110;6u for CSI u mode */
+						char next;
+						if (read(STDIN_FILENO, &next, 1) != 1) {
+							return '\x1b';
+						}
+						int code3 = code * 10 + (digit3 - '0');
+						if (next == ';') {
+							char modifier, final;
+							if (read(STDIN_FILENO, &modifier, 1) != 1) {
+								return '\x1b';
+							}
+							if (read(STDIN_FILENO, &final, 1) != 1) {
+								return '\x1b';
+							}
+							/* CSI u mode: \x1b[codepoint;modifieru */
+							if (final == 'u' && modifier == '6') {  /* Ctrl+Shift */
+								if (code3 == 110) return KEY_CTRL_SHIFT_N;  /* 'n' */
+								if (code3 == 111) return KEY_CTRL_SHIFT_O;  /* 'o' */
+							}
 						}
 					}
 				} else if (sequence[2] == ';') {

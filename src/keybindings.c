@@ -96,6 +96,8 @@ static const struct {
 	{ ACTION_CONTEXT_PREV, "context_prev" },
 	{ ACTION_CONTEXT_NEXT, "context_next" },
 	{ ACTION_CONTEXT_CLOSE, "context_close" },
+	{ ACTION_NEW_TAB, "new_tab" },
+	{ ACTION_OPEN_TAB, "open_tab" },
 	{ ACTION_NONE, NULL }
 };
 
@@ -164,6 +166,8 @@ keybinding_load_defaults(void)
 	keybinding_add(KEY_ALT_SHIFT_S, ACTION_SAVE_AS);
 	keybinding_add(KEY_CTRL_O, ACTION_OPEN);
 	keybinding_add(KEY_CTRL_N, ACTION_NEW);
+	keybinding_add(KEY_ALT_N, ACTION_NEW_TAB);
+	keybinding_add(KEY_ALT_O, ACTION_OPEN_TAB);
 
 	/* Edit operations */
 	keybinding_add(CONTROL_KEY('z'), ACTION_UNDO);
@@ -398,6 +402,7 @@ keybinding_parse_key(const char *str)
 			case 'm': return KEY_ALT_M;
 			case 't': return KEY_ALT_T;
 			case 'n': return KEY_ALT_N;
+			case 'o': return KEY_ALT_O;
 			case 'p': return KEY_ALT_P;
 			case 'r': return KEY_ALT_R;
 			case 'u': return KEY_ALT_U;
@@ -502,6 +507,7 @@ keybinding_key_string(enum editor_action action, char *buffer, size_t size)
 		case KEY_ALT_M: snprintf(buffer, size, "Alt+M"); return buffer;
 		case KEY_ALT_T: snprintf(buffer, size, "Alt+T"); return buffer;
 		case KEY_ALT_N: snprintf(buffer, size, "Alt+N"); return buffer;
+		case KEY_ALT_O: snprintf(buffer, size, "Alt+O"); return buffer;
 		case KEY_ALT_P: snprintf(buffer, size, "Alt+P"); return buffer;
 		case KEY_ALT_R: snprintf(buffer, size, "Alt+R"); return buffer;
 		case KEY_ALT_U: snprintf(buffer, size, "Alt+U"); return buffer;
@@ -521,6 +527,8 @@ keybinding_key_string(enum editor_action action, char *buffer, size_t size)
 		case KEY_CTRL_N: snprintf(buffer, size, "Ctrl+N"); return buffer;
 		case KEY_CTRL_T: snprintf(buffer, size, "Ctrl+T"); return buffer;
 		case KEY_CTRL_W: snprintf(buffer, size, "Ctrl+W"); return buffer;
+		case KEY_CTRL_SHIFT_N: snprintf(buffer, size, "Ctrl+Shift+N"); return buffer;
+		case KEY_CTRL_SHIFT_O: snprintf(buffer, size, "Ctrl+Shift+O"); return buffer;
 		case 27: snprintf(buffer, size, "Esc"); return buffer;
 		case '\t': snprintf(buffer, size, "Tab"); return buffer;
 		case '\r': snprintf(buffer, size, "Enter"); return buffer;

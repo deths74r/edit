@@ -263,6 +263,8 @@ enum key_code {
 	KEY_CTRL_HOME = -50,
 	KEY_CTRL_END = -49,
 	KEY_CTRL_W = -46,
+	KEY_CTRL_SHIFT_N = -43,
+	KEY_CTRL_SHIFT_O = -42,
 
 	/* Function keys. */
 	KEY_F1 = -45,
@@ -292,6 +294,7 @@ enum key_code {
 	KEY_ALT_U = -65,
 	KEY_ALT_M = -71,
 	KEY_ALT_T = -72,
+	KEY_ALT_O = -74,
 
 	/* Shift+Tab (backtab). */
 	KEY_SHIFT_TAB = -78,
@@ -406,6 +409,8 @@ enum editor_action {
 	ACTION_CONTEXT_PREV,
 	ACTION_CONTEXT_NEXT,
 	ACTION_CONTEXT_CLOSE,
+	ACTION_NEW_TAB,
+	ACTION_OPEN_TAB,
 
 	/* Special */
 	ACTION_ESCAPE,

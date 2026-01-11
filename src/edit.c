@@ -7381,6 +7381,22 @@ execute_action(enum editor_action action)
 	case ACTION_CONTEXT_CLOSE:
 		editor_context_close(editor.active_context);
 		return true;
+	case ACTION_NEW_TAB: {
+		int idx = editor_context_new();
+		if (idx >= 0) {
+			editor_context_switch((uint32_t)idx);
+			editor_set_status_message("New buffer");
+		}
+		return true;
+	}
+	case ACTION_OPEN_TAB: {
+		int idx = editor_context_new();
+		if (idx >= 0) {
+			editor_context_switch((uint32_t)idx);
+			editor_command_open_file();
+		}
+		return true;
+	}
 
 	/* Special */
 	case ACTION_ESCAPE:
