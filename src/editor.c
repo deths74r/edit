@@ -102,6 +102,8 @@ void editor_init(void)
 	editor.fuzzy_max_depth = 10;
 	editor.fuzzy_max_files = 10000;
 	editor.fuzzy_case_sensitive = false;
+	editor.help_context_index = -1;
+	editor.previous_context_before_help = 0;
 
 	/* Initialize theme system */
 	themes_load();
@@ -120,6 +122,137 @@ void editor_init(void)
 		log_warn("Async search/replace disabled: %s", edit_strerror(err));
 	}
 }
+/*****************************************************************************
+ * Context Management
+ *****************************************************************************/
+/*
+ * Initialize a context to default state.
+ */
+static void context_init(struct editor_context *ctx)
+{
+	buffer_init(&ctx->buffer);
+	ctx->cursor_row = 0;
+	ctx->cursor_column = 0;
+	ctx->row_offset = 0;
+	ctx->column_offset = 0;
+	ctx->gutter_width = 0;
+	ctx->selection_anchor_row = 0;
+	ctx->selection_anchor_column = 0;
+	ctx->selection_active = false;
+	ctx->cursor_count = 0;
+	ctx->primary_cursor = 0;
+	ctx->hybrid_mode = false;
+	ctx->link_preview_active = false;
+	memset(&ctx->search, 0, sizeof(ctx->search));
+}
+/*
+ * Create a new editor context.
+ * Returns the index of the new context, or -1 on error.
+ */
+int editor_context_new(void)
+{
+	if (editor.context_count >= MAX_CONTEXTS) {
+		editor_set_status_message("Maximum buffers reached (%d)", MAX_CONTEXTS);
+		return -1;
+	}
+	uint32_t index = editor.context_count;
+	context_init(&editor.contexts[index]);
+	editor.context_count++;
+	/* Recalculate screen size (tab bar may appear) */
+	editor_update_screen_size();
+	return (int)index;
+}
+/*
+ * Close a context by index.
+ * Returns true if closed, false if cancelled or invalid.
+ */
+bool editor_context_close(uint32_t index)
+{
+	if (index >= editor.context_count) {
+		return false;
+	}
+	struct editor_context *ctx = &editor.contexts[index];
+	/* Can't close the last context - always keep at least one */
+	if (editor.context_count == 1) {
+		editor_set_status_message("Cannot close last buffer");
+		return false;
+	}
+	/* Free the buffer */
+	buffer_free(&ctx->buffer);
+	/* Shift remaining contexts down */
+	for (uint32_t i = index; i < editor.context_count - 1; i++) {
+		editor.contexts[i] = editor.contexts[i + 1];
+	}
+	editor.context_count--;
+	/* Adjust active context if needed */
+	if (editor.active_context >= editor.context_count) {
+		editor.active_context = editor.context_count - 1;
+	} else if (editor.active_context > index) {
+		editor.active_context--;
+	}
+	/* Adjust help context index if needed */
+	if (editor.help_context_index >= 0) {
+		if ((uint32_t)editor.help_context_index == index) {
+			/* Closing the help context */
+			editor.help_context_index = -1;
+		} else if ((uint32_t)editor.help_context_index > index) {
+			/* Help context shifted down */
+			editor.help_context_index--;
+		}
+	}
+	/* Recalculate screen size (tab bar may disappear) */
+	editor_update_screen_size();
+	return true;
+}
+/*
+ * Switch to a context by index.
+ */
+void editor_context_switch(uint32_t index)
+{
+	if (index >= editor.context_count) {
+		return;
+	}
+	if (index == editor.active_context) {
+		return;  /* Already active */
+	}
+	editor.active_context = index;
+	/* Update gutter width for new buffer */
+	editor_update_gutter_width();
+	/* Update autosave path */
+	autosave_update_path();
+	const char *filename = E_BUF->filename ? E_BUF->filename : "[No Name]";
+	editor_set_status_message("Switched to: %s", filename);
+}
+/*
+ * Switch to previous context.
+ */
+void editor_context_prev(void)
+{
+	if (editor.context_count <= 1) {
+		return;
+	}
+	uint32_t new_index;
+	if (editor.active_context == 0) {
+		new_index = editor.context_count - 1;  /* Wrap to end */
+	} else {
+		new_index = editor.active_context - 1;
+	}
+	editor_context_switch(new_index);
+}
+/*
+ * Switch to next context.
+ */
+void editor_context_next(void)
+{
+	if (editor.context_count <= 1) {
+		return;
+	}
+	uint32_t new_index = (editor.active_context + 1) % editor.context_count;
+	editor_context_switch(new_index);
+}
+/*****************************************************************************
+ * Editor Lifecycle
+ *****************************************************************************/
 
 /*
  * Perform clean exit.
@@ -192,7 +325,12 @@ void editor_update_screen_size(void)
 	uint32_t rows, cols;
 	if (terminal_get_window_size(&rows, &cols) == 0) {
 		/* Reserve rows for status and message bars */
-		editor.screen_rows = rows - STATUS_BAR_ROWS;
+		uint32_t reserved = STATUS_BAR_ROWS;
+		/* Add tab bar row when multiple buffers open */
+		if (editor.context_count > 1) {
+			reserved += TAB_BAR_ROWS;
+		}
+		editor.screen_rows = rows - reserved;
 		editor.screen_columns = cols;
 	}
 	editor_update_gutter_width();

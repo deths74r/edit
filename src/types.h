@@ -156,6 +156,7 @@
 /* Window constraints */
 #define MINIMUM_WINDOW_SIZE 10
 #define STATUS_BAR_ROWS 2
+#define TAB_BAR_ROWS 1
 /* Gutter (line number column) */
 #define MINIMUM_GUTTER_DIGITS 1
 #define GUTTER_PADDING 1
@@ -261,6 +262,7 @@ enum key_code {
 	KEY_CTRL_N = -61,
 	KEY_CTRL_HOME = -50,
 	KEY_CTRL_END = -49,
+	KEY_CTRL_W = -46,
 
 	/* Function keys. */
 	KEY_F1 = -45,
@@ -279,6 +281,8 @@ enum key_code {
 	KEY_ALT_D = -83,
 	KEY_ALT_ARROW_UP = -82,
 	KEY_ALT_ARROW_DOWN = -81,
+	KEY_ALT_ARROW_LEFT = -76,
+	KEY_ALT_ARROW_RIGHT = -75,
 	KEY_ALT_SLASH = -80,
 	KEY_ALT_A = -79,
 	KEY_ALT_BRACKET = -73,
@@ -398,6 +402,10 @@ enum editor_action {
 	ACTION_THEME_PICKER,
 	ACTION_CHECK_UPDATES,
 	ACTION_FORMAT_TABLES,
+	/* Buffer/Context switching */
+	ACTION_CONTEXT_PREV,
+	ACTION_CONTEXT_NEXT,
+	ACTION_CONTEXT_CLOSE,
 
 	/* Special */
 	ACTION_ESCAPE,
@@ -1192,9 +1200,9 @@ struct editor_state {
 	bool hybrid_mode;            /* True = hybrid mode, false = raw mode */
 	char link_url_preview[512];  /* URL to display in status bar */
 	bool link_preview_active;    /* True if cursor is on a link */
-	/* Help file toggle state. */
-	char *previous_file;         /* File open before help was shown */
-	bool help_file_open;         /* True if currently viewing help */
+	/* Help context tracking (for multi-buffer help toggle). */
+	int32_t help_context_index;          /* Index of help context, -1 if none */
+	uint32_t previous_context_before_help;  /* Context to return to when closing help */
 };
 
 /*

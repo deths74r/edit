@@ -31,6 +31,31 @@ void editor_init(void);
 void editor_perform_exit(void);
 
 /*****************************************************************************
+ * Buffer Context Management
+ *****************************************************************************/
+/*
+ * Create a new editor context (buffer slot).
+ * Returns the index of the new context, or -1 if MAX_CONTEXTS reached.
+ */
+int editor_context_new(void);
+/*
+ * Close the context at the given index.
+ * Prompts to save if modified. Returns false if user cancelled.
+ */
+bool editor_context_close(uint32_t index);
+/*
+ * Switch to the context at the given index.
+ */
+void editor_context_switch(uint32_t index);
+/*
+ * Switch to the previous context (wraps around).
+ */
+void editor_context_prev(void);
+/*
+ * Switch to the next context (wraps around).
+ */
+void editor_context_next(void);
+/*****************************************************************************
  * Status Messages
  *****************************************************************************/
 

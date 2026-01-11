@@ -288,6 +288,8 @@ int input_read_key(void)
 							switch (final) {
 								case 'A': return KEY_ALT_ARROW_UP;
 								case 'B': return KEY_ALT_ARROW_DOWN;
+								case 'C': return KEY_ALT_ARROW_RIGHT;
+								case 'D': return KEY_ALT_ARROW_LEFT;
 							}
 						}
 					} else if ((sequence[1] == '5' || sequence[1] == '6') &&
@@ -375,6 +377,9 @@ int input_read_key(void)
 	}
 	if (character == CONTROL_KEY('n')) {
 		return KEY_CTRL_N;
+	}
+	if (character == CONTROL_KEY('w')) {
+		return KEY_CTRL_W;
 	}
 
 	return character;

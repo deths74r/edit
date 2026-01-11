@@ -5598,6 +5598,110 @@ static void render_draw_rows(struct output_buffer *output)
 }
 
 /*
+ * Draw the tab bar showing all open buffers.
+ * Only drawn when there's more than one context open.
+ */
+static void render_draw_tab_bar(struct output_buffer *output)
+{
+	if (editor.context_count <= 1) {
+		return;  /* No tab bar for single buffer */
+	}
+	char escape[128];
+	int current_pos = 0;
+	/* Tab bar background - use darker shade of status bar */
+	int bg_r = active_theme.status.bg.red * 2 / 3;
+	int bg_g = active_theme.status.bg.green * 2 / 3;
+	int bg_b = active_theme.status.bg.blue * 2 / 3;
+	snprintf(escape, sizeof(escape), "\x1b[0m\x1b[48;2;%d;%d;%dm",
+	         bg_r, bg_g, bg_b);
+	output_buffer_append_string(output, escape);
+	/* Draw each tab */
+	for (uint32_t i = 0; i < editor.context_count; i++) {
+		struct editor_context *ctx = &editor.contexts[i];
+		struct buffer *buf = &ctx->buffer;
+		/* Get display name (basename of filename or "[No Name]") */
+		const char *name = buf->filename;
+		const char *display_name;
+		if (name) {
+			/* Extract basename */
+			const char *slash = strrchr(name, '/');
+			display_name = slash ? slash + 1 : name;
+		} else {
+			display_name = "[No Name]";
+		}
+		/* Truncate long names */
+		char name_buf[32];
+		size_t name_len = strlen(display_name);
+		if (name_len > 20) {
+			snprintf(name_buf, sizeof(name_buf), "%.17s...", display_name);
+			display_name = name_buf;
+		}
+		/* Calculate tab width */
+		int tab_width = (int)strlen(display_name) + 3;  /* " name " + modified indicator */
+		if (buf->is_modified) tab_width += 2;  /* "[+]" - 1 for the space we already have */
+		/* Check if tab fits */
+		if (current_pos + tab_width > (int)editor.screen_columns - 1) {
+			/* Tab doesn't fit, show "..." indicator */
+			int remaining = (int)editor.screen_columns - current_pos;
+			if (remaining > 3) {
+				output_buffer_append_string(output, "...");
+				current_pos += 3;
+			}
+			break;
+		}
+		/* Active vs inactive tab styling */
+		if (i == editor.active_context) {
+			/* Active tab - bright background */
+			snprintf(escape, sizeof(escape),
+			         "\x1b[48;2;%u;%u;%um\x1b[38;2;%u;%u;%um",
+			         active_theme.status.bg.red,
+			         active_theme.status.bg.green,
+			         active_theme.status.bg.blue,
+			         active_theme.status.fg.red,
+			         active_theme.status.fg.green,
+			         active_theme.status.fg.blue);
+		} else {
+			/* Inactive tab - darker */
+			snprintf(escape, sizeof(escape),
+			         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%u;%u;%um",
+			         bg_r, bg_g, bg_b,
+			         active_theme.status.fg.red * 3 / 4,
+			         active_theme.status.fg.green * 3 / 4,
+			         active_theme.status.fg.blue * 3 / 4);
+		}
+		output_buffer_append_string(output, escape);
+		/* Draw tab content: " name [+]" */
+		output_buffer_append_char(output, ' ');
+		output_buffer_append_string(output, display_name);
+		current_pos += 1 + (int)strlen(display_name);
+		if (buf->is_modified) {
+			/* Modified indicator */
+			if (i == editor.active_context) {
+				snprintf(escape, sizeof(escape),
+				         "\x1b[38;2;%u;%u;%um",
+				         active_theme.status_modified.fg.red,
+				         active_theme.status_modified.fg.green,
+				         active_theme.status_modified.fg.blue);
+				output_buffer_append_string(output, escape);
+			}
+			output_buffer_append_string(output, "[+]");
+			current_pos += 3;
+		}
+		output_buffer_append_char(output, ' ');
+		current_pos++;
+		/* Restore tab bar background between tabs */
+		snprintf(escape, sizeof(escape), "\x1b[48;2;%d;%d;%dm", bg_r, bg_g, bg_b);
+		output_buffer_append_string(output, escape);
+	}
+	/* Fill rest of row */
+	while (current_pos < (int)editor.screen_columns) {
+		output_buffer_append_char(output, ' ');
+		current_pos++;
+	}
+	output_buffer_append_string(output, ESCAPE_RESET);
+	output_buffer_append_string(output, "\r\n");
+}
+/*
  * Draw the status bar using theme colors. Shows the filename (or
  * "[No Name]") on the left with a [+] indicator if modified, and the
  * cursor position (current line / total lines) on the right.
@@ -5864,6 +5968,7 @@ int __must_check render_refresh_screen(void)
 	snprintf(bg_escape, sizeof(bg_escape), "\x1b[48;2;%d;%d;%dm",
 	         active_theme.background.red, active_theme.background.green, active_theme.background.blue);
 	output_buffer_append_string(&output, bg_escape);
+	render_draw_tab_bar(&output);
 
 	render_draw_rows(&output);
 	render_draw_status_bar(&output);
@@ -5910,6 +6015,10 @@ int __must_check render_refresh_screen(void)
 		} else {
 			cursor_screen_col = E_CTX->gutter_width + 1;
 		}
+	}
+	/* Account for tab bar row when multiple buffers open */
+	if (editor.context_count > 1) {
+		cursor_screen_row += TAB_BAR_ROWS;
 	}
 
 	snprintf(cursor_position, sizeof(cursor_position), "\x1b[%u;%uH",
@@ -6005,34 +6114,43 @@ static void editor_toggle_help(void)
 		return;
 	}
 	snprintf(help_path, sizeof(help_path), "%s%s", home, HELP_FILE);
-	if (editor.help_file_open) {
-		/* Close help - return to previous file */
-		if (editor.previous_file) {
-			editor_open_file(editor.previous_file);
-			free(editor.previous_file);
-			editor.previous_file = NULL;
-		} else {
-			/* No previous file - just create new buffer */
-			buffer_free(E_BUF);
-			buffer_init(E_BUF);
-			E_CTX->cursor_row = 0;
-			E_CTX->cursor_column = 0;
-		}
-		editor.help_file_open = false;
+
+	/* Check if we're currently in the help context */
+	if (editor.help_context_index >= 0 &&
+	    editor.active_context == (uint32_t)editor.help_context_index) {
+		/* Switch back to previous context */
+		editor_context_switch(editor.previous_context_before_help);
+		editor_set_status_message("Returned from help");
 	} else {
-		/* Open help - save current file path first */
-		if (E_BUF->filename) {
-			free(editor.previous_file);
-			editor.previous_file = strdup(E_BUF->filename);
-		} else {
-			free(editor.previous_file);
-			editor.previous_file = NULL;
-		}
-		if (editor_open_file(help_path)) {
-			editor.help_file_open = true;
+		/* Save current context and open/switch to help */
+		editor.previous_context_before_help = editor.active_context;
+
+		if (editor.help_context_index >= 0) {
+			/* Help context already exists, just switch to it */
+			editor_context_switch((uint32_t)editor.help_context_index);
 			editor_set_status_message("Press F1 to close help");
 		} else {
-			editor_set_status_message("Help file not found: %s", help_path);
+			/* Create new help context */
+			int new_index = editor_context_new();
+			if (new_index < 0) {
+				editor_set_status_message("Too many buffers open");
+				return;
+			}
+			editor.help_context_index = new_index;
+			editor_context_switch((uint32_t)new_index);
+
+			/* Load help file into new context */
+			int ret = file_open(E_BUF, help_path);
+			if (ret != 0) {
+				editor_set_status_message("Help file not found: %s", help_path);
+				/* Close the help context we just created */
+				editor_context_close((uint32_t)editor.help_context_index);
+				editor.help_context_index = -1;
+				editor_context_switch(editor.previous_context_before_help);
+				return;
+			}
+			editor_update_gutter_width();
+			editor_set_status_message("Press F1 to close help");
 		}
 	}
 }
@@ -7252,6 +7370,16 @@ execute_action(enum editor_action action)
 		} else {
 			editor_set_status_message("Table formatting only available in markdown files");
 		}
+		return true;
+	/* Buffer/Context Switching */
+	case ACTION_CONTEXT_PREV:
+		editor_context_prev();
+		return true;
+	case ACTION_CONTEXT_NEXT:
+		editor_context_next();
+		return true;
+	case ACTION_CONTEXT_CLOSE:
+		editor_context_close(editor.active_context);
 		return true;
 
 	/* Special */

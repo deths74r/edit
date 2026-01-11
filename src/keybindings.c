@@ -93,6 +93,9 @@ static const struct {
 	{ ACTION_INSERT_NEWLINE, "insert_newline" },
 	{ ACTION_BACKSPACE, "backspace" },
 	{ ACTION_DELETE, "delete" },
+	{ ACTION_CONTEXT_PREV, "context_prev" },
+	{ ACTION_CONTEXT_NEXT, "context_next" },
+	{ ACTION_CONTEXT_CLOSE, "context_close" },
 	{ ACTION_NONE, NULL }
 };
 
@@ -229,6 +232,10 @@ keybinding_load_defaults(void)
 	keybinding_add(KEY_CTRL_T, ACTION_THEME_PICKER);
 	keybinding_add(KEY_ALT_U, ACTION_CHECK_UPDATES);
 	keybinding_add(KEY_ALT_T, ACTION_FORMAT_TABLES);
+	/* Buffer switching */
+	keybinding_add(KEY_ALT_ARROW_LEFT, ACTION_CONTEXT_PREV);
+	keybinding_add(KEY_ALT_ARROW_RIGHT, ACTION_CONTEXT_NEXT);
+	keybinding_add(KEY_CTRL_W, ACTION_CONTEXT_CLOSE);
 
 	/* Special keys */
 	keybinding_add(27, ACTION_ESCAPE);  /* ESC */
@@ -353,12 +360,14 @@ keybinding_parse_key(const char *str)
 	if (strcasecmp(str, "Left") == 0 || strcasecmp(str, "ArrowLeft") == 0) {
 		if (ctrl && shift) return KEY_CTRL_SHIFT_ARROW_LEFT;
 		if (ctrl) return KEY_CTRL_ARROW_LEFT;
+		if (alt) return KEY_ALT_ARROW_LEFT;
 		if (shift) return KEY_SHIFT_ARROW_LEFT;
 		return KEY_ARROW_LEFT;
 	}
 	if (strcasecmp(str, "Right") == 0 || strcasecmp(str, "ArrowRight") == 0) {
 		if (ctrl && shift) return KEY_CTRL_SHIFT_ARROW_RIGHT;
 		if (ctrl) return KEY_CTRL_ARROW_RIGHT;
+		if (alt) return KEY_ALT_ARROW_RIGHT;
 		if (shift) return KEY_SHIFT_ARROW_RIGHT;
 		return KEY_ARROW_RIGHT;
 	}
@@ -504,11 +513,14 @@ keybinding_key_string(enum editor_action action, char *buffer, size_t size)
 		case KEY_ALT_SHIFT_C: snprintf(buffer, size, "Alt+Shift+C"); return buffer;
 		case KEY_ALT_ARROW_UP: snprintf(buffer, size, "Alt+Up"); return buffer;
 		case KEY_ALT_ARROW_DOWN: snprintf(buffer, size, "Alt+Down"); return buffer;
+		case KEY_ALT_ARROW_LEFT: snprintf(buffer, size, "Alt+Left"); return buffer;
+		case KEY_ALT_ARROW_RIGHT: snprintf(buffer, size, "Alt+Right"); return buffer;
 		case KEY_ALT_SLASH: snprintf(buffer, size, "Alt+/"); return buffer;
 		case KEY_ALT_BRACKET: snprintf(buffer, size, "Alt+]"); return buffer;
 		case KEY_CTRL_O: snprintf(buffer, size, "Ctrl+O"); return buffer;
 		case KEY_CTRL_N: snprintf(buffer, size, "Ctrl+N"); return buffer;
 		case KEY_CTRL_T: snprintf(buffer, size, "Ctrl+T"); return buffer;
+		case KEY_CTRL_W: snprintf(buffer, size, "Ctrl+W"); return buffer;
 		case 27: snprintf(buffer, size, "Esc"); return buffer;
 		case '\t': snprintf(buffer, size, "Tab"); return buffer;
 		case '\r': snprintf(buffer, size, "Enter"); return buffer;
