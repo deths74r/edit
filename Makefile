@@ -30,6 +30,7 @@ install: $(TARGET)
 	cp $(TARGET) $(BINDIR)/
 	mkdir -p $(THEMEDIR)
 	cp themes/*.ini $(THEMEDIR)/
+	cp keybindings.ini.example $(HOME)/.edit/
 
 uninstall:
 	rm -f $(BINDIR)/$(TARGET)
