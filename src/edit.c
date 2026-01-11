@@ -5992,6 +5992,50 @@ static void editor_command_open_file(void)
 		editor_set_status_message("Open cancelled");
 	}
 }
+/*
+ * Toggle help file display.
+ * If help is open, return to previous file. Otherwise open help.
+ */
+static void editor_toggle_help(void)
+{
+	char help_path[PATH_MAX];
+	const char *home = getenv("HOME");
+	if (!home) {
+		editor_set_status_message("Cannot find HOME directory");
+		return;
+	}
+	snprintf(help_path, sizeof(help_path), "%s%s", home, HELP_FILE);
+	if (editor.help_file_open) {
+		/* Close help - return to previous file */
+		if (editor.previous_file) {
+			editor_open_file(editor.previous_file);
+			free(editor.previous_file);
+			editor.previous_file = NULL;
+		} else {
+			/* No previous file - just create new buffer */
+			buffer_free(&editor.buffer);
+			buffer_init(&editor.buffer);
+			editor.cursor_row = 0;
+			editor.cursor_column = 0;
+		}
+		editor.help_file_open = false;
+	} else {
+		/* Open help - save current file path first */
+		if (editor.buffer.filename) {
+			free(editor.previous_file);
+			editor.previous_file = strdup(editor.buffer.filename);
+		} else {
+			free(editor.previous_file);
+			editor.previous_file = NULL;
+		}
+		if (editor_open_file(help_path)) {
+			editor.help_file_open = true;
+			editor_set_status_message("Press F1 to close help");
+		} else {
+			editor_set_status_message("Help file not found: %s", help_path);
+		}
+	}
+}
 
 /*
  * Handle the F5/Ctrl+T command to open theme picker.
@@ -7186,7 +7230,7 @@ execute_action(enum editor_action action)
 
 	/* Dialogs */
 	case ACTION_HELP:
-		help_dialog();
+		editor_toggle_help();
 		return true;
 
 	case ACTION_THEME_PICKER:

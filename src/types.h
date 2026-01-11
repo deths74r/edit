@@ -79,6 +79,7 @@
 #define THEME_DIR "/.edit/themes/"
 #define CONFIG_FILE "/.editrc"
 #define KEYBINDINGS_FILE "/.edit/keybindings.ini"
+#define HELP_FILE "/.edit/help.md"
 
 /* Double-click timing threshold for dialogs (milliseconds) */
 #define DIALOG_DOUBLE_CLICK_MS 400
@@ -1111,6 +1112,9 @@ struct editor_state {
 	bool hybrid_mode;            /* True = hybrid mode, false = raw mode */
 	char link_url_preview[512];  /* URL to display in status bar */
 	bool link_preview_active;    /* True if cursor is on a link */
+	/* Help file toggle state. */
+	char *previous_file;         /* File open before help was shown */
+	bool help_file_open;         /* True if currently viewing help */
 };
 
 /*****************************************************************************
