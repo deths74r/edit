@@ -5974,7 +5974,6 @@ static void render_draw_status_bar(struct output_buffer *output)
 
 	/* Reset attributes */
 	output_buffer_append_string(output, ESCAPE_RESET);
-	output_buffer_append_string(output, "\r\n");
 }
 
 /*
@@ -6178,6 +6177,7 @@ int __must_check render_refresh_screen(void)
 		/* Both bars at bottom (default) */
 		render_draw_rows(&output);
 		render_draw_status_bar(&output);
+		output_buffer_append_string(&output, "\r\n");
 		render_draw_message_bar(&output);
 	}
 
