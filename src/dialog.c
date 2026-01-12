@@ -1099,6 +1099,14 @@ static void open_file_apply_filter(void)
  */
 static bool open_file_load_directory(const char *path)
 {
+	/*
+	 * Copy path before freeing items, as path may point to
+	 * item->actual_name which gets freed by file_list_free().
+	 */
+	char path_copy[PATH_MAX];
+	strncpy(path_copy, path, PATH_MAX - 1);
+	path_copy[PATH_MAX - 1] = '\0';
+
 	/* Free existing items and filter arrays */
 	if (open_file.items) {
 		file_list_free(open_file.items, open_file.item_count);
@@ -1117,7 +1125,7 @@ static bool open_file_load_directory(const char *path)
 
 	/* Resolve to absolute path */
 	char resolved[PATH_MAX];
-	if (realpath(path, resolved) == NULL) {
+	if (realpath(path_copy, resolved) == NULL) {
 		return false;
 	}
 
@@ -1193,10 +1201,17 @@ static char *open_file_select_item(void)
 	}
 
 	if (item->is_directory) {
-		/* Navigate into directory - actual_name is full path for recursive */
+		/*
+		 * Navigate into directory. Save display_name before calling
+		 * open_file_load_directory() as it frees all items.
+		 */
+		char display_name_copy[256];
+		strncpy(display_name_copy, item->display_name, sizeof(display_name_copy) - 1);
+		display_name_copy[sizeof(display_name_copy) - 1] = '\0';
+
 		if (!open_file_load_directory(item->actual_name)) {
 			editor_set_status_message("Cannot open directory: %s",
-			                          item->display_name);
+			                          display_name_copy);
 		}
 		return NULL;
 	} else {
