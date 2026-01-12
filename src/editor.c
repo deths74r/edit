@@ -214,6 +214,14 @@ bool editor_context_close(uint32_t index)
 			editor.help_context_index--;
 		}
 	}
+	/* Adjust previous_context_before_help if needed */
+	if (editor.previous_context_before_help == index) {
+		/* The context we'd return to was closed - default to 0 */
+		editor.previous_context_before_help = 0;
+	} else if (editor.previous_context_before_help > index) {
+		/* Previous context shifted down */
+		editor.previous_context_before_help--;
+	}
 	/* Recalculate screen size (tab bar may disappear) */
 	editor_update_screen_size();
 	/* Signal main loop to skip this iteration */

@@ -81,7 +81,7 @@
 #define THEME_DIR "/.edit/themes/"
 #define CONFIG_FILE "/.editrc"
 #define KEYBINDINGS_FILE "/.edit/keybindings.ini"
-#define HELP_FILE "/.edit/help.md"
+#define HELP_FILE "/.edit/HELP.md"
 
 /* Double-click timing threshold for dialogs (milliseconds) */
 #define DIALOG_DOUBLE_CLICK_MS 400

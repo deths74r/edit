@@ -6322,9 +6322,11 @@ static void editor_toggle_help(void)
 	/* Check if we're currently in the help context */
 	if (editor.help_context_index >= 0 &&
 	    editor.active_context == (uint32_t)editor.help_context_index) {
-		/* Switch back to previous context */
-		editor_context_switch(editor.previous_context_before_help);
-		editor_set_status_message("Returned from help");
+		/* Close the help context - this will auto-switch to another context */
+		uint32_t help_idx = (uint32_t)editor.help_context_index;
+		editor_context_close(help_idx);
+		/* help_context_index is reset to -1 by editor_context_close */
+		editor_set_status_message("Help closed");
 	} else {
 		/* Save current context and open/switch to help */
 		editor.previous_context_before_help = editor.active_context;
