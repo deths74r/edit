@@ -1092,6 +1092,56 @@ static void open_file_apply_filter(void)
 	open_file.dialog.selected_index = 0;
 	open_file.dialog.scroll_offset = 0;
 }
+/*
+ * Check if query looks like a path and expand it.
+ * Returns allocated expanded path if it's a valid directory, NULL otherwise.
+ * Caller must free returned string.
+ */
+static char *open_file_expand_path_query(const char *query)
+{
+	if (query == NULL || query[0] == '\0') {
+		return NULL;
+	}
+	/* Check if query looks like a path */
+	if (query[0] != '/' && query[0] != '~' && query[0] != '.') {
+		return NULL;
+	}
+	char expanded[PATH_MAX];
+	/* Handle tilde expansion */
+	if (query[0] == '~') {
+		const char *home = safe_get_home();
+		if (home == NULL) {
+			return NULL;
+		}
+		if (query[1] == '\0') {
+			strncpy(expanded, home, PATH_MAX - 1);
+		} else if (query[1] == '/') {
+			size_t home_len = strlen(home);
+			size_t suffix_len = strlen(query + 1);
+			if (home_len + suffix_len >= PATH_MAX) {
+				return NULL;  /* Path too long */
+			}
+			memcpy(expanded, home, home_len);
+			memcpy(expanded + home_len, query + 1, suffix_len + 1);
+		} else {
+			return NULL;  /* ~username not supported */
+		}
+	} else {
+		strncpy(expanded, query, PATH_MAX - 1);
+	}
+	expanded[PATH_MAX - 1] = '\0';
+	/* Resolve to absolute path */
+	char resolved[PATH_MAX];
+	if (realpath(expanded, resolved) == NULL) {
+		return NULL;
+	}
+	/* Check if it's a directory */
+	struct stat st;
+	if (stat(resolved, &st) != 0 || !S_ISDIR(st.st_mode)) {
+		return NULL;
+	}
+	return strdup(resolved);
+}
 
 /*
  * Load directory contents recursively into the open file dialog.
@@ -1492,8 +1542,20 @@ char *open_file_dialog(void)
 			continue;
 		}
 
-		/* Handle Enter - select item */
+		/* Handle Enter - check for path navigation first, then select item */
 		if (key == '\r' || key == '\n') {
+			/* Check if query is a path to navigate to */
+			char *path = open_file_expand_path_query(open_file.query);
+			if (path) {
+				if (!open_file_load_directory(path)) {
+					editor_set_status_message("Cannot open directory: %s",
+					                          open_file.query);
+				}
+				free(path);
+				continue;
+			}
+
+			/* Otherwise select the highlighted item */
 			result = open_file_select_item();
 			if (result) {
 				open_file.dialog.active = false;
