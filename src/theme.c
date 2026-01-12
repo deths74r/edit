@@ -533,6 +533,28 @@ struct theme theme_create_default(void)
 		.attr = ATTR_BOLD
 	};
 
+	/* Tab bar */
+	t.tab_bar = (struct style){
+		.fg = {0x80, 0x80, 0x80},
+		.bg = {0x16, 0x16, 0x16},
+		.attr = ATTR_NONE
+	};
+	t.tab_active = (struct style){
+		.fg = {0xD0, 0xD0, 0xD0},
+		.bg = {0x28, 0x28, 0x28},
+		.attr = ATTR_NONE
+	};
+	t.tab_inactive = (struct style){
+		.fg = {0x70, 0x70, 0x70},
+		.bg = {0x16, 0x16, 0x16},
+		.attr = ATTR_NONE
+	};
+	t.tab_modified = (struct style){
+		.fg = {0xFF, 0xA0, 0x50},
+		.bg = {0x00, 0x00, 0x00},
+		.attr = ATTR_NONE
+	};
+
 	/* Syntax highlighting - grayscale with varying intensity */
 	t.syntax[SYNTAX_NORMAL] = (struct style){
 		.fg = {0xD0, 0xD0, 0xD0},
@@ -914,6 +936,28 @@ struct theme theme_create_mono_white(void)
 		.fg = {0x30, 0x60, 0xA0},
 		.bg = {0xEC, 0xEC, 0xEC},
 		.attr = ATTR_BOLD
+	};
+
+	/* Tab bar */
+	t.tab_bar = (struct style){
+		.fg = {0x60, 0x60, 0x60},
+		.bg = {0xE0, 0xE0, 0xE0},
+		.attr = ATTR_NONE
+	};
+	t.tab_active = (struct style){
+		.fg = {0x20, 0x20, 0x20},
+		.bg = {0xF8, 0xF8, 0xF8},
+		.attr = ATTR_NONE
+	};
+	t.tab_inactive = (struct style){
+		.fg = {0x70, 0x70, 0x70},
+		.bg = {0xE0, 0xE0, 0xE0},
+		.attr = ATTR_NONE
+	};
+	t.tab_modified = (struct style){
+		.fg = {0xC0, 0x60, 0x00},
+		.bg = {0x00, 0x00, 0x00},
+		.attr = ATTR_NONE
 	};
 
 	/* Syntax highlighting - grayscale with varying intensity */
@@ -1521,6 +1565,44 @@ struct theme *theme_parse_file(const char *filepath)
 		}
 		else if (strcmp(key, "dialog_directory_attr") == 0) {
 			t->dialog_directory.attr = attr_parse(value);
+		}
+
+		/* Tab bar */
+		else if (strcmp(key, "tab_bar_fg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_bar.fg = color;
+		}
+		else if (strcmp(key, "tab_bar_bg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_bar.bg = color;
+		}
+		else if (strcmp(key, "tab_bar_attr") == 0) {
+			t->tab_bar.attr = attr_parse(value);
+		}
+		else if (strcmp(key, "tab_active_fg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_active.fg = color;
+		}
+		else if (strcmp(key, "tab_active_bg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_active.bg = color;
+		}
+		else if (strcmp(key, "tab_active_attr") == 0) {
+			t->tab_active.attr = attr_parse(value);
+		}
+		else if (strcmp(key, "tab_inactive_fg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_inactive.fg = color;
+		}
+		else if (strcmp(key, "tab_inactive_bg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_inactive.bg = color;
+		}
+		else if (strcmp(key, "tab_inactive_attr") == 0) {
+			t->tab_inactive.attr = attr_parse(value);
+		}
+		else if (strcmp(key, "tab_modified_fg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_modified.fg = color;
+		}
+		else if (strcmp(key, "tab_modified_bg") == 0 && color_parse_hex(value, &color)) {
+			t->tab_modified.bg = color;
+		}
+		else if (strcmp(key, "tab_modified_attr") == 0) {
+			t->tab_modified.attr = attr_parse(value);
 		}
 
 		/* Syntax highlighting - legacy (color only sets fg) */
@@ -2230,6 +2312,10 @@ static void theme_apply(struct theme *t)
 	style_ensure_contrast(&active_theme.dialog_footer);
 	style_ensure_contrast(&active_theme.dialog_highlight);
 	style_ensure_contrast(&active_theme.dialog_directory);
+	style_ensure_contrast(&active_theme.tab_bar);
+	style_ensure_contrast(&active_theme.tab_active);
+	style_ensure_contrast(&active_theme.tab_inactive);
+	style_ensure_contrast(&active_theme.tab_modified);
 
 	/* Syntax styles - adjust fg against their own bg */
 	for (int i = 0; i < SYNTAX_TOKEN_COUNT; i++) {

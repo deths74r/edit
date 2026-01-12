@@ -5793,12 +5793,11 @@ static void render_draw_tab_bar(struct output_buffer *output)
 	}
 	char escape[128];
 	int current_pos = 0;
-	/* Tab bar background - use darker shade of status bar */
-	int bg_r = active_theme.status.bg.red * 2 / 3;
-	int bg_g = active_theme.status.bg.green * 2 / 3;
-	int bg_b = active_theme.status.bg.blue * 2 / 3;
-	snprintf(escape, sizeof(escape), "\x1b[0m\x1b[48;2;%d;%d;%dm",
-	         bg_r, bg_g, bg_b);
+	/* Tab bar background from theme */
+	snprintf(escape, sizeof(escape), "\x1b[0m\x1b[48;2;%u;%u;%um",
+	         active_theme.tab_bar.bg.red,
+	         active_theme.tab_bar.bg.green,
+	         active_theme.tab_bar.bg.blue);
 	output_buffer_append_string(output, escape);
 	/* Draw each tab */
 	for (uint32_t i = 0; i < editor.context_count; i++) {
@@ -5834,25 +5833,27 @@ static void render_draw_tab_bar(struct output_buffer *output)
 			}
 			break;
 		}
-		/* Active vs inactive tab styling */
+		/* Active vs inactive tab styling from theme */
 		if (i == editor.active_context) {
-			/* Active tab - bright background */
+			/* Active tab */
 			snprintf(escape, sizeof(escape),
 			         "\x1b[48;2;%u;%u;%um\x1b[38;2;%u;%u;%um",
-			         active_theme.status.bg.red,
-			         active_theme.status.bg.green,
-			         active_theme.status.bg.blue,
-			         active_theme.status.fg.red,
-			         active_theme.status.fg.green,
-			         active_theme.status.fg.blue);
+			         active_theme.tab_active.bg.red,
+			         active_theme.tab_active.bg.green,
+			         active_theme.tab_active.bg.blue,
+			         active_theme.tab_active.fg.red,
+			         active_theme.tab_active.fg.green,
+			         active_theme.tab_active.fg.blue);
 		} else {
-			/* Inactive tab - darker */
+			/* Inactive tab */
 			snprintf(escape, sizeof(escape),
-			         "\x1b[48;2;%d;%d;%dm\x1b[38;2;%u;%u;%um",
-			         bg_r, bg_g, bg_b,
-			         active_theme.status.fg.red * 3 / 4,
-			         active_theme.status.fg.green * 3 / 4,
-			         active_theme.status.fg.blue * 3 / 4);
+			         "\x1b[48;2;%u;%u;%um\x1b[38;2;%u;%u;%um",
+			         active_theme.tab_inactive.bg.red,
+			         active_theme.tab_inactive.bg.green,
+			         active_theme.tab_inactive.bg.blue,
+			         active_theme.tab_inactive.fg.red,
+			         active_theme.tab_inactive.fg.green,
+			         active_theme.tab_inactive.fg.blue);
 		}
 		output_buffer_append_string(output, escape);
 		/* Draw tab content: " name [+]" */
@@ -5860,22 +5861,23 @@ static void render_draw_tab_bar(struct output_buffer *output)
 		output_buffer_append_string(output, display_name);
 		current_pos += 1 + (int)strlen(display_name);
 		if (buf->is_modified) {
-			/* Modified indicator */
-			if (i == editor.active_context) {
-				snprintf(escape, sizeof(escape),
-				         "\x1b[38;2;%u;%u;%um",
-				         active_theme.status_modified.fg.red,
-				         active_theme.status_modified.fg.green,
-				         active_theme.status_modified.fg.blue);
-				output_buffer_append_string(output, escape);
-			}
+			/* Modified indicator from theme */
+			snprintf(escape, sizeof(escape),
+			         "\x1b[38;2;%u;%u;%um",
+			         active_theme.tab_modified.fg.red,
+			         active_theme.tab_modified.fg.green,
+			         active_theme.tab_modified.fg.blue);
+			output_buffer_append_string(output, escape);
 			output_buffer_append_string(output, " [+]");
 			current_pos += 4;
 		}
 		output_buffer_append_char(output, ' ');
 		current_pos++;
 		/* Restore tab bar background between tabs */
-		snprintf(escape, sizeof(escape), "\x1b[48;2;%d;%d;%dm", bg_r, bg_g, bg_b);
+		snprintf(escape, sizeof(escape), "\x1b[48;2;%u;%u;%um",
+		         active_theme.tab_bar.bg.red,
+		         active_theme.tab_bar.bg.green,
+		         active_theme.tab_bar.bg.blue);
 		output_buffer_append_string(output, escape);
 	}
 	/* Fill rest of row */

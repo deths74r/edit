@@ -1,6 +1,6 @@
 # edit
 
-*Enter. Delete. Insert. Type.* — Fast terminal text editor in C with lazy loading, background search, multiple cursors, soft wrap, and themes. Single binary. Zero dependencies.
+*Enter. Delete. Insert. Type.* — Fast terminal text editor in C with lazy loading, tabbed buffers, background search, multiple cursors, Markdown support, soft wrap, and 90+ themes. Single binary. Zero dependencies.
 
 ---
 
@@ -49,9 +49,16 @@ make clean        # removes build artifacts
 | Ctrl+S | Save |
 | Alt+Shift+S | Save As |
 | Ctrl+O | Open file |
-| Ctrl+Q | Quit |
+| Ctrl+Q | Close tab / Quit |
 | Ctrl+T | Theme picker |
-| F1 | Help |
+| F1 | Toggle help |
+
+**Tabs (Multiple Buffers)**
+| Key | Action |
+|-----|--------|
+| Alt+N | New tab |
+| Alt+O | Open file in new tab |
+| Alt+Left / Alt+Right | Switch tabs |
 
 **Navigation**
 | Key | Action |
@@ -62,7 +69,7 @@ make clean        # removes build artifacts
 | Page Up / Page Down | Page navigation |
 | Ctrl+Home / Ctrl+End | Go to file start / end |
 | Ctrl+G | Go to line |
-| Alt+] | Jump to matching bracket |
+| Alt+] or Ctrl+] | Jump to matching bracket |
 
 **Selection**
 | Key | Action |
@@ -72,6 +79,7 @@ make clean        # removes build artifacts
 | Shift+Page Up/Down | Select by page |
 | Ctrl+Shift+Left/Right | Select by word |
 | Ctrl+A | Select all |
+| Alt+W | Select word under cursor |
 | Ctrl+D | Add cursor at next occurrence |
 
 **Editing**
@@ -83,16 +91,16 @@ make clean        # removes build artifacts
 | Alt+K | Delete line |
 | Alt+D | Duplicate line |
 | Alt+Up / Alt+Down | Move line up / down |
-| Alt+/ | Toggle comment |
+| Alt+/ or Ctrl+/ | Toggle comment |
 
 **Search**
 | Key | Action |
 |-----|--------|
 | Ctrl+F | Find |
-| Ctrl+H | Find & Replace |
-| F3 / Alt+N | Find next |
-| Shift+F3 / Alt+P | Find previous |
-| Alt+A | Replace all |
+| Ctrl+H or Ctrl+R | Find & Replace |
+| F3 | Find next |
+| Shift+F3 | Find previous |
+| Alt+A | Replace all (in replace mode) |
 | Alt+C | Toggle case sensitivity (in search) |
 | Alt+W | Toggle whole word (in search) |
 | Alt+R | Toggle regex (in search) |
@@ -105,7 +113,16 @@ make clean        # removes build artifacts
 | Alt+Shift+C | Cycle color column (off → 80 → 120) |
 | Alt+Z | Cycle wrap mode (off → char → word) |
 | Alt+Shift+Z | Cycle wrap indicator |
+| Alt+M | Toggle hybrid markdown mode |
 | Alt+U | Check for updates |
+
+**Markdown**
+| Key | Action |
+|-----|--------|
+| Alt+T | Auto-format all tables |
+| Tab (in table) | Move to next cell |
+| Shift+Tab (in table) | Move to previous cell |
+| Space (on checkbox) | Toggle task checkbox |
 
 If you've used any text editor in the last thirty years, you already know how to use edit.
 
@@ -113,7 +130,9 @@ If you've used any text editor in the last thirty years, you already know how to
 
 ### File Operations
 
-**Ctrl+N** creates a new file (clears the buffer). **Ctrl+S** saves the current file. **Ctrl+O** opens a file browser dialog—arrow keys to navigate, Enter to select, Escape to cancel. **Ctrl+Q** quits; if you have unsaved changes, you'll be asked to confirm.
+**Ctrl+N** creates a new file. **Ctrl+S** saves the current file. **Ctrl+O** opens a file browser dialog—arrow keys to navigate, Enter to select, Escape to cancel. **Ctrl+Q** closes the current tab (or quits if only one tab is open); if you have unsaved changes, you'll be asked to confirm.
+
+Edit supports multiple files via tabs. **Alt+O** opens a file in a new tab, **Alt+N** creates a new empty tab, and **Alt+Left/Right** switches between tabs. Click tabs with the mouse to switch. Pass multiple files on the command line to open them all: `./edit file1.c file2.c`.
 
 Edit can read from stdin:
 ```bash
@@ -190,7 +209,7 @@ For files larger than 5,000 lines, search runs in a background thread so the UI 
 
 ## Themes
 
-Edit ships with 49 built-in themes, ranging from dark themes with syntax colors to minimal monochrome schemes. All themes meet WCAG 2.1 AA contrast requirements—a 4.5:1 minimum ratio between text and background.
+Edit ships with 90+ built-in themes, ranging from dark themes with syntax colors to minimal monochrome schemes. All themes meet WCAG 2.1 AA contrast requirements—a 4.5:1 minimum ratio between text and background.
 
 Themes include tritanopia-friendly options that use the red-cyan axis visible to those with blue-yellow color blindness.
 
@@ -305,7 +324,15 @@ syntax_comment_attr=italic+dim
 | `dialog_highlight` | Selected item |
 | `dialog_directory` | Directory entries |
 
-**Syntax Highlighting**
+**Tab Bar** (multiple buffers)
+| Base Key | Description |
+|----------|-------------|
+| `tab_bar` | Tab bar background |
+| `tab_active` | Active/current tab |
+| `tab_inactive` | Inactive tabs |
+| `tab_modified` | Modified indicator [+] |
+
+**Syntax Highlighting (C/C++)**
 | Base Key | Description |
 |----------|-------------|
 | `syntax_normal` | Default code |
@@ -319,6 +346,25 @@ syntax_comment_attr=italic+dim
 | `syntax_operator` | `+`, `-`, `=`, etc. |
 | `syntax_bracket` | `()`, `[]`, `{}` |
 | `syntax_escape` | Escape sequences (`\n`) |
+
+**Syntax Highlighting (Markdown)**
+| Base Key | Description |
+|----------|-------------|
+| `syntax_md_header_1` through `syntax_md_header_6` | Header levels |
+| `syntax_md_bold` | **Bold** text |
+| `syntax_md_italic` | *Italic* text |
+| `syntax_md_bold_italic` | ***Bold+italic*** text |
+| `syntax_md_code_span` | `Inline code` |
+| `syntax_md_code_block` | Fenced code blocks |
+| `syntax_md_link_text` | Link display text |
+| `syntax_md_link_url` | Link URLs |
+| `syntax_md_image` | Image markers |
+| `syntax_md_blockquote` | Blockquote text |
+| `syntax_md_list_marker` | List bullets/numbers |
+| `syntax_md_table` | Table content |
+| `syntax_md_table_header` | Table header row |
+| `syntax_md_horizontal_rule` | Horizontal rules |
+| `syntax_md_task_marker` | Task list checkboxes |
 
 #### Minimal Example
 
@@ -484,8 +530,9 @@ Cursor movement in edit operates on grapheme boundaries. The arrow key finds the
 
 ### Syntax Highlighting
 
-Edit performs syntax highlighting in a single pass per line. The highlighter recognizes:
+Edit performs syntax highlighting in a single pass per line. Two languages are currently supported:
 
+**C/C++** (`.c`, `.h`, `.cpp`, `.hpp`):
 - Keywords and type names
 - String and character literals
 - Numeric constants
@@ -494,7 +541,16 @@ Edit performs syntax highlighting in a single pass per line. The highlighter rec
 - Function names (identifiers followed by `(`)
 - Operators and brackets
 
-Currently only C/C++ syntax is implemented. The architecture supports additional languages—each is a separate highlighting function keyed by file extension.
+**Markdown** (`.md`):
+- Headers H1-H6 with level-specific styling
+- Bold, italic, and bold+italic text with proper terminal attributes
+- Inline code and fenced code blocks
+- Links, images, and blockquotes
+- Lists (ordered, unordered, and task lists with checkboxes)
+- Tables with header/separator detection
+- Horizontal rules
+
+The architecture supports additional languages—each is a separate highlighting function keyed by file extension.
 
 **Trade-off vs tree-sitter:** Tree-sitter provides semantic understanding: it knows that `foo` is a function, not just an identifier before a parenthesis. This enables features like "go to definition" and intelligent refactoring. Edit's approach is simpler—about 1,000 lines of code versus tree-sitter's substantial complexity—but limited to syntactic coloring. For a minimal editor, this is sufficient. For an IDE, it's not.
 
@@ -557,14 +613,15 @@ Edit runs a worker thread that processes a task queue. The main thread submits t
 |--------|------|------|
 | Unicode | Full grapheme support | Basic |
 | Large files | Instant load via mmap | Loads entire file |
+| Multiple buffers | Tabs with Alt+Left/Right | Alt+< and Alt+> |
 | Bracket matching | O(1), across lines | Line-local only |
 | Multi-cursor | Ctrl+D for next occurrence | No |
 | Soft wrapping | Word-aware | Character only |
-| Syntax highlighting | Extensible | Built-in for many languages |
+| Syntax highlighting | C and Markdown | Built-in for many languages |
 
 **When to use nano:** It's already installed. You're editing a format nano highlights well.
 
-**When to use edit:** Large files, correct Unicode handling, bracket navigation, multi-occurrence selection.
+**When to use edit:** Large files, correct Unicode handling, bracket navigation, multi-occurrence selection, tabbed editing.
 
 ### Edit vs VS Code
 

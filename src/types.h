@@ -703,6 +703,12 @@ struct theme {
 	struct style dialog_highlight;        /* Selected/highlighted item */
 	struct style dialog_directory;        /* Directory entries */
 
+	/* Tab bar */
+	struct style tab_bar;                 /* Tab bar background */
+	struct style tab_active;              /* Active tab style */
+	struct style tab_inactive;            /* Inactive tab style */
+	struct style tab_modified;            /* [+] modified indicator on tabs */
+
 	/* Syntax highlighting (indexed by enum syntax_token) */
 	struct style syntax[SYNTAX_TOKEN_COUNT];
 	bool syntax_bg_set[SYNTAX_TOKEN_COUNT]; /* Track if bg was explicitly set */
