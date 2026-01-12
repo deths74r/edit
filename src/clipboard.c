@@ -79,6 +79,12 @@ static enum clipboard_tool clipboard_detect_tool(void)
 		}
 	}
 
+	/* Check for macOS pbcopy (before X11 since macOS may have XQuartz) */
+	if (system("command -v pbcopy >/dev/null 2>&1") == 0) {
+		detected_clipboard_tool = CLIPBOARD_PBCOPY;
+		return detected_clipboard_tool;
+	}
+
 	/* Check for X11 tools */
 	if (system("command -v xclip >/dev/null 2>&1") == 0) {
 		detected_clipboard_tool = CLIPBOARD_XCLIP;
@@ -135,6 +141,9 @@ bool clipboard_copy(const char *text, size_t length)
 		case CLIPBOARD_WL:
 			command = "wl-copy";
 			break;
+		case CLIPBOARD_PBCOPY:
+			command = "pbcopy";
+			break;
 		default:
 			return false;
 	}
@@ -187,6 +196,9 @@ char *clipboard_paste(size_t *out_length)
 			break;
 		case CLIPBOARD_WL:
 			command = "wl-paste -n";  /* -n: no trailing newline */
+			break;
+		case CLIPBOARD_PBCOPY:
+			command = "pbpaste";
 			break;
 		default:
 			*out_length = 0;

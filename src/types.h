@@ -1412,6 +1412,7 @@ enum clipboard_tool {
 	CLIPBOARD_XCLIP,
 	CLIPBOARD_XSEL,
 	CLIPBOARD_WL,        /* wl-copy / wl-paste */
+	CLIPBOARD_PBCOPY,    /* macOS pbcopy / pbpaste */
 	CLIPBOARD_INTERNAL   /* Fallback */
 };
 
