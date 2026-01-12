@@ -83,6 +83,7 @@ static const struct {
 	{ ACTION_CYCLE_WRAP_INDICATOR, "cycle_wrap_indicator" },
 	{ ACTION_CYCLE_COLOR_COLUMN, "cycle_color_column" },
 	{ ACTION_TOGGLE_HYBRID_MODE, "toggle_hybrid_mode" },
+	{ ACTION_TOGGLE_BAR_POSITION, "toggle_bar_position" },
 	{ ACTION_HELP, "help" },
 	{ ACTION_THEME_PICKER, "theme_picker" },
 	{ ACTION_CHECK_UPDATES, "check_updates" },

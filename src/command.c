@@ -84,6 +84,7 @@ command_view_action(int key)
 	case 't': return ACTION_THEME_PICKER;
 	case 'h': return ACTION_TOGGLE_WHITESPACE;
 	case 'i': return ACTION_CYCLE_WRAP_INDICATOR;
+	case 'b': return ACTION_TOGGLE_BAR_POSITION;
 	default:  return ACTION_NONE;
 	}
 }
@@ -169,7 +170,7 @@ handle_top_level_key(int key)
 		return true;
 	case 'e':  /* 'e' for view since 'v' is paste */
 		current_state = COMMAND_MODE_VIEW;
-		editor_set_status_message("[Command: View] l=lines w=wrap c=column t=theme h=whitespace");
+		editor_set_status_message("[Command: View] l=lines w=wrap c=column t=theme b=bar");
 		return true;
 	case 'r':  /* 'r' for search/replace */
 		current_state = COMMAND_MODE_SEARCH;

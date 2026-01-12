@@ -6168,9 +6168,17 @@ int __must_check render_refresh_screen(void)
 	output_buffer_append_string(&output, bg_escape);
 	render_draw_tab_bar(&output);
 
-	render_draw_rows(&output);
-	render_draw_status_bar(&output);
-	render_draw_message_bar(&output);
+	if (editor.bar_at_top) {
+		/* Message bar at top, status bar stays at bottom */
+		render_draw_message_bar(&output);
+		render_draw_rows(&output);
+		render_draw_status_bar(&output);
+	} else {
+		/* Both bars at bottom (default) */
+		render_draw_rows(&output);
+		render_draw_status_bar(&output);
+		render_draw_message_bar(&output);
+	}
 
 	/* Position cursor - account for wrapped segments in wrap mode */
 	char cursor_position[32];
@@ -6218,11 +6226,18 @@ int __must_check render_refresh_screen(void)
 	if (editor.context_count > 1) {
 		cursor_screen_row += TAB_BAR_ROWS;
 	}
+	/* Account for message bar at top (just 1 row) */
+	if (editor.bar_at_top) {
+		cursor_screen_row += 1;
+	}
 
 	/* Clamp cursor_screen_row to content area (prevent cursor in status bar) */
 	uint32_t max_screen_row = editor.screen_rows;
 	if (editor.context_count > 1) {
 		max_screen_row += TAB_BAR_ROWS;
+	}
+	if (editor.bar_at_top) {
+		max_screen_row += 1;
 	}
 	if (cursor_screen_row > max_screen_row) {
 		cursor_screen_row = max_screen_row;
@@ -7554,6 +7569,11 @@ execute_action(enum editor_action action)
 		} else {
 			editor_set_status_message("Hybrid mode only available for Markdown files");
 		}
+		return true;
+	case ACTION_TOGGLE_BAR_POSITION:
+		editor.bar_at_top = !editor.bar_at_top;
+		editor_set_status_message("Message bar at %s",
+		                          editor.bar_at_top ? "top" : "bottom");
 		return true;
 
 	/* Dialogs */

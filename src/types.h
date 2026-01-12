@@ -400,6 +400,7 @@ enum editor_action {
 	ACTION_CYCLE_WRAP_INDICATOR,
 	ACTION_CYCLE_COLOR_COLUMN,
 	ACTION_TOGGLE_HYBRID_MODE,
+	ACTION_TOGGLE_BAR_POSITION,
 
 	/* Dialogs */
 	ACTION_HELP,
@@ -1207,6 +1208,7 @@ struct editor_state {
 	uint32_t color_column;       /* Column to highlight (0 = off) */
 	enum color_column_style color_column_style;  /* Visual style for column */
 	enum theme_indicator theme_indicator;  /* Current theme marker style */
+	bool bar_at_top;             /* Status/message bar at top of screen */
 
 	/* Fuzzy finder settings for file open dialog. */
 	int fuzzy_max_depth;         /* Max directory recursion depth (default: 10) */
