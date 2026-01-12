@@ -6171,6 +6171,7 @@ int __must_check render_refresh_screen(void)
 	if (editor.bar_at_top) {
 		/* Message bar at top, status bar stays at bottom */
 		render_draw_message_bar(&output);
+		output_buffer_append_string(&output, "\r\n");
 		render_draw_rows(&output);
 		render_draw_status_bar(&output);
 	} else {
