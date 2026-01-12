@@ -161,6 +161,31 @@ int main(int argument_count, char *argument_values[])
 				}
 			}
 			autosave_update_path();
+		/* Open additional files in new tabs */
+		for (int i = 2; i < argument_count; i++) {
+			int idx = editor_context_new();
+			if (idx < 0) {
+				editor_set_status_message("Too many files (max %d)", MAX_CONTEXTS);
+				break;
+			}
+			editor_context_switch((uint32_t)idx);
+			int ret = file_open(E_BUF, argument_values[i]);
+			if (ret) {
+				if (ret == -ENOENT) {
+					/* File doesn't exist yet - new file */
+					E_BUF->filename = strdup(argument_values[i]);
+					E_BUF->is_modified = false;
+				} else {
+					editor_set_status_message("Cannot open %s: %s",
+					                          argument_values[i], edit_strerror(ret));
+				}
+			}
+			autosave_update_path();
+		}
+		/* Switch back to first tab */
+		if (argument_count > 2) {
+			editor_context_switch(0);
+		}
 		}
 	} else {
 		/* No file specified - also update swap path for unnamed */
