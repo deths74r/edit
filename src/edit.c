@@ -3725,8 +3725,14 @@ void editor_handle_mouse(struct mouse_input *mouse)
 				screen_col -= E_CTX->gutter_width;
 			}
 
+			/* Calculate content area offset (tab bar + message bar at top) */
+			uint32_t content_top = 0;
+			if (editor.context_count > 1) content_top += 1;
+			if (editor.bar_at_top) content_top += 1;
+			uint32_t content_row = (mouse->row >= content_top) ? mouse->row - content_top : 0;
+
 			/* Map screen row to logical line and segment */
-			if (screen_row_to_line_segment(mouse->row, &file_row, &segment)) {
+			if (screen_row_to_line_segment(content_row, &file_row, &segment)) {
 				/*
 				 * Convert visual position to cell column.
 				 * In wrap mode, visual position is just screen_col.
@@ -3790,8 +3796,10 @@ void editor_handle_mouse(struct mouse_input *mouse)
 		}
 
 		case MOUSE_LEFT_DRAG: {
-			/* Auto-scroll when dragging at screen edges */
-			uint32_t content_top = (editor.context_count > 1) ? 1 : 0;  /* Skip tab bar */
+		/* Auto-scroll when dragging at screen edges */
+			uint32_t content_top = 0;
+			if (editor.context_count > 1) content_top += 1;  /* Tab bar */
+			if (editor.bar_at_top) content_top += 1;         /* Message bar */
 			uint32_t content_bottom = content_top + editor.screen_rows - 1;  /* Last content row */
 
 			/* Track drag state for timer-based auto-scroll */
@@ -3825,7 +3833,8 @@ void editor_handle_mouse(struct mouse_input *mouse)
 			}
 
 			/* Map screen row to logical line and segment */
-			if (screen_row_to_line_segment(mouse->row, &file_row, &segment)) {
+			uint32_t content_row = (mouse->row >= content_top) ? mouse->row - content_top : 0;
+			if (screen_row_to_line_segment(content_row, &file_row, &segment)) {
 				struct line *line = &E_BUF->lines[file_row];
 				if (editor.wrap_mode != WRAP_NONE) {
 					cell_col = line_find_column_at_visual(
