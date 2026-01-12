@@ -425,6 +425,19 @@ enum editor_action {
 };
 
 /*****************************************************************************
+ * Command Mode
+ *
+ * Leader key (Ctrl+Space) enters command mode where single keys trigger
+ * actions. Supports submenus for categorized commands.
+ *****************************************************************************/
+enum command_mode_state {
+	COMMAND_MODE_NONE = 0,   /* Normal editing mode */
+	COMMAND_MODE_TOP,        /* Awaiting top-level command */
+	COMMAND_MODE_FILE,       /* In file submenu */
+	COMMAND_MODE_VIEW,       /* In view submenu */
+	COMMAND_MODE_SEARCH,     /* In search submenu */
+};
+/*****************************************************************************
  * Line Temperature (Lazy Loading)
  *****************************************************************************/
 

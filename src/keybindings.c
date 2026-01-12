@@ -248,6 +248,59 @@ keybinding_load_defaults(void)
 	keybinding_add(KEY_BACKSPACE, ACTION_BACKSPACE);
 	keybinding_add(KEY_DELETE, ACTION_DELETE);
 }
+/*****************************************************************************
+ * Leader Mode Preset
+ *
+ * Minimal keybindings for use with leader key (Ctrl+Space) command mode.
+ * Only navigation, selection, and text entry keys are bound directly.
+ * All other commands are accessed via Ctrl+Space followed by a key.
+ *****************************************************************************/
+static void
+keybinding_load_leader_mode(void)
+{
+	binding_count = 0;
+	/* Navigation - arrows, Home/End, Page Up/Down */
+	keybinding_add(KEY_ARROW_UP, ACTION_MOVE_UP);
+	keybinding_add(KEY_ARROW_DOWN, ACTION_MOVE_DOWN);
+	keybinding_add(KEY_ARROW_LEFT, ACTION_MOVE_LEFT);
+	keybinding_add(KEY_ARROW_RIGHT, ACTION_MOVE_RIGHT);
+	keybinding_add(KEY_CTRL_ARROW_LEFT, ACTION_MOVE_WORD_LEFT);
+	keybinding_add(KEY_CTRL_ARROW_RIGHT, ACTION_MOVE_WORD_RIGHT);
+	keybinding_add(KEY_HOME, ACTION_MOVE_LINE_START);
+	keybinding_add(KEY_END, ACTION_MOVE_LINE_END);
+	keybinding_add(KEY_PAGE_UP, ACTION_MOVE_PAGE_UP);
+	keybinding_add(KEY_PAGE_DOWN, ACTION_MOVE_PAGE_DOWN);
+	keybinding_add(KEY_CTRL_HOME, ACTION_MOVE_FILE_START);
+	keybinding_add(KEY_CTRL_END, ACTION_MOVE_FILE_END);
+	/* Selection - shift+navigation */
+	keybinding_add(KEY_SHIFT_ARROW_UP, ACTION_SELECT_UP);
+	keybinding_add(KEY_SHIFT_ARROW_DOWN, ACTION_SELECT_DOWN);
+	keybinding_add(KEY_SHIFT_ARROW_LEFT, ACTION_SELECT_LEFT);
+	keybinding_add(KEY_SHIFT_ARROW_RIGHT, ACTION_SELECT_RIGHT);
+	keybinding_add(KEY_CTRL_SHIFT_ARROW_LEFT, ACTION_SELECT_WORD_LEFT);
+	keybinding_add(KEY_CTRL_SHIFT_ARROW_RIGHT, ACTION_SELECT_WORD_RIGHT);
+	keybinding_add(KEY_SHIFT_HOME, ACTION_SELECT_LINE_START);
+	keybinding_add(KEY_SHIFT_END, ACTION_SELECT_LINE_END);
+	keybinding_add(KEY_SHIFT_PAGE_UP, ACTION_SELECT_PAGE_UP);
+	keybinding_add(KEY_SHIFT_PAGE_DOWN, ACTION_SELECT_PAGE_DOWN);
+	/* Line movement with Alt+arrows (useful enough to keep) */
+	keybinding_add(KEY_ALT_ARROW_UP, ACTION_MOVE_LINE_UP);
+	keybinding_add(KEY_ALT_ARROW_DOWN, ACTION_MOVE_LINE_DOWN);
+	/* Buffer switching with Alt+left/right */
+	keybinding_add(KEY_ALT_ARROW_LEFT, ACTION_CONTEXT_PREV);
+	keybinding_add(KEY_ALT_ARROW_RIGHT, ACTION_CONTEXT_NEXT);
+	/* Text entry keys */
+	keybinding_add(27, ACTION_ESCAPE);  /* ESC */
+	keybinding_add('\t', ACTION_INSERT_TAB);
+	keybinding_add(KEY_SHIFT_TAB, ACTION_INSERT_BACKTAB);
+	keybinding_add('\r', ACTION_INSERT_NEWLINE);
+	keybinding_add(KEY_BACKSPACE, ACTION_BACKSPACE);
+	keybinding_add(KEY_DELETE, ACTION_DELETE);
+	/* F-keys for search navigation (hands stay on keyboard) */
+	keybinding_add(KEY_F1, ACTION_HELP);
+	keybinding_add(KEY_F3, ACTION_FIND_NEXT);
+	keybinding_add(KEY_SHIFT_F3, ACTION_FIND_PREV);
+}
 
 /*****************************************************************************
  * macOS Preset
@@ -280,6 +333,10 @@ keybinding_load_preset(const char *name)
 	if (strcmp(name, "macos") == 0) {
 		keybinding_load_defaults();
 		keybinding_apply_macos_overrides();
+		return 0;
+	}
+	if (strcmp(name, "leader") == 0) {
+		keybinding_load_leader_mode();
 		return 0;
 	}
 
@@ -650,8 +707,8 @@ keybinding_load_file(const char *path)
 void
 keybinding_init(void)
 {
-	/* Start with defaults */
-	keybinding_load_defaults();
+	/* Start with leader mode (Ctrl+Space command mode experiment) */
+	keybinding_load_leader_mode();
 
 	/* Try to load user config */
 	char *home = safe_get_home();

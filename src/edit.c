@@ -22,6 +22,7 @@
 #include "edit.h"
 #include "syntax.h"
 #include "keybindings.h"
+#include "command.h"
 #include <execinfo.h>
 
 /*****************************************************************************
@@ -7276,7 +7277,7 @@ static void editor_outdent_lines(void)
  * Execute an editor action.
  * Returns true if the action was handled, false otherwise.
  */
-static bool
+bool
 execute_action(enum editor_action action)
 {
 	switch (action) {
@@ -7690,6 +7691,14 @@ void editor_process_keypress(void)
 
 	/* Handle mouse events directly (processed in input_read_key) */
 	if (key == KEY_MOUSE_EVENT)
+		return;
+	/* Leader key (Ctrl+Space) enters command mode */
+	if (key == 0) {
+		command_mode_enter();
+		return;
+	}
+	/* Handle command mode input */
+	if (command_mode_handle_key(key))
 		return;
 
 	/* Handle mode-specific input */
