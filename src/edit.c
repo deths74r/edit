@@ -41,6 +41,13 @@ static int click_count = 0;
 static struct timespec last_scroll_time = {0, 0};
 static double scroll_velocity = 0.0;
 static int last_scroll_direction = 0;  /* -1 = up, 1 = down, 0 = none */
+/* Trackpad detection - rolling average of event intervals */
+static double avg_scroll_interval = 0.1;  /* Start assuming mouse wheel */
+static bool trackpad_mode = false;
+#define TRACKPAD_INTERVAL_THRESHOLD 0.05  /* 50ms = trackpad-like */
+#define TRACKPAD_MAX_LINES 3              /* Conservative max for trackpads */
+#define TRACKPAD_VELOCITY_DECAY 0.95      /* Heavier smoothing */
+#define TRACKPAD_VELOCITY_TIMEOUT 0.6     /* Longer timeout for trackpads */
 
 /* Incremental search state (non-static for module access). */
 struct search_state search = {0};
@@ -3578,9 +3585,20 @@ static uint32_t calculate_adaptive_scroll(int direction)
 	/* Update timestamp */
 	last_scroll_time = now;
 
+	/* Update rolling average of event intervals for trackpad detection */
+	if (!first_scroll && dt > 0 && dt < 1.0) {
+		avg_scroll_interval = 0.9 * avg_scroll_interval + 0.1 * dt;
+		trackpad_mode = (avg_scroll_interval < TRACKPAD_INTERVAL_THRESHOLD);
+	}
+
+	/* Select parameters based on input device mode */
+	double decay = trackpad_mode ? TRACKPAD_VELOCITY_DECAY : SCROLL_VELOCITY_DECAY;
+	uint32_t max_lines = trackpad_mode ? TRACKPAD_MAX_LINES : SCROLL_MAX_LINES;
+	double timeout = trackpad_mode ? TRACKPAD_VELOCITY_TIMEOUT : SCROLL_VELOCITY_TIMEOUT;
+
 	/* Reset velocity on direction change, first scroll, or timeout */
 	if (direction != last_scroll_direction ||
-	    dt > SCROLL_VELOCITY_TIMEOUT ||
+	    dt > timeout ||
 	    dt <= 0 ||
 	    first_scroll) {
 		scroll_velocity = SCROLL_VELOCITY_SLOW;
@@ -3598,9 +3616,8 @@ static uint32_t calculate_adaptive_scroll(int direction)
 		instant_velocity = 100.0;
 	}
 
-	/* Exponential moving average for smoothing */
-	scroll_velocity = SCROLL_VELOCITY_DECAY * scroll_velocity +
-	                  (1.0 - SCROLL_VELOCITY_DECAY) * instant_velocity;
+	/* Exponential moving average for smoothing (heavier for trackpads) */
+	scroll_velocity = decay * scroll_velocity + (1.0 - decay) * instant_velocity;
 
 	/* Map velocity to scroll amount */
 	if (scroll_velocity <= SCROLL_VELOCITY_SLOW) {
@@ -3608,7 +3625,7 @@ static uint32_t calculate_adaptive_scroll(int direction)
 	}
 
 	if (scroll_velocity >= SCROLL_VELOCITY_FAST) {
-		return SCROLL_MAX_LINES;
+		return max_lines;
 	}
 
 	/* Smoothstep interpolation between min and max (eases in and out) */
@@ -3616,7 +3633,7 @@ static uint32_t calculate_adaptive_scroll(int direction)
 	           (SCROLL_VELOCITY_FAST - SCROLL_VELOCITY_SLOW);
 	t = t * t * (3.0 - 2.0 * t);  /* smoothstep: zero derivative at endpoints */
 
-	return SCROLL_MIN_LINES + (uint32_t)(t * (SCROLL_MAX_LINES - SCROLL_MIN_LINES));
+	return SCROLL_MIN_LINES + (uint32_t)(t * (max_lines - SCROLL_MIN_LINES));
 }
 
 /*
