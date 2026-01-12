@@ -130,7 +130,7 @@ If you've used any text editor in the last thirty years, you already know how to
 
 ### File Operations
 
-**Ctrl+N** creates a new file. **Ctrl+S** saves the current file. **Ctrl+O** opens a file browser dialog—arrow keys to navigate, Enter to select, Escape to cancel. **Ctrl+Q** closes the current tab (or quits if only one tab is open); if you have unsaved changes, you'll be asked to confirm.
+**Ctrl+N** creates a new file. **Ctrl+S** saves the current file. **Ctrl+O** opens a file browser dialog with substring search—type to filter files, arrow keys to navigate, Enter to select, Escape to cancel. You can also type a path directly (`/tmp`, `~`, `..`, `src/`) and press Enter to navigate there. **Alt+F** toggles fuzzy search mode for when you can't remember exact names. **Ctrl+Q** closes the current tab (or quits if only one tab is open); if you have unsaved changes, you'll be asked to confirm.
 
 Edit supports multiple files via tabs. **Alt+O** opens a file in a new tab, **Alt+N** creates a new empty tab, and **Alt+Left/Right** switches between tabs. Click tabs with the mouse to switch. Pass multiple files on the command line to open them all: `./edit file1.c file2.c`.
 
@@ -171,7 +171,7 @@ Arrow keys move the cursor. Unlike simpler editors, edit moves by *grapheme clus
 
 **Ctrl+Z** undoes, **Ctrl+Y** redoes. Undo groups rapid keystrokes together—typing "hello" and pressing undo removes the whole word, not individual letters.
 
-**Ctrl+C/X/V** use the system clipboard when available (via xclip, xsel, or wl-copy), falling back to an internal buffer when not.
+**Ctrl+C/X/V** use the system clipboard when available (via xclip, xsel, wl-copy on Linux, or pbcopy on macOS), falling back to an internal buffer when not.
 
 **Tab** indents; with text selected, it indents all selected lines. **Shift+Tab** outdents.
 

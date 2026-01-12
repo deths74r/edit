@@ -31,6 +31,24 @@ Press **F1** to close this help and return to your file.
 
 *Click tabs with mouse to switch. Ctrl+Q quits when only one tab remains.*
 
+## File Dialog (Ctrl+O)
+
+| Key        | Action                              |
+|------------|-------------------------------------|
+| Type text  | Filter files by substring           |
+| Alt+F      | Toggle fuzzy search mode            |
+| Enter      | Open file or navigate to typed path |
+| Tab        | Toggle hidden files                 |
+| Shift+Tab  | Toggle file icons                   |
+| Left Arrow | Go to parent directory              |
+| Esc        | Cancel                              |
+
+**Path Navigation**: Type a path and press Enter to navigate directly:
+- `/tmp` → go to /tmp
+- `~` or `~/Downloads` → go to home directory
+- `..` → go to parent directory
+- `src/` → go to subdirectory
+
 ## Navigation
 
 | Key             | Action                   |
@@ -116,6 +134,7 @@ Edit provides full syntax highlighting for Markdown files (.md):
 - **Bracket matching**: Use Alt+] to jump between matching brackets `(){}[]`
 - **Color column**: Shows a visual guide at column 80 or 120 (cycle with Alt+Shift+C)
 - **Wrap modes**: No wrap, word-boundary wrap, or character wrap (Alt+Z)
+- **Clipboard**: Works with system clipboard on Linux (xclip/xsel/wl-copy) and macOS (pbcopy)
 - **Custom keybindings**: Edit `~/.edit/keybindings.ini` to customize shortcuts
 - **Themes**: 90+ themes available via Ctrl+T, or add custom themes to `~/.edit/themes/`
 
