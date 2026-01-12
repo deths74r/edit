@@ -785,6 +785,10 @@ static int fuzzy_score(const char *pattern, const char *text, bool case_sensitiv
 	int score = 0;
 	bool previous_matched = false;
 	const char *prev_char = NULL;
+	int first_match_pos = -1;
+	int last_match_pos = -1;
+	int pattern_length = 0;
+	int text_length = (int)strlen(text);
 
 	while (*pattern_ptr != '\0') {
 		/* Find next occurrence of pattern character in text */
@@ -806,19 +810,25 @@ static int fuzzy_score(const char *pattern, const char *text, bool case_sensitiv
 
 			if (pattern_char == text_char) {
 				/* Match found */
-				score += 1;
+				int pos = (int)(text_ptr - text);
+				if (first_match_pos < 0) {
+					first_match_pos = pos;
+				}
+				last_match_pos = pos;
 
-				/* Consecutive match bonus */
+				score += 10;
+
+				/* Consecutive match bonus (chars right next to each other) */
 				if (previous_matched) {
-					score += 5;
+					score += 15;
 				}
 
 				/* Start of word bonus */
 				if (prev_char == NULL) {
-					score += 15;  /* Start of string */
+					score += 25;  /* Start of string */
 				} else if (*prev_char == '/' || *prev_char == '_' ||
 				           *prev_char == '-' || *prev_char == '.') {
-					score += 10;  /* Start of word */
+					score += 20;  /* Start of path segment or word */
 				}
 
 				previous_matched = true;
@@ -838,9 +848,71 @@ static int fuzzy_score(const char *pattern, const char *text, bool case_sensitiv
 		}
 
 		pattern_ptr++;
+		pattern_length++;
 	}
 
-	return score;
+	/* Compactness bonus/penalty: prefer matches clustered together */
+	int span = last_match_pos - first_match_pos + 1;
+	int scatter = span - pattern_length;  /* 0 if perfectly compact */
+	score -= scatter * 3;  /* Penalty for scattered matches */
+
+	/* Exact prefix bonus: pattern matches start of text perfectly */
+	if (first_match_pos == 0 && span == pattern_length) {
+		score += 50;
+	}
+
+	/* Length bonus: prefer shorter filenames (more specific matches) */
+	/* A match in a 10-char name is better than same match in 100-char name */
+	if (text_length > 0) {
+		int length_bonus = 100 - (text_length > 100 ? 100 : text_length);
+		score += length_bonus / 5;
+	}
+
+	return score > 0 ? score : 1;
+}
+
+/*
+ * Check if text contains pattern as a substring.
+ * Returns score (higher = better match position), or -1 if no match.
+ */
+static int substring_score(const char *pattern, const char *text, bool case_sensitive)
+{
+	if (pattern == NULL || pattern[0] == '\0') {
+		return 0;  /* Empty pattern matches everything */
+	}
+	if (text == NULL || text[0] == '\0') {
+		return -1;
+	}
+
+	/* Find substring */
+	const char *match;
+	if (case_sensitive) {
+		match = strstr(text, pattern);
+	} else {
+		match = strcasestr(text, pattern);
+	}
+
+	if (match == NULL) {
+		return -1;
+	}
+
+	/* Score: prefer matches at start, word boundaries */
+	int score = 100;
+	int pos = (int)(match - text);
+
+	/* Bonus for match at start */
+	if (pos == 0) {
+		score += 50;
+	}
+	/* Bonus for match at word boundary (after / or _) */
+	else if (pos > 0 && (text[pos - 1] == '/' || text[pos - 1] == '_' ||
+	                     text[pos - 1] == '-')) {
+		score += 25;
+	}
+	/* Penalty for later matches */
+	score -= pos;
+
+	return score > 0 ? score : 1;
 }
 
 /*
@@ -1064,12 +1136,19 @@ static void open_file_apply_filter(void)
 		}
 		open_file.filtered_count = open_file.item_count;
 	} else {
-		/* Filter items by fuzzy matching */
+		/* Filter items by matching (substring or fuzzy based on mode) */
 		int count = 0;
 		for (int i = 0; i < open_file.item_count; i++) {
-			int score = fuzzy_score(open_file.query,
-			                        open_file.items[i].display_name,
-			                        editor.fuzzy_case_sensitive);
+			int score;
+			if (open_file.fuzzy_mode) {
+				score = fuzzy_score(open_file.query,
+				                    open_file.items[i].display_name,
+				                    editor.fuzzy_case_sensitive);
+			} else {
+				score = substring_score(open_file.query,
+				                        open_file.items[i].display_name,
+				                        editor.fuzzy_case_sensitive);
+			}
 			if (score >= 0) {
 				open_file.filtered_indices[count] = i;
 				open_file.filtered_scores[count] = score;
@@ -1102,8 +1181,10 @@ static char *open_file_expand_path_query(const char *query)
 	if (query == NULL || query[0] == '\0') {
 		return NULL;
 	}
-	/* Check if query looks like a path */
-	if (query[0] != '/' && query[0] != '~' && query[0] != '.') {
+	/* Check if query looks like a path - starts with /, ~, . or contains / */
+	bool is_path = (query[0] == '/' || query[0] == '~' || query[0] == '.' ||
+	                strchr(query, '/') != NULL);
+	if (!is_path) {
 		return NULL;
 	}
 	char expanded[PATH_MAX];
@@ -1126,8 +1207,19 @@ static char *open_file_expand_path_query(const char *query)
 		} else {
 			return NULL;  /* ~username not supported */
 		}
-	} else {
+	} else if (query[0] == '/') {
+		/* Absolute path */
 		strncpy(expanded, query, PATH_MAX - 1);
+	} else {
+		/* Relative path (.., ./foo, src/) - resolve from dialog's current directory */
+		size_t base_len = strlen(open_file.current_path);
+		size_t query_len = strlen(query);
+		if (base_len + 1 + query_len >= PATH_MAX) {
+			return NULL;  /* Path too long */
+		}
+		memcpy(expanded, open_file.current_path, base_len);
+		expanded[base_len] = '/';
+		memcpy(expanded + base_len + 1, query, query_len + 1);
 	}
 	expanded[PATH_MAX - 1] = '\0';
 	/* Resolve to absolute path */
@@ -1388,9 +1480,12 @@ static void open_file_draw(void)
 		}
 	}
 
-	/* Draw footer */
-	dialog_draw_footer(&output, &open_file.dialog,
-	                   "Tab:Hidden  Shift+Tab:Icons  Enter:Open  Esc:Cancel");
+	/* Draw footer with fuzzy mode indicator */
+	char footer[128];
+	snprintf(footer, sizeof(footer),
+	         "Tab:Hidden  Alt+F:Fuzzy[%s]  Enter:Open  Esc:Cancel",
+	         open_file.fuzzy_mode ? "on" : "off");
+	dialog_draw_footer(&output, &open_file.dialog, footer);
 
 	/* Position cursor in query area and show it */
 	output_buffer_append_string(&output, ESCAPE_RESET);
@@ -1539,6 +1634,13 @@ char *open_file_dialog(void)
 		if (key == KEY_SHIFT_TAB) {
 			editor.show_file_icons = !editor.show_file_icons;
 			config_save();
+			continue;
+		}
+
+		/* Alt+F toggles fuzzy mode */
+		if (key == KEY_ALT_F) {
+			open_file.fuzzy_mode = !open_file.fuzzy_mode;
+			open_file_apply_filter();
 			continue;
 		}
 

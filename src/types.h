@@ -295,6 +295,7 @@ enum key_code {
 	KEY_ALT_M = -71,
 	KEY_ALT_T = -72,
 	KEY_ALT_O = -74,
+	KEY_ALT_F = -77,
 
 	/* Shift+Tab (backtab). */
 	KEY_SHIFT_TAB = -78,
@@ -770,12 +771,13 @@ struct open_file_state {
 	struct file_list_item *items;
 	int item_count;
 
-	/* Fuzzy filter state. */
+	/* Filter state */
 	char query[256];             /* Search query (UTF-8) */
 	int query_length;            /* Length of query in bytes */
 	int *filtered_indices;       /* Indices into items[] that match query */
 	int *filtered_scores;        /* Score for each filtered item */
 	int filtered_count;          /* Number of matching items */
+	bool fuzzy_mode;             /* false = substring, true = fuzzy */
 };
 
 /*

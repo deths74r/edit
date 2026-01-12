@@ -222,6 +222,7 @@ int input_read_key(void)
 				case 't': case 'T': return KEY_ALT_T;
 				case 'm': case 'M': return KEY_ALT_M;
 				case 'o': case 'O': return KEY_ALT_O;
+				case 'f': case 'F': return KEY_ALT_F;
 				default: return '\x1b';
 			}
 		}
