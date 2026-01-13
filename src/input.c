@@ -14,12 +14,21 @@
  */
 
 #include "input.h"
+#include "error.h"
 #include "terminal.h"
 #include "../third_party/utflite-1.5.2/single_include/utflite.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <unistd.h>
+
+/*****************************************************************************
+ * Kitty Keyboard Protocol Constants
+ *****************************************************************************/
+
+#define KITTY_KEY_CODEPOINT_LEFT_SHIFT 57441
+#define KITTY_KEY_CODEPOINT_RIGHT_SHIFT 57442
+#define KITTY_KEY_EVENT_RELEASE 3
 
 /*****************************************************************************
  * Static State
@@ -31,6 +40,7 @@ static struct mouse_input dialog_last_mouse = {0};
 
 /* Registered mouse handler for normal mode */
 static mouse_handler_func mouse_handler = NULL;
+static bool shift_key_held = false;
 
 /*****************************************************************************
  * Dialog Mouse Mode
@@ -158,6 +168,248 @@ struct mouse_input input_parse_sgr_mouse(void)
 }
 
 /*****************************************************************************
+ * Extended CSI Parsing (Kitty Keyboard Protocol + Legacy)
+ *****************************************************************************/
+
+/*
+ * Map CSI u codepoint to key (for 'u' terminated sequences).
+ * codepoint is the first number, modifier bits already decoded.
+ */
+static int
+map_csi_u_codepoint(int codepoint, bool shift, bool alt, bool ctrl)
+{
+	(void)alt;  /* Alt+key handled separately via ESC prefix */
+
+	switch (codepoint) {
+	case 9:   /* Tab */
+		if (shift) return KEY_SHIFT_TAB;
+		return '\t';
+	case 13:  /* Enter */
+		if (ctrl) return KEY_CTRL_ENTER;
+		return '\r';
+	case 27:  /* Escape */
+		return 27;
+	case 32:  /* Space */
+		if (ctrl) return 0;  /* Ctrl+Space = leader key */
+		if (shift) return KEY_SHIFT_SPACE;
+		return ' ';
+	case 127: /* Backspace */
+		return KEY_BACKSPACE;
+	}
+
+	/* Regular ASCII characters */
+	if (codepoint >= 32 && codepoint < 127) {
+		if (ctrl && shift) {
+			if (codepoint == 'n' || codepoint == 'N')
+				return KEY_CTRL_SHIFT_N;
+			if (codepoint == 'o' || codepoint == 'O')
+				return KEY_CTRL_SHIFT_O;
+		}
+		return codepoint;
+	}
+
+	/*
+	 * Unrecognized codepoints (e.g., modifier keys like Shift/Ctrl/Alt
+	 * which use codepoints 57441-57452) should be ignored, not treated
+	 * as errors. Return -2 to indicate "recognized but ignored".
+	 */
+	return -2;
+}
+
+/*
+ * Map parsed CSI sequence to key code.
+ * buffer contains "number" or "number;modifier" or "number;modifier;..."
+ * terminator is the final character (u, A, B, C, D, H, F, ~, etc.)
+ */
+static int
+map_extended_csi(const char *buffer, char terminator)
+{
+	int num1 = 0, modifier = 1;
+	int event = 1;
+
+	/* Parse first number */
+	const char *p = buffer;
+	while (*p >= '0' && *p <= '9') {
+		num1 = num1 * 10 + (*p - '0');
+		p++;
+	}
+
+	/* CSI u format: codepoint ; modifier u */
+	if (terminator == 'u') {
+		bool log_sequence = false;  /* Enable for debugging Shift+Space issues */
+		(void)log_sequence;  /* Suppress unused warning when disabled */
+
+		/* Skip optional alternate keys: codepoint:alternate-keys */
+		if (*p == ':') {
+			while (*p != '\0' && *p != ';') {
+				p++;
+			}
+		}
+
+		/* Parse modifier and optional event type: modifier[:event] */
+		if (*p == ';') {
+			bool has_digit = false;
+			p++;
+			modifier = 0;
+			while (*p >= '0' && *p <= '9') {
+				modifier = modifier * 10 + (*p - '0');
+				p++;
+				has_digit = true;
+			}
+			if (!has_digit) {
+				modifier = 1;
+			}
+			if (*p == ':') {
+				int parsed_event = 0;
+				bool has_event = false;
+				p++;
+				while (*p >= '0' && *p <= '9') {
+					parsed_event = parsed_event * 10 + (*p - '0');
+					p++;
+					has_event = true;
+				}
+				if (has_event) {
+					event = parsed_event;
+				}
+			}
+		}
+
+		/* Decode modifier bits: modifier = 1 + shift(1) + alt(2) + ctrl(4) + ... */
+		int mod_bits = (modifier > 0) ? modifier - 1 : 0;
+		bool shift = (mod_bits & 1) != 0;
+		bool alt = (mod_bits & 2) != 0;
+		bool ctrl = (mod_bits & 4) != 0;
+
+		if (log_sequence) {
+			debug_log("CSI u buffer='%s' codepoint=%d modifier=%d event=%d shift=%d alt=%d ctrl=%d",
+				  buffer, num1, modifier, event, shift, alt, ctrl);
+		}
+
+		if (num1 == KITTY_KEY_CODEPOINT_LEFT_SHIFT ||
+		    num1 == KITTY_KEY_CODEPOINT_RIGHT_SHIFT) {
+			shift_key_held = (event != KITTY_KEY_EVENT_RELEASE);
+			if (log_sequence) {
+				debug_log("CSI u shift_key_held=%d", shift_key_held);
+			}
+			return -2;
+		}
+
+		if (event == KITTY_KEY_EVENT_RELEASE) {
+			if (log_sequence) {
+				debug_log("CSI u release ignored codepoint=%d", num1);
+			}
+			return -2;
+		}
+
+		int mapped_key = map_csi_u_codepoint(num1, shift, alt, ctrl);
+		if (log_sequence) {
+			debug_log("CSI u mapped_key=%d", mapped_key);
+		}
+		return mapped_key;
+	}
+
+	/* Parse modifier if present */
+	if (*p == ';') {
+		p++;
+		modifier = 0;
+		while (*p >= '0' && *p <= '9') {
+			modifier = modifier * 10 + (*p - '0');
+			p++;
+		}
+	}
+
+	/* Decode modifier bits: modifier = 1 + shift(1) + alt(2) + ctrl(4) + ... */
+	int mod_bits = (modifier > 0) ? modifier - 1 : 0;
+	bool shift = (mod_bits & 1) != 0;
+	bool alt = (mod_bits & 2) != 0;
+	bool ctrl = (mod_bits & 4) != 0;
+
+	/* Arrow keys: 1 ; modifier A/B/C/D */
+	if (terminator == 'A') {  /* Up */
+		if (shift) return KEY_SHIFT_ARROW_UP;
+		if (alt) return KEY_ALT_ARROW_UP;
+		return KEY_ARROW_UP;
+	}
+	if (terminator == 'B') {  /* Down */
+		if (shift) return KEY_SHIFT_ARROW_DOWN;
+		if (alt) return KEY_ALT_ARROW_DOWN;
+		return KEY_ARROW_DOWN;
+	}
+	if (terminator == 'C') {  /* Right */
+		if (ctrl && shift) return KEY_CTRL_SHIFT_ARROW_RIGHT;
+		if (ctrl) return KEY_CTRL_ARROW_RIGHT;
+		if (shift) return KEY_SHIFT_ARROW_RIGHT;
+		if (alt) return KEY_ALT_ARROW_RIGHT;
+		return KEY_ARROW_RIGHT;
+	}
+	if (terminator == 'D') {  /* Left */
+		if (ctrl && shift) return KEY_CTRL_SHIFT_ARROW_LEFT;
+		if (ctrl) return KEY_CTRL_ARROW_LEFT;
+		if (shift) return KEY_SHIFT_ARROW_LEFT;
+		if (alt) return KEY_ALT_ARROW_LEFT;
+		return KEY_ARROW_LEFT;
+	}
+
+	/* Home/End: 1 ; modifier H/F */
+	if (terminator == 'H') {
+		if (ctrl) return KEY_CTRL_HOME;
+		if (shift) return KEY_SHIFT_HOME;
+		return KEY_HOME;
+	}
+	if (terminator == 'F') {
+		if (ctrl) return KEY_CTRL_END;
+		if (shift) return KEY_SHIFT_END;
+		return KEY_END;
+	}
+
+	/* Legacy ~ format: number ; modifier ~ */
+	if (terminator == '~') {
+		switch (num1) {
+		case 3: return KEY_DELETE;
+		case 5:
+			if (shift) return KEY_SHIFT_PAGE_UP;
+			return KEY_PAGE_UP;
+		case 6:
+			if (shift) return KEY_SHIFT_PAGE_DOWN;
+			return KEY_PAGE_DOWN;
+		}
+	}
+
+	/* F-keys: ESC O P/Q/R/S for F1-F4 handled elsewhere */
+	if (terminator == 'P') return KEY_F1;
+	if (terminator == 'R') return KEY_F3;
+
+	return -1;
+}
+
+/*
+ * Parse extended CSI sequence after ESC [ and first digit.
+ * Handles both CSI u format and extended arrow/function key format.
+ * Returns KEY_* constant or -1 if not recognized.
+ */
+static int
+parse_extended_csi(char first_digit)
+{
+	char c;
+	char buffer[32];
+	int buf_idx = 0;
+
+	/* Store first digit */
+	buffer[buf_idx++] = first_digit;
+
+	/* Read until we hit a terminator (letter or ~) */
+	while (buf_idx < 31 && read(STDIN_FILENO, &c, 1) == 1) {
+		if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '~') {
+			/* Found terminator */
+			buffer[buf_idx] = '\0';
+			return map_extended_csi(buffer, c);
+		}
+		buffer[buf_idx++] = c;
+	}
+	return -1;
+}
+
+/*****************************************************************************
  * Key Reading
  *****************************************************************************/
 
@@ -233,118 +485,20 @@ int input_read_key(void)
 
 		if (sequence[0] == '[') {
 			if (sequence[1] >= '0' && sequence[1] <= '9') {
-				if (read(STDIN_FILENO, &sequence[2], 1) != 1) {
-					return '\x1b';
+				/*
+				 * Extended CSI sequence handling.
+				 * Kitty sends: arrows as ESC[1;modA/B/C/D
+				 *              space/enter as ESC[cp;modu
+				 *              pgup/pgdn as ESC[5;mod~ / ESC[6;mod~
+				 */
+				int key = parse_extended_csi(sequence[1]);
+				if (key == -2) {
+					/* Ignored key (e.g., modifier key press/release) */
+					return input_read_key();
 				}
-				if (sequence[2] == '~') {
-					switch (sequence[1]) {
-						case '1': return KEY_HOME;
-						case '3': return KEY_DELETE;
-						case '4': return KEY_END;
-						case '5': return KEY_PAGE_UP;
-						case '6': return KEY_PAGE_DOWN;
-						case '7': return KEY_HOME;
-						case '8': return KEY_END;
-					}
-				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
-					/* Two-digit sequences like \x1b[13~ for F3, \x1b[25~ for Shift+F3 */
-					/* Also handles \x1b[13;2~ format (code;modifier~) */
-					char digit3;
-					if (read(STDIN_FILENO, &digit3, 1) != 1) {
-						return '\x1b';
-					}
-					int code = (sequence[1] - '0') * 10 + (sequence[2] - '0');
-					if (digit3 == '~') {
-						if (code == 11) return KEY_F1;       /* F1 */
-						if (code == 13) return KEY_F3;       /* F3 */
-						if (code == 25) return KEY_SHIFT_F3; /* Shift+F3 */
-					} else if (digit3 == ';') {
-						/* Modified two-digit key: \x1b[13;2~ = Shift+F3 */
-						char modifier, final;
-						if (read(STDIN_FILENO, &modifier, 1) != 1) {
-							return '\x1b';
-						}
-						if (read(STDIN_FILENO, &final, 1) != 1) {
-							return '\x1b';
-						}
-						if (final == '~' && modifier == '2') {  /* Shift modifier */
-							if (code == 13) return KEY_SHIFT_F3;
-						}
-						/* CSI u mode: \x1b[codepoint;modifieru */
-						if (final == 'u' && modifier == '6') {  /* Ctrl+Shift */
-							if (code == 78 || code == 110) return KEY_CTRL_SHIFT_N;
-							if (code == 79 || code == 111) return KEY_CTRL_SHIFT_O;
-						}
-					} else if (digit3 >= '0' && digit3 <= '9') {
-						/* Three-digit code: \x1b[110;6u for CSI u mode */
-						char next;
-						if (read(STDIN_FILENO, &next, 1) != 1) {
-							return '\x1b';
-						}
-						int code3 = code * 10 + (digit3 - '0');
-						if (next == ';') {
-							char modifier, final;
-							if (read(STDIN_FILENO, &modifier, 1) != 1) {
-								return '\x1b';
-							}
-							if (read(STDIN_FILENO, &final, 1) != 1) {
-								return '\x1b';
-							}
-							/* CSI u mode: \x1b[codepoint;modifieru */
-							if (final == 'u' && modifier == '6') {  /* Ctrl+Shift */
-								if (code3 == 110) return KEY_CTRL_SHIFT_N;  /* 'n' */
-								if (code3 == 111) return KEY_CTRL_SHIFT_O;  /* 'o' */
-							}
-						}
-					}
-				} else if (sequence[2] == ';') {
-					/* Modified key sequences */
-					char modifier, final;
-					if (read(STDIN_FILENO, &modifier, 1) != 1) {
-						return '\x1b';
-					}
-					if (read(STDIN_FILENO, &final, 1) != 1) {
-						return '\x1b';
-					}
-					if (sequence[1] == '1') {
-						/* \x1b[1;{mod}{key} - modified arrow/Home/End */
-						if (modifier == '2') {  /* Shift */
-							switch (final) {
-								case 'A': return KEY_SHIFT_ARROW_UP;
-								case 'B': return KEY_SHIFT_ARROW_DOWN;
-								case 'C': return KEY_SHIFT_ARROW_RIGHT;
-								case 'D': return KEY_SHIFT_ARROW_LEFT;
-								case 'H': return KEY_SHIFT_HOME;
-								case 'F': return KEY_SHIFT_END;
-								case 'R': return KEY_SHIFT_F3;
-							}
-						} else if (modifier == '5') {  /* Ctrl */
-							switch (final) {
-								case 'C': return KEY_CTRL_ARROW_RIGHT;
-								case 'D': return KEY_CTRL_ARROW_LEFT;
-								case 'H': return KEY_CTRL_HOME;
-								case 'F': return KEY_CTRL_END;
-							}
-						} else if (modifier == '6') {  /* Ctrl+Shift */
-							switch (final) {
-								case 'C': return KEY_CTRL_SHIFT_ARROW_RIGHT;
-								case 'D': return KEY_CTRL_SHIFT_ARROW_LEFT;
-							}
-						} else if (modifier == '3') {  /* Alt */
-							switch (final) {
-								case 'A': return KEY_ALT_ARROW_UP;
-								case 'B': return KEY_ALT_ARROW_DOWN;
-								case 'C': return KEY_ALT_ARROW_RIGHT;
-								case 'D': return KEY_ALT_ARROW_LEFT;
-							}
-						}
-					} else if ((sequence[1] == '5' || sequence[1] == '6') &&
-					           modifier == '2' && final == '~') {
-						/* \x1b[5;2~ or \x1b[6;2~ - Shift+PageUp/Down */
-						if (sequence[1] == '5') return KEY_SHIFT_PAGE_UP;
-						if (sequence[1] == '6') return KEY_SHIFT_PAGE_DOWN;
-					}
-				}
+				if (key != -1)
+					return key;
+				/* Fall through to return ESC if not recognized */
 			} else if (sequence[1] == '<') {
 				/* SGR mouse event: \x1b[<button;column;row{M|m} */
 				struct mouse_input mouse = input_parse_sgr_mouse();
@@ -412,6 +566,11 @@ int input_read_key(void)
 		uint32_t codepoint;
 		utflite_decode(utf8_buffer, bytes_to_read + 1, &codepoint);
 		return (int)codepoint;
+	}
+
+	if (character == ' ' && shift_key_held) {
+		debug_log("raw space with shift_key_held=1");
+		return KEY_SHIFT_SPACE;
 	}
 
 	/* Handle Ctrl+key combinations for file operations */

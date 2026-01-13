@@ -68,6 +68,10 @@ int terminal_enable_raw_mode(void)
 	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) < 0)
 		return -EEDIT_TERMRAW;
 
+	/* Enable Kitty keyboard protocol for enhanced key detection */
+	write(STDOUT_FILENO, ESCAPE_KITTY_KEYBOARD_ENABLE,
+	      ESCAPE_KITTY_KEYBOARD_ENABLE_LENGTH);
+
 	raw_mode_enabled = true;
 	return 0;
 }
@@ -80,6 +84,9 @@ int terminal_enable_raw_mode(void)
 void terminal_disable_raw_mode(void)
 {
 	terminal_disable_mouse();
+	/* Disable Kitty keyboard protocol */
+	write(STDOUT_FILENO, ESCAPE_KITTY_KEYBOARD_DISABLE,
+	      ESCAPE_KITTY_KEYBOARD_DISABLE_LENGTH);
 	if (settings_saved)
 		tcsetattr(STDIN_FILENO, TCSAFLUSH, &original_terminal_settings);
 	raw_mode_enabled = false;

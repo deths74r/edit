@@ -586,6 +586,8 @@ keybinding_key_string(enum editor_action action, char *buffer, size_t size)
 		case KEY_CTRL_W: snprintf(buffer, size, "Ctrl+W"); return buffer;
 		case KEY_CTRL_SHIFT_N: snprintf(buffer, size, "Ctrl+Shift+N"); return buffer;
 		case KEY_CTRL_SHIFT_O: snprintf(buffer, size, "Ctrl+Shift+O"); return buffer;
+		case KEY_SHIFT_SPACE: snprintf(buffer, size, "Shift+Space"); return buffer;
+		case KEY_CTRL_ENTER: snprintf(buffer, size, "Ctrl+Enter"); return buffer;
 		case 27: snprintf(buffer, size, "Esc"); return buffer;
 		case '\t': snprintf(buffer, size, "Tab"); return buffer;
 		case '\r': snprintf(buffer, size, "Enter"); return buffer;

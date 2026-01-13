@@ -23,6 +23,7 @@
 #include "syntax.h"
 #include "keybindings.h"
 #include "command.h"
+#include "theme.h"
 #include <execinfo.h>
 
 /*****************************************************************************
@@ -7582,6 +7583,7 @@ execute_action(enum editor_action action)
 		return true;
 	case ACTION_TOGGLE_BAR_POSITION:
 		editor.bar_at_top = !editor.bar_at_top;
+		config_save();
 		editor_set_status_message("Message bar at %s",
 		                          editor.bar_at_top ? "top" : "bottom");
 		return true;
@@ -7722,8 +7724,8 @@ void editor_process_keypress(void)
 	/* Handle mouse events directly (processed in input_read_key) */
 	if (key == KEY_MOUSE_EVENT)
 		return;
-	/* Leader key (Ctrl+Space) enters command mode */
-	if (key == 0) {
+	/* Leader keys enter command mode */
+	if (key == 0 || key == KEY_SHIFT_SPACE || key == KEY_CTRL_ENTER) {
 		command_mode_enter();
 		return;
 	}

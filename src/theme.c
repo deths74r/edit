@@ -2478,6 +2478,11 @@ void config_load(void)
 				editor.tab_width = value;
 			}
 		}
+		/* Parse bar_at_top=<true|false> */
+		else if (strncmp(line, "bar_at_top=", 11) == 0) {
+			char *value = line + 11;
+			editor.bar_at_top = (strcmp(value, "true") == 0);
+		}
 	}
 
 	fclose(file);
@@ -2519,6 +2524,9 @@ void config_save(void)
 
 	/* Editor settings */
 	fprintf(file, "tab_width=%d\n", editor.tab_width);
+
+	/* Bar position */
+	fprintf(file, "bar_at_top=%s\n", editor.bar_at_top ? "true" : "false");
 
 	fclose(file);
 }

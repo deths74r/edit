@@ -137,6 +137,15 @@
 #define ESCAPE_MOUSE_SGR_DISABLE "\x1b[?1006l"
 #define ESCAPE_MOUSE_DRAG_DISABLE "\x1b[?1002l"
 #define ESCAPE_MOUSE_BUTTON_DISABLE "\x1b[?1000l"
+/* Kitty keyboard protocol (CSI u) - enables Shift+Space, Ctrl+Enter detection */
+/* Kitty keyboard flags: 1=disambiguate, 2=report events, 4=alternate keys,
+ * 8=all keys as escapes, 16=report text. We need flag 1 for Ctrl+Space
+ * and flag 8 to get Shift+Space reported as CSI u instead of plain space.
+ * 1 + 8 = 9 */
+#define ESCAPE_KITTY_KEYBOARD_ENABLE "\x1b[>9u"
+#define ESCAPE_KITTY_KEYBOARD_ENABLE_LENGTH 5
+#define ESCAPE_KITTY_KEYBOARD_DISABLE "\x1b[<u"
+#define ESCAPE_KITTY_KEYBOARD_DISABLE_LENGTH 4
 /* Text attribute reset */
 #define ESCAPE_RESET "\x1b[0m"
 #define ESCAPE_RESET_LENGTH 4
@@ -265,6 +274,8 @@ enum key_code {
 	KEY_CTRL_W = -46,
 	KEY_CTRL_SHIFT_N = -43,
 	KEY_CTRL_SHIFT_O = -42,
+	KEY_SHIFT_SPACE = -41,
+	KEY_CTRL_ENTER = -40,
 
 	/* Function keys. */
 	KEY_F1 = -45,
