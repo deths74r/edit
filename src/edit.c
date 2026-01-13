@@ -7724,6 +7724,108 @@ void editor_process_keypress(void)
 	/* Handle mouse events directly (processed in input_read_key) */
 	if (key == KEY_MOUSE_EVENT)
 		return;
+
+	/* Space hold-to-activate command mode (Kitty protocol only) */
+	if (key == KEY_SPACE_PRESS && !command_mode_active()) {
+		debug_log("SPACE_PRESS received");
+		int threshold = editor.space_hold_threshold_ms;
+		bool command_executed = false;
+
+		/* Wait up to threshold for release or other key - single call, no polling */
+		int next_key = input_read_key_timeout(threshold);
+		debug_log("next_key=%d (RELEASE=%d, timeout=0)", next_key, KEY_SPACE_RELEASE);
+
+		debug_log("Checking: next_key(%d) == KEY_SPACE_RELEASE(%d) ? %s", 
+		          next_key, KEY_SPACE_RELEASE, 
+		          (next_key == KEY_SPACE_RELEASE) ? "YES" : "NO");
+		if (next_key == KEY_SPACE_RELEASE) {
+			/* Fast tap - insert space immediately */
+			debug_log("Fast release - inserting space");
+			multicursor_insert_character(' ');
+			return;
+		}
+		debug_log("Did NOT match release, continuing...");
+
+		if (next_key == 0) {
+			/* Timeout - threshold passed, enter command mode */
+			debug_log("Timeout - entering command mode");
+			command_mode_enter_held();
+		} else if (next_key == KEY_RESIZE) {
+			editor_update_screen_size();
+			command_mode_enter_held();
+		} else if (next_key != KEY_MOUSE_EVENT && next_key != -2) {
+			/* Other key while space held - check release order */
+			int pending_key = next_key;
+			debug_log("Pending key %d - waiting for release order", pending_key);
+
+			/* Wait to see if space releases first (fast typing) or not (command) */
+			int release_event = input_read_key_timeout(300);
+
+			if (release_event == KEY_SPACE_RELEASE) {
+				/* Space released first = fast typing overlap */
+				debug_log("Space released first - fast typing");
+				multicursor_insert_character(' ');
+				if (pending_key >= 32 && pending_key < 127) {
+					multicursor_insert_character(pending_key);
+				}
+				return;
+			}
+
+			/* Space NOT released first = intentional command */
+			debug_log("Not space release (%d) - treating as command", release_event);
+			command_mode_enter_held();
+			command_mode_handle_key(pending_key);
+			command_executed = true;
+
+			/* If we got another key, handle it too */
+			if (release_event > 0 && release_event != KEY_SPACE_RELEASE &&
+			    release_event != KEY_MOUSE_EVENT && release_event != -2) {
+				command_mode_handle_key(release_event);
+			}
+		} else {
+			/* Mouse event or ignored key - enter command mode */
+			debug_log("Mouse/ignored %d - entering command mode", next_key);
+			command_mode_enter_held();
+		}
+
+		/* Command mode active - wait for release */
+		while (command_mode_active()) {
+			int __attribute__((unused)) ret = render_refresh_screen();
+			int cmd_key = input_read_key_timeout(50);
+
+			if (cmd_key == KEY_SPACE_RELEASE) {
+				debug_log("Release in loop, command_executed=%d", command_executed);
+				command_mode_exit();
+				/* No command executed = slow tap, insert space */
+				if (!command_executed) {
+					debug_log("Inserting space (no command executed)");
+					multicursor_insert_character(' ');
+				} else {
+					debug_log("NOT inserting space (command was executed)");
+				}
+				return;
+			}
+			if (cmd_key == 27) {  /* Escape - cancel, no space */
+				debug_log("Escape - canceling, no space");
+				command_mode_exit();
+				return;
+			}
+			if (cmd_key == KEY_RESIZE) {
+				editor_update_screen_size();
+				continue;
+			}
+			if (cmd_key > 0 && cmd_key != KEY_MOUSE_EVENT && cmd_key != -2) {
+				debug_log("Command key %d, setting command_executed=true", cmd_key);
+				command_mode_handle_key(cmd_key);
+				command_executed = true;
+			}
+		}
+		return;
+	}
+	if (key == KEY_SPACE_RELEASE) {
+		return;  /* Orphan release, ignore */
+	}
+
 	/* Leader keys enter command mode */
 	if (key == 0 || key == KEY_SHIFT_SPACE || key == KEY_CTRL_ENTER) {
 		command_mode_enter();

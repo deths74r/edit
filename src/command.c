@@ -25,6 +25,7 @@ extern void editor_set_status_message(const char *format, ...);
  *****************************************************************************/
 
 static enum command_mode_state current_state = COMMAND_MODE_NONE;
+static bool held_mode = false;  /* True when activated via space-hold */
 
 /*****************************************************************************
  * Command Mappings
@@ -110,6 +111,15 @@ void
 command_mode_enter(void)
 {
 	current_state = COMMAND_MODE_TOP;
+	held_mode = false;
+	editor_set_status_message("[Command]");
+}
+
+void
+command_mode_enter_held(void)
+{
+	current_state = COMMAND_MODE_TOP;
+	held_mode = true;
 	editor_set_status_message("[Command]");
 }
 
@@ -117,6 +127,7 @@ void
 command_mode_exit(void)
 {
 	current_state = COMMAND_MODE_NONE;
+	held_mode = false;
 	editor_set_status_message("");
 }
 
@@ -185,7 +196,9 @@ handle_top_level_key(int key)
 	/* Check for direct action keys */
 	enum editor_action action = command_top_level_action(key);
 	if (action != ACTION_NONE) {
-		command_mode_exit();
+		if (!held_mode) {
+			command_mode_exit();
+		}
 		execute_action(action);
 		return true;
 	}
@@ -212,7 +225,13 @@ handle_submenu_key(int key, enum editor_action (*action_func)(int))
 
 	enum editor_action action = action_func(key);
 	if (action != ACTION_NONE) {
-		command_mode_exit();
+		if (!held_mode) {
+			command_mode_exit();
+		} else {
+			/* In held mode, go back to top level after action */
+			current_state = COMMAND_MODE_TOP;
+			editor_set_status_message("[Command]");
+		}
 		execute_action(action);
 		return true;
 	}

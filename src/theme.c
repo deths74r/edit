@@ -2483,6 +2483,13 @@ void config_load(void)
 			char *value = line + 11;
 			editor.bar_at_top = (strcmp(value, "true") == 0);
 		}
+		/* Parse space_hold_threshold=<milliseconds> */
+		else if (strncmp(line, "space_hold_threshold=", 21) == 0) {
+			int value = atoi(line + 21);
+			if (value >= 50 && value <= 500) {
+				editor.space_hold_threshold_ms = value;
+			}
+		}
 	}
 
 	fclose(file);
@@ -2527,6 +2534,9 @@ void config_save(void)
 
 	/* Bar position */
 	fprintf(file, "bar_at_top=%s\n", editor.bar_at_top ? "true" : "false");
+
+	/* Space hold-to-latch threshold */
+	fprintf(file, "space_hold_threshold=%d\n", editor.space_hold_threshold_ms);
 
 	fclose(file);
 }

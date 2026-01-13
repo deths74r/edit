@@ -104,6 +104,7 @@ void editor_init(void)
 	editor.fuzzy_max_depth = 10;
 	editor.fuzzy_max_files = 10000;
 	editor.fuzzy_case_sensitive = false;
+	editor.space_hold_threshold_ms = SPACE_HOLD_THRESHOLD_DEFAULT;
 	editor.help_context_index = -1;
 	editor.previous_context_before_help = 0;
 

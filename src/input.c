@@ -28,6 +28,9 @@
 
 #define KITTY_KEY_CODEPOINT_LEFT_SHIFT 57441
 #define KITTY_KEY_CODEPOINT_RIGHT_SHIFT 57442
+#define KITTY_KEY_CODEPOINT_SPACE 32
+#define KITTY_KEY_EVENT_PRESS 1
+#define KITTY_KEY_EVENT_REPEAT 2
 #define KITTY_KEY_EVENT_RELEASE 3
 
 /*****************************************************************************
@@ -41,6 +44,7 @@ static struct mouse_input dialog_last_mouse = {0};
 /* Registered mouse handler for normal mode */
 static mouse_handler_func mouse_handler = NULL;
 static bool shift_key_held = false;
+static bool space_key_held = false;
 
 /*****************************************************************************
  * Dialog Mouse Mode
@@ -292,6 +296,21 @@ map_extended_csi(const char *buffer, char terminator)
 				debug_log("CSI u shift_key_held=%d", shift_key_held);
 			}
 			return -2;
+		}
+
+		/* Track space key for hold-to-latch detection */
+		if (num1 == KITTY_KEY_CODEPOINT_SPACE && !shift && !ctrl) {
+			if (event == KITTY_KEY_EVENT_PRESS) {
+				space_key_held = true;
+				return KEY_SPACE_PRESS;
+			}
+			if (event == KITTY_KEY_EVENT_RELEASE) {
+				space_key_held = false;
+				return KEY_SPACE_RELEASE;
+			}
+			if (event == KITTY_KEY_EVENT_REPEAT) {
+				return -2;  /* Ignore space repeats */
+			}
 		}
 
 		if (event == KITTY_KEY_EVENT_RELEASE) {

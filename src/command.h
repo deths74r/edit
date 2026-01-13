@@ -24,6 +24,13 @@
 void command_mode_enter(void);
 
 /*
+ * Enter command mode in "held" mode (activated via space-hold).
+ * In held mode, executing a command does not exit command mode.
+ * Command mode exits when space is released.
+ */
+void command_mode_enter_held(void);
+
+/*
  * Exit command mode. Resets state to COMMAND_MODE_NONE
  * and clears the status bar message.
  */

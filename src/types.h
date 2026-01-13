@@ -139,13 +139,17 @@
 #define ESCAPE_MOUSE_BUTTON_DISABLE "\x1b[?1000l"
 /* Kitty keyboard protocol (CSI u) - enables Shift+Space, Ctrl+Enter detection */
 /* Kitty keyboard flags: 1=disambiguate, 2=report events, 4=alternate keys,
- * 8=all keys as escapes, 16=report text. We need flag 1 for Ctrl+Space
- * and flag 8 to get Shift+Space reported as CSI u instead of plain space.
- * 1 + 8 = 9 */
-#define ESCAPE_KITTY_KEYBOARD_ENABLE "\x1b[>9u"
-#define ESCAPE_KITTY_KEYBOARD_ENABLE_LENGTH 5
+ * 8=all keys as escapes, 16=report text. We need:
+ * - flag 1 for Ctrl+Space
+ * - flag 2 for key release events (space hold-to-latch)
+ * - flag 8 to get Shift+Space reported as CSI u instead of plain space
+ * 1 + 2 + 8 = 11 */
+#define ESCAPE_KITTY_KEYBOARD_ENABLE "\x1b[>11u"
+#define ESCAPE_KITTY_KEYBOARD_ENABLE_LENGTH 6
 #define ESCAPE_KITTY_KEYBOARD_DISABLE "\x1b[<u"
 #define ESCAPE_KITTY_KEYBOARD_DISABLE_LENGTH 4
+/* Space hold-to-activate threshold (milliseconds) */
+#define SPACE_HOLD_THRESHOLD_DEFAULT 100
 /* Text attribute reset */
 #define ESCAPE_RESET "\x1b[0m"
 #define ESCAPE_RESET_LENGTH 4
@@ -276,6 +280,8 @@ enum key_code {
 	KEY_CTRL_SHIFT_O = -42,
 	KEY_SHIFT_SPACE = -41,
 	KEY_CTRL_ENTER = -40,
+	KEY_SPACE_PRESS = -37,   /* Space pressed (Kitty protocol, for hold detection) */
+	KEY_SPACE_RELEASE = -38, /* Space released (Kitty protocol, for hold detection) */
 
 	/* Function keys. */
 	KEY_F1 = -45,
@@ -1220,6 +1226,7 @@ struct editor_state {
 	enum color_column_style color_column_style;  /* Visual style for column */
 	enum theme_indicator theme_indicator;  /* Current theme marker style */
 	bool bar_at_top;             /* Status/message bar at top of screen */
+	int space_hold_threshold_ms; /* Threshold for space hold-to-latch (default: 150) */
 
 	/* Fuzzy finder settings for file open dialog. */
 	int fuzzy_max_depth;         /* Max directory recursion depth (default: 10) */
