@@ -35,6 +35,15 @@ int input_read_key(void);
  */
 bool input_available(void);
 
+/*
+ * Read a key with timeout.
+ * Returns:
+ *   > 0: key code
+ *   0: timeout (no input available)
+ *   -1: error
+ */
+int input_read_key_timeout(int timeout_ms);
+
 /*****************************************************************************
  * Mouse Input
  *****************************************************************************/

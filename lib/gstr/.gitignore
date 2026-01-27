@@ -1,0 +1,11 @@
+# Build artifacts
+build/
+test/test_gstr
+test/test_gstr_stress
+test/test_new_functions_stress
+test/test_single
+*.db
+
+# Sift agent memory (per-project database)
+.sift/
+.zig-cache/
