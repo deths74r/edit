@@ -35,6 +35,7 @@ extern int current_theme_index;
 /* Functions from edit.c that we call */
 extern void editor_save(void);
 extern int file_save(struct buffer *buffer);
+extern int buffer_write_to_fd(struct buffer *buffer, int fd);
 
 /* Functions from input.c */
 extern int input_read_key(void);
@@ -115,6 +116,17 @@ void editor_init(void) {
  * Perform clean exit.
  */
 void editor_perform_exit(void) {
+  /* Write buffer to stdout pipe if in pipe output mode */
+  if (editor.pipe_output_mode && editor.pipe_output_fd >= 0) {
+    int ret = buffer_write_to_fd(&editor.buffer, editor.pipe_output_fd);
+    if (ret < 0) {
+      /* Write error to stderr since stdout is redirected */
+      fprintf(stderr, "edit: error writing to stdout: %s\n", strerror(-ret));
+    }
+    close(editor.pipe_output_fd);
+    editor.pipe_output_fd = -1;
+  }
+
   terminal_clear_screen();
   if (!editor.buffer.is_modified) {
     autosave_remove_swap();

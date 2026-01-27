@@ -1115,6 +1115,10 @@ struct editor_state {
 
   /* UI layout settings. */
   bool bar_at_top; /* True = status bar at top, false = at bottom (default) */
+
+  /* Pipe output mode (stdout was a pipe at startup). */
+  bool pipe_output_mode;
+  int pipe_output_fd;
 };
 
 /*****************************************************************************

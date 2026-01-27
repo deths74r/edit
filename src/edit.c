@@ -1326,6 +1326,29 @@ int __must_check file_save(struct buffer *buffer) {
   return 0;
 }
 
+/*
+ * Write buffer content to a file descriptor as UTF-8.
+ * Used for pipe output mode.
+ * Returns 0 on success, negative errno on failure.
+ */
+int buffer_write_to_fd(struct buffer *buffer, int fd) {
+  for (uint32_t row = 0; row < buffer->line_count; row++) {
+    struct line *line = &buffer->lines[row];
+    line_warm(line, buffer);
+
+    for (uint32_t col = 0; col < line->cell_count; col++) {
+      char utf8_buffer[UTF8_MAX_BYTES];
+      int bytes = utf8_encode(line->cells[col].codepoint, utf8_buffer);
+      if (write(fd, utf8_buffer, bytes) != bytes)
+        return -errno;
+    }
+
+    if (write(fd, "\n", 1) != 1)
+      return -errno;
+  }
+  return 0;
+}
+
 /* selection_clear is now in editor.c but kept here for compatibility */
 
 /*****************************************************************************
@@ -5652,6 +5675,15 @@ static void render_draw_status_bar(struct output_buffer *output) {
     output_buffer_append(output, color_escape, escape_len);
     output_buffer_append_string(output, " [+]");
     current_pos += 4;
+  }
+
+  /* Pipe output indicator */
+  if (editor.pipe_output_mode) {
+    escape_len = style_to_escape(&active_theme.status_modified, color_escape,
+                                 sizeof(color_escape));
+    output_buffer_append(output, color_escape, escape_len);
+    output_buffer_append_string(output, " [PIPE]");
+    current_pos += 7;
   }
 
   /* Right-aligned content: link URL or position */
