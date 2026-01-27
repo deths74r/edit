@@ -32,6 +32,31 @@ extern void editor_handle_mouse(struct mouse_input *mouse);
 extern void editor_process_keypress(void);
 
 /*****************************************************************************
+ * Helper Functions
+ *****************************************************************************/
+
+/*
+ * Get a file descriptor for terminal I/O.
+ * Tries /dev/tty first (standard), falls back to stderr if it's a tty.
+ * Returns fd on success, -1 on failure.
+ */
+static int get_tty_fd(void) {
+  /* Try /dev/tty first - the standard way */
+  int fd = open("/dev/tty", O_RDWR);
+  if (fd >= 0)
+    return fd;
+
+  /* Fallback: use stderr if it's a tty */
+  if (isatty(STDERR_FILENO)) {
+    fd = dup(STDERR_FILENO);
+    if (fd >= 0)
+      return fd;
+  }
+
+  return -1;
+}
+
+/*****************************************************************************
  * Entry Point
  *****************************************************************************/
 
@@ -43,10 +68,21 @@ extern void editor_process_keypress(void);
  * keypresses.
  */
 int main(int argument_count, char *argument_values[]) {
-  /* Detect if stdin is a pipe (not a terminal) */
+  /* Detect if stdin/stdout are pipes (not a terminal) */
   bool stdin_is_pipe = !isatty(STDIN_FILENO);
+  bool stdout_is_pipe = !isatty(STDOUT_FILENO);
   char *stdin_content = NULL;
   size_t stdin_size = 0;
+  int saved_stdout_fd = -1;
+
+  /* Save stdout before any redirections if it's a pipe */
+  if (stdout_is_pipe) {
+    saved_stdout_fd = dup(STDOUT_FILENO);
+    if (saved_stdout_fd < 0) {
+      fprintf(stderr, "edit: cannot save stdout: %s\n", strerror(errno));
+      return 1;
+    }
+  }
 
   if (stdin_is_pipe) {
     /*
@@ -61,10 +97,12 @@ int main(int argument_count, char *argument_values[]) {
       }
     }
 
-    /* Reopen stdin from /dev/tty for interactive input */
-    int tty_fd = open("/dev/tty", O_RDWR);
+    /* Reopen stdin from terminal for interactive input */
+    int tty_fd = get_tty_fd();
     if (tty_fd < 0) {
-      fprintf(stderr, "edit: cannot open /dev/tty: %s\n", strerror(errno));
+      fprintf(stderr, "edit: no terminal available for input\n");
+      if (saved_stdout_fd >= 0)
+        close(saved_stdout_fd);
       free(stdin_content);
       return 1;
     }
@@ -72,9 +110,24 @@ int main(int argument_count, char *argument_values[]) {
     close(tty_fd);
   }
 
+  /* Redirect stdout to terminal for rendering if stdout is a pipe */
+  if (stdout_is_pipe) {
+    int tty_fd = get_tty_fd();
+    if (tty_fd < 0) {
+      fprintf(stderr, "edit: no terminal available for output\n");
+      close(saved_stdout_fd);
+      free(stdin_content);
+      return 1;
+    }
+    dup2(tty_fd, STDOUT_FILENO);
+    close(tty_fd);
+  }
+
   int ret = terminal_enable_raw_mode();
   if (ret) {
     fprintf(stderr, "edit: %s\n", edit_strerror(ret));
+    if (saved_stdout_fd >= 0)
+      close(saved_stdout_fd);
     free(stdin_content);
     return 1;
   }
@@ -99,6 +152,12 @@ int main(int argument_count, char *argument_values[]) {
   editor_init();
   keybinding_init();
   editor_update_screen_size();
+
+  /* Store pipe output state in editor */
+  if (stdout_is_pipe && saved_stdout_fd >= 0) {
+    editor.pipe_output_mode = true;
+    editor.pipe_output_fd = saved_stdout_fd;
+  }
 
   /* Load content from stdin pipe if available */
   if (stdin_content != NULL) {
