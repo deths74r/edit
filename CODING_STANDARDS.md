@@ -2,8 +2,6 @@
 
 All code must follow these rules. Non-compliant code must be refactored.
 
----
-
 ## Naming
 
 All identifiers use descriptive, full-word names. No abbreviations that sacrifice clarity.
@@ -74,8 +72,6 @@ char buffer[CURSOR_POSITION_BUFFER_SIZE];
 if (time(NULL) - timestamp < 5)
 char buffer[32];
 ```
-
----
 
 ## Formatting
 
@@ -158,8 +154,6 @@ Single line unless multi-line continuation is truly necessary.
 ### Section Banners
 
 Preserve existing section banners exactly as written: `/*** Terminal ***/`, `/*** Row Operations ***/`, etc.
-
----
 
 ## Comments
 
@@ -247,8 +241,6 @@ struct editor_row {
 	int open_comment;
 };
 ```
-
----
 
 ## Review Checklist
 
