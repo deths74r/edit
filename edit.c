@@ -1,6 +1,5 @@
 /*** Includes ***/
 
-#include <bits/types/struct_timeval.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -475,13 +474,23 @@ void terminal_enable_mouse_reporting(void)
 {
 	write(STDOUT_FILENO, ENABLE_MOUSE_REPORTING, strlen(ENABLE_MOUSE_REPORTING));
 }
-/* Handles SIGWINCH by re-querying the terminal size, clamping the cursor
- * to stay within bounds, and redrawing the screen. */
+/* Flag set by the SIGWINCH handler to signal the main loop that a resize
+ * occurred. Using volatile sig_atomic_t ensures async-signal-safety. */
+volatile sig_atomic_t resize_pending = 0;
+
+/* Sets the resize flag on SIGWINCH. Only uses async-signal-safe operations. */
 void terminal_handle_resize(int signal_number)
 {
 	(void)signal_number;
-	if (isatty(STDIN_FILENO) == 0)
-		return;
+	resize_pending = 1;
+}
+
+/* Processes a pending terminal resize by re-querying the terminal size,
+ * clamping the cursor to stay within bounds, and redrawing the screen.
+ * Called from the main loop when resize_pending is set. */
+void terminal_process_resize(void)
+{
+	resize_pending = 0;
 	int new_rows, new_columns;
 	if (terminal_get_window_size(&new_rows, &new_columns) == -1)
 		return;
@@ -493,9 +502,6 @@ void terminal_handle_resize(int signal_number)
 		editor.cursor_y = editor.screen_rows - 1;
 	if (editor.cursor_x >= editor.screen_columns)
 		editor.cursor_x = editor.screen_columns - 1;
-	write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
-	write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
-	editor_refresh_screen();
 }
 
 /* Reads a single keypress from stdin and translates escape sequences into
@@ -560,13 +566,14 @@ int terminal_read_key(void)
 
 				char mouse_sequence[MOUSE_SEQUENCE_SIZE];
 
-				/* Read the entire mouse sequence */
-				if (read(STDIN_FILENO, mouse_sequence, sizeof(mouse_sequence) - 1) == -1) {
+				/* Read the mouse sequence and null-terminate at the
+				 * actual read length to avoid parsing uninitialized bytes. */
+				int mouse_bytes = read(STDIN_FILENO, mouse_sequence,
+						       sizeof(mouse_sequence) - 1);
+				if (mouse_bytes <= 0) {
 					return ESC_KEY;
 				}
-
-				/* Ensure null-termination */
-				mouse_sequence[sizeof(mouse_sequence) - 1] = '\0';
+				mouse_sequence[mouse_bytes] = '\0';
 
 				if (sscanf(mouse_sequence, "%d;%d;%d%c", &mouse_input.button, &mouse_input.column,
 									 &mouse_input.row, &mouse_input.pressed) == 4) {
@@ -1108,13 +1115,29 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 	size_t byte_len;
 	char *render = line_to_bytes(line, &byte_len);
 
+	/* Build cell-to-byte offset map so cell index i maps to render position.
+	 * Needed because multi-byte UTF-8 characters make cell indices diverge
+	 * from byte offsets. */
+	int *byte_offsets = malloc(sizeof(int) * (line->cell_count + 1));
+	if (byte_offsets == NULL) {
+		free(render);
+		terminal_die("malloc");
+	}
+	int bpos = 0;
+	for (uint32_t k = 0; k < line->cell_count; k++) {
+		byte_offsets[k] = bpos;
+		char tmp[UTF8_MAX_BYTES];
+		bpos += utf8_encode(line->cells[k].codepoint, tmp);
+	}
+	byte_offsets[line->cell_count] = bpos;
+
 	int i = 0;
 	while (i < (int)line->cell_count) {
 		uint32_t current_cp = line->cells[i].codepoint;
 		uint16_t previous_syntax = (i > 0) ? line->cells[i - 1].syntax : HL_NORMAL;
 
 		if (single_comment_length && !in_string && !in_comment) {
-			if (!strncmp(&render[i], single_comment, single_comment_length)) {
+			if (!strncmp(&render[byte_offsets[i]], single_comment, single_comment_length)) {
 				for (int k = i; k < (int)line->cell_count; k++)
 					line->cells[k].syntax = HL_COMMENT;
 				break;
@@ -1124,7 +1147,7 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 		if (multi_start_length && multi_end_length && !in_string) {
 			if (in_comment) {
 				line->cells[i].syntax = HL_MLCOMMENT;
-				if (!strncmp(&render[i], multi_comment_end, multi_end_length)) {
+				if (!strncmp(&render[byte_offsets[i]], multi_comment_end, multi_end_length)) {
 					for (int k = i; k < i + multi_end_length && k < (int)line->cell_count; k++)
 						line->cells[k].syntax = HL_MLCOMMENT;
 					i += multi_end_length;
@@ -1135,7 +1158,7 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 					i++;
 					continue;
 				}
-			} else if (!strncmp(&render[i], multi_comment_start, multi_start_length)) {
+			} else if (!strncmp(&render[byte_offsets[i]], multi_comment_start, multi_start_length)) {
 				for (int k = i; k < i + multi_start_length && k < (int)line->cell_count; k++)
 					line->cells[k].syntax = HL_MLCOMMENT;
 				i += multi_start_length;
@@ -1184,8 +1207,9 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 				int is_type_keyword = keywords[j][keyword_length - 1] == '|';
 				if (is_type_keyword)
 					keyword_length--;
-				if (!strncmp(&render[i], keywords[j], keyword_length) &&
-						syntax_is_separator(render[i + keyword_length])) {
+				if (i + keyword_length <= (int)line->cell_count &&
+						!strncmp(&render[byte_offsets[i]], keywords[j], keyword_length) &&
+						syntax_is_separator(render[byte_offsets[i + keyword_length]])) {
 					for (int k = i; k < i + keyword_length && k < (int)line->cell_count; k++)
 						line->cells[k].syntax = is_type_keyword ? HL_KEYWORD2 : HL_KEYWORD1;
 					i += keyword_length;
@@ -1202,6 +1226,7 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 		i++;
 	}
 
+	free(byte_offsets);
 	free(render);
 
 	int changed = (line->open_comment != in_comment);
@@ -1310,11 +1335,24 @@ void editor_insert_newline(void)
 		editor_line_insert(editor.cursor_y, "", 0);
 	} else {
 		struct line *ln = &editor.lines[editor.cursor_y];
-		/* Extract bytes after cursor for the new line */
+		/* Extract bytes after cursor for the new line.
+		 * Convert cell index to byte offset since line_to_bytes
+		 * produces a UTF-8 string where multi-byte characters make
+		 * cell indices diverge from byte positions. */
 		size_t tail_len;
 		char *tail = line_to_bytes(ln, &tail_len);
-		size_t new_len = tail_len - editor.cursor_x;
-		editor_line_insert(editor.cursor_y + 1, &tail[editor.cursor_x], new_len);
+		size_t byte_offset = 0;
+		int cells = 0;
+		while (cells < editor.cursor_x && byte_offset < tail_len) {
+			uint32_t cp;
+			int consumed = utf8_decode(&tail[byte_offset],
+						   (int)(tail_len - byte_offset), &cp);
+			if (consumed <= 0) consumed = 1;
+			byte_offset += consumed;
+			cells++;
+		}
+		size_t new_len = tail_len - byte_offset;
+		editor_line_insert(editor.cursor_y + 1, &tail[byte_offset], new_len);
 		free(tail);
 		/* Truncate the current line at the cursor position */
 		ln = &editor.lines[editor.cursor_y];
@@ -1349,6 +1387,7 @@ void editor_delete_char(void)
 		editor.dirty++;
 		editor.cursor_x = prev;
 	} else {
+		line_ensure_warm(&editor.lines[editor.cursor_y - 1]);
 		editor.cursor_x = (int)editor.lines[editor.cursor_y - 1].cell_count;
 		line_append_cells(&editor.lines[editor.cursor_y - 1], ln, 0);
 		int prev_open = (editor.cursor_y > 1) ? editor.lines[editor.cursor_y - 2].open_comment : 0;
@@ -1364,7 +1403,7 @@ void editor_delete_char(void)
 /* Concatenates all editor lines into a single newline-separated string for
  * writing to disk. Stores the total byte count in buffer_length. The caller
  * is responsible for freeing the returned buffer. */
-char *editor_rows_to_string(int *buffer_length)
+char *editor_rows_to_string(size_t *buffer_length)
 {
 	size_t total_length = 0;
 	size_t capacity = 0;
@@ -1385,7 +1424,7 @@ char *editor_rows_to_string(int *buffer_length)
 		buffer[total_length] = '\n';
 		total_length++;
 	}
-	*buffer_length = (int)total_length;
+	*buffer_length = total_length;
 	return buffer;
 }
 /* Opens a file using mmap for lazy loading. Scans the mapped region for
@@ -1520,7 +1559,7 @@ int editor_save(void)
 
 	int ret = 0;
 	int fd = -1;
-	int file_length;
+	size_t file_length;
 	char *file_content = editor_rows_to_string(&file_length);
 
 	fd = open(editor.filename, O_RDWR | O_CREAT, FILE_PERMISSION_DEFAULT);
@@ -1528,13 +1567,22 @@ int editor_save(void)
 		ret = -errno;
 		goto out;
 	}
-	if (ftruncate(fd, file_length) == -1) {
+	if (ftruncate(fd, (off_t)file_length) == -1) {
 		ret = -errno;
 		goto out;
 	}
-	if (write(fd, file_content, file_length) != file_length) {
-		ret = -errno;
-		goto out;
+	/* Write all content, retrying on short writes. */
+	size_t bytes_written = 0;
+	while (bytes_written < file_length) {
+		ssize_t result = write(fd, file_content + bytes_written,
+				       file_length - bytes_written);
+		if (result == -1) {
+			if (errno == EINTR)
+				continue;
+			ret = -errno;
+			goto out;
+		}
+		bytes_written += (size_t)result;
 	}
 
 	/* Success */
@@ -1549,7 +1597,7 @@ int editor_save(void)
 		close(editor.file_descriptor);
 		editor.file_descriptor = -1;
 	}
-	editor_set_status_message("%d bytes written to disk", file_length);
+	editor_set_status_message("%zu bytes written to disk", file_length);
 
 out:
 	if (fd != -1)
@@ -1598,7 +1646,8 @@ void editor_quit(void)
 		editor.file_descriptor = -1;
 	}
 
-	/* Reset the terminal */
+	/* Disable mouse reporting and reset the terminal */
+	terminal_disable_mouse_reporting();
 	write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
 	write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
 
@@ -1816,21 +1865,29 @@ struct append_buffer {
 	char *buffer;
 	/* Current number of bytes stored in buffer. */
 	int length;
+	/* Allocated capacity of the buffer. */
+	int capacity;
 };
 
 /* Initializer for an empty append_buffer. */
-#define APPEND_BUFFER_INIT {NULL, 0}
+#define APPEND_BUFFER_INIT {NULL, 0, 0}
 
-/* Appends a string of the given length to the append buffer. Grows the
- * buffer with realloc() and copies the new data to the end. */
+/* Appends a string of the given length to the append buffer. Uses a
+ * capacity-doubling strategy to avoid realloc on every call. */
 void append_buffer_write(struct append_buffer *append_buffer, const char *string, int length)
 {
-	char *new_buffer = realloc(append_buffer->buffer, append_buffer->length + length);
-
-	if (new_buffer == NULL)
-		terminal_die("realloc");
-	memcpy(&new_buffer[append_buffer->length], string, length);
-	append_buffer->buffer = new_buffer;
+	int needed = append_buffer->length + length;
+	if (needed > append_buffer->capacity) {
+		int new_capacity = append_buffer->capacity ? append_buffer->capacity : 1024;
+		while (new_capacity < needed)
+			new_capacity *= 2;
+		char *new_buffer = realloc(append_buffer->buffer, new_capacity);
+		if (new_buffer == NULL)
+			terminal_die("realloc");
+		append_buffer->buffer = new_buffer;
+		append_buffer->capacity = new_capacity;
+	}
+	memcpy(&append_buffer->buffer[append_buffer->length], string, length);
 	append_buffer->length += length;
 }
 
@@ -2543,7 +2600,7 @@ void editor_init(void)
 	editor.status_message[0] = '\0';
 	editor.status_message_time = 0;
 	editor.syntax = NULL;
- editor_set_theme(3);
+	editor_set_theme(3);
 
 	signal(SIGWINCH, terminal_handle_resize);
 	if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns) ==
@@ -2581,12 +2638,9 @@ int main(int argc, char *argv[])
 			"Alt: S=save Q=quit F=find G=goto N=lines T=theme HJKL=move");
 
 	while (1) {
+		if (resize_pending)
+			terminal_process_resize();
 		editor_refresh_screen();
 		editor_process_keypress();
 	}
-
-	/* Disable mouse reporting */
-	terminal_disable_mouse_reporting();
-
-	return 0;
 }
