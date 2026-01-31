@@ -1,0 +1,7 @@
+# Build artifacts
+*.o
+edit
+debug.log
+
+# Sift agent memory (per-project database)
+.sift/

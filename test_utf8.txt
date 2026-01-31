@@ -1,0 +1,53 @@
+--- UTF-8 Test File ---
+
+== 1-byte ASCII (U+0000–U+007F) ==
+Hello, World!
+The quick brown fox jumps over the lazy dog.
+0123456789 ~!@#$%^&*()_+-=[]{}|;':",./<>?
+
+== 2-byte characters (U+0080–U+07FF) ==
+Latin extended: àáâãäå èéêë ìíîï ñ òóôõö ùúûü ý ÿ
+Diacritics: ěščřžýáíé ůúďťň ółżźćęąś
+Greek: αβγδεζηθικλμνξοπρστυφχψω
+Cyrillic: абвгдежзиклмнопрстуфхцчшщъыьэюя
+
+== 3-byte characters (U+0800–U+FFFF) ==
+Japanese hiragana: あいうえお かきくけこ さしすせそ
+Japanese katakana: アイウエオ カキクケコ サシスセソ
+CJK ideographs: 你好世界 編輯器 文字編碼
+Korean: 안녕하세요 세계 유니코드
+Thai: สวัสดีครับ ทดสอบ
+Arabic: مرحبا بالعالم
+Hebrew: שלום עולם
+Box drawing: ┌──────┬──────┐
+             │ left │ right│
+             └──────┴──────┘
+Currency: € £ ¥ ₹ ₽ ₿ ₩ ₫
+
+== 4-byte characters (U+10000–U+10FFFF) ==
+Emoji: 😀 😎 🚀 🎉 🔥 💻 🧠 🦀 🐧 🌍
+Flags: 🇺🇸 🇩🇪 🇯🇵 🇧🇷 🇫🇷
+Math symbols: 𝕳𝖊𝖑𝖑𝖔 𝔸𝔹ℂ𝔻𝔼
+Musical: 𝄞 𝄡 𝄢
+Ancient scripts: 𐀀 𐀁 𐀂 𐀃 (Linear B)
+Cuneiform: 𒀀 𒀁 𒀂 𒀃
+
+== Mixed widths on one line ==
+café résumé naïve über straße →� ★ ♠ ♣ ♥ ♦ 🂡 🂢
+日本語mixed with English and émojis 🎌 test
+
+== Edge cases ==
+Empty line above and below:
+
+Single combining character: a̐ ö̃ (base + combining)
+Zero-width joiner sequences: 👨‍💻 👩‍🔬 🏳️‍🌈 👨‍👩‍👧‍👦 👩‍👩‍👦‍👦
+Right-to-left: مرحبا Hello مرحبا
+Fullwidth: ＨＥＬＬＯ （ｆｕｌｌｗｉｄｔｈ）
+Tabs	between	words	here
+Long line: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 日本語テスト aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+== Line number gutter stress ==
+Short
+x
+こ
+🔥
