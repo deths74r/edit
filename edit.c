@@ -15,6 +15,7 @@
 #include <termios.h>
 #include <time.h>
 #include <stdbool.h>
+#include <poll.h>
 #include <stdint.h>
 #include <unistd.h>
 #include "gstr.h"
@@ -175,6 +176,14 @@ struct line {
 
 /* Number of microseconds in one second, for timeval arithmetic. */
 #define MICROSECONDS_PER_SECOND 1000000
+/* Game loop tick rate. 60 Hz gives ~16ms per tick — responsive enough for
+ * typing, low enough to idle efficiently. */
+#define TICK_RATE_HZ 60
+#define TICK_INTERVAL_US (MICROSECONDS_PER_SECOND / TICK_RATE_HZ)
+/* Maximum size for prompt input buffer. */
+#define PROMPT_BUFFER_SIZE 1024
+/* Size of the raw input byte buffer drained from stdin each tick. */
+#define INPUT_BUFFER_SIZE 4096
 
 /* Carriage return + line feed sequence for terminal line endings. */
 #define CRLF "\r\n"
@@ -248,6 +257,44 @@ struct mouse_input {
 	/* Press state: 'M' for pressed, 'm' for released. */
 	char pressed;
 } mouse_input;
+/* Editor operating modes. Only one mode is active at a time. The main loop
+ * always runs regardless of mode — no nested event loops. */
+enum editor_mode {
+	MODE_NORMAL,         /* Normal editing */
+	MODE_PROMPT,         /* Text input prompt (search, goto, save-as) */
+	MODE_CONFIRM_QUIT,   /* Waiting for y/n/ESC on unsaved quit */
+};
+/* Identifies what a prompt should do when the user presses Enter. */
+enum prompt_action {
+	PROMPT_SEARCH,         /* Incremental search */
+	PROMPT_GOTO,           /* Jump to line number */
+	PROMPT_SAVE,           /* Save (needed filename) */
+	PROMPT_SAVE_AS,        /* Save-as (always prompts) */
+	PROMPT_SAVE_AND_QUIT,  /* Save then exit (from quit confirm) */
+};
+/* State for MODE_PROMPT — accumulates characters across ticks,
+ * replaces the nested while(1) loop in the old editor_prompt(). */
+struct prompt_state {
+	char buffer[PROMPT_BUFFER_SIZE];
+	size_t length;
+	char *format;                            /* printf format for status bar */
+	enum prompt_action action;               /* what Enter does */
+	void (*on_key)(char *, int);             /* per-key callback (incremental search) */
+};
+/* Cursor/viewport snapshot saved before operations that may be cancelled. */
+struct saved_position {
+	int cursor_x, cursor_y;
+	int column_offset, row_offset;
+};
+/* Raw byte buffer drained from stdin each tick. Keys are parsed out
+ * one at a time. Replaces the blocking byte-at-a-time read() in the
+ * old terminal_read_key(). */
+struct input_buffer {
+	char bytes[INPUT_BUFFER_SIZE];
+	int length;
+	int position;           /* parse cursor — how far we've consumed */
+	int escape_pending;     /* saw ESC at end of buffer last drain */
+};
 
 /* Global editor state containing cursor position, file content, display
  * settings, and terminal configuration. Single instance used throughout. */
@@ -296,10 +343,20 @@ struct editor_state {
 	char *mmap_base;
 	/* Size of the mmap region in bytes. */
 	size_t mmap_size;
+	/* Current operating mode (MODE_NORMAL, MODE_PROMPT, etc.). */
+	enum editor_mode mode;
+	/* State for prompt mode (search, goto, save-as input). */
+	struct prompt_state prompt;
+	/* Saved cursor/viewport for cancel-restore (e.g., search cancel). */
+	struct saved_position saved_position;
+	/* Dirty flag — render only when something changed. */
+	int needs_render;
 };
 
 /* Global editor state. */
 struct editor_state editor;
+/* Global input buffer for non-blocking stdin reads. */
+struct input_buffer input;
 
 /*** Filetypes ***/
 
@@ -332,10 +389,9 @@ void editor_set_status_message(const char *format, ...);
 void editor_refresh_screen(void);
 /* Queries terminal size and returns it via the rows/columns out-parameters. */
 int terminal_get_window_size(int *rows, int *columns);
-/* Displays a prompt and collects user input; returns the typed string. */
-char *editor_prompt(char *prompt, void (*callback)(char *, int));
-/* Prompts for a line number and moves the cursor there. */
-void editor_jump_to_line(void);
+/* Starts a prompt mode for user text input (search, goto, save-as). */
+void prompt_start(char *format, enum prompt_action action,
+		  void (*on_key)(char *, int));
 /* Recalculates the gutter width based on the current line count. */
 void editor_update_gutter_width(void);
 /* Recalculates syntax highlighting for a line given previous open_comment state. */
@@ -504,158 +560,210 @@ void terminal_process_resize(void)
 		editor.cursor_x = editor.screen_columns - 1;
 }
 
-/* Reads a single keypress from stdin and translates escape sequences into
- * editor_key enum values. Handles arrow keys, page up/down, home/end,
- * delete, SGR mouse events, and Alt+key combinations (ESC followed by a
- * character). Returns the key code or ESC_KEY on unrecognized sequences.
- * Blocks until a key is available. */
-int terminal_read_key(void)
+/* Drains all available bytes from stdin into the input buffer (non-blocking).
+ * Compacts unprocessed bytes to the front before reading. */
+void input_drain(struct input_buffer *buf)
 {
-	int bytes_read;
-	char character;
-
-	while ((bytes_read = read(STDIN_FILENO, &character, 1)) != 1) {
-		if (bytes_read == -1 && errno != EAGAIN && errno != EINTR)
-			terminal_die("read");
+	/* Compact: move unprocessed bytes to front */
+	if (buf->position > 0) {
+		int remaining = buf->length - buf->position;
+		if (remaining > 0)
+			memmove(buf->bytes, buf->bytes + buf->position, remaining);
+		buf->length = remaining;
+		buf->position = 0;
 	}
-
-	if (character == ESC_KEY) {
-		char sequence[ESCAPE_SEQUENCE_SIZE];
-
-		if (read(STDIN_FILENO, &sequence[0], 1) != 1)
+	/* Read whatever is available (stdin is O_NONBLOCK) */
+	while (buf->length < (int)sizeof(buf->bytes)) {
+		ssize_t n = read(STDIN_FILENO, buf->bytes + buf->length,
+				 sizeof(buf->bytes) - buf->length);
+		if (n <= 0)
+			break;
+		buf->length += (int)n;
+	}
+}
+/* Returns how many unprocessed bytes remain in the buffer. */
+int input_available(struct input_buffer *buf)
+{
+	return buf->length - buf->position;
+}
+/* Peeks at the byte at offset from current parse position, or -1 if
+ * not enough bytes are available yet. */
+int input_peek(struct input_buffer *buf, int offset)
+{
+	int idx = buf->position + offset;
+	if (idx >= buf->length)
+		return -1;
+	return (unsigned char)buf->bytes[idx];
+}
+/* Advances the parse cursor by n bytes. */
+void input_consume(struct input_buffer *buf, int n)
+{
+	buf->position += n;
+}
+/* Parses one key from the input buffer. Returns the key code, or -1 if
+ * no complete key is available yet (partial escape sequence, empty buffer).
+ *
+ * This is the old terminal_read_key() logic restructured to operate on
+ * a pre-filled buffer instead of blocking read() calls. */
+int input_parse_key(struct input_buffer *buf)
+{
+	if (input_available(buf) == 0) {
+		/* Previous drain left a bare ESC with no following bytes —
+		 * that means the user pressed ESC alone. */
+		if (buf->escape_pending) {
+			buf->escape_pending = 0;
 			return ESC_KEY;
-
-		if (sequence[0] == '[') {
-			if (read(STDIN_FILENO, &sequence[1], 1) != 1)
-				return ESC_KEY;
-
-			if (sequence[1] >= '0' && sequence[1] <= '9') {
-				if (read(STDIN_FILENO, &sequence[2], 1) != 1)
-					return ESC_KEY;
-				if (sequence[2] == '~') {
-					switch (sequence[1]) {
-					case '1':
-						return HOME_KEY;
-					case '3':
-						return DEL_KEY;
-					case '4':
-						return END_KEY;
-					case '5':
-						return PAGE_UP;
-					case '6':
-						return PAGE_DOWN;
-					case '7':
-						return HOME_KEY;
-					case '8':
-						return END_KEY;
-					}
-				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
-					char terminator;
-					if (read(STDIN_FILENO, &terminator, 1) != 1)
-						return ESC_KEY;
-					if (terminator == '~') {
-						int code = (sequence[1] - '0') * 10
-							+ (sequence[2] - '0');
-						switch (code) {
-						case 23:
-							return F11_KEY;
-						}
-					}
-				}
-			} else if (sequence[1] == '<') {
-
-				char mouse_sequence[MOUSE_SEQUENCE_SIZE];
-
-				/* Read the mouse sequence and null-terminate at the
-				 * actual read length to avoid parsing uninitialized bytes. */
-				int mouse_bytes = read(STDIN_FILENO, mouse_sequence,
-						       sizeof(mouse_sequence) - 1);
-				if (mouse_bytes <= 0) {
-					return ESC_KEY;
-				}
-				mouse_sequence[mouse_bytes] = '\0';
-
-				if (sscanf(mouse_sequence, "%d;%d;%d%c", &mouse_input.button, &mouse_input.column,
-									 &mouse_input.row, &mouse_input.pressed) == 4) {
-
-					switch (mouse_input.button) {
-					case 0:
-						if (mouse_input.pressed == 'M') {
-							mouse_input.column = mouse_input.column - editor.line_number_width - 1;
-							if (mouse_input.column < 0)
-								mouse_input.column = 0;
-							mouse_input.row = mouse_input.row - 1;
-							return MOUSE_LEFT_BUTTON_PRESSED;
-						}
-						break;
-					case 1:
-						break;
-					case 2:
-						break;
-					case 35:
-						break;
-					case 64:
-						return MOUSE_SCROLL_UP;
-					case 65:
-						return MOUSE_SCROLL_DOWN;
-					}
-				}
-
-				return ESC_KEY;
-
-			} else {
-				switch (sequence[1]) {
-				case 'A':
-					return ARROW_UP;
-				case 'B':
-					return ARROW_DOWN;
-				case 'C':
-					return ARROW_RIGHT;
-				case 'D':
-					return ARROW_LEFT;
-				case 'H':
-					return HOME_KEY;
-				case 'F':
-					return END_KEY;
-				}
-			}
-		} else if (sequence[0] == 'O') {
-			if (read(STDIN_FILENO, &sequence[1], 1) != 1)
-				return ESC_KEY;
-
-			switch (sequence[1]) {
-			case 'H':
-				return HOME_KEY;
-			case 'F':
-				return END_KEY;
-			}
-		} else {
-			return ALT_KEY(sequence[0]);
 		}
-		return ESC_KEY;
-	} else if ((unsigned char)character >= 0x80) {
-		/* Multi-byte UTF-8 sequence: determine expected length from
-		 * the leading byte, read continuation bytes, then decode. */
-		unsigned char lead = (unsigned char)character;
+		return -1;
+	}
+	int ch = input_peek(buf, 0);
+	if (ch == ESC_KEY) {
+		/* Need at least one more byte to tell bare ESC from a sequence */
+		if (input_available(buf) < 2) {
+			input_consume(buf, 1);
+			buf->escape_pending = 1;
+			return -1;
+		}
+		buf->escape_pending = 0;
+		int seq0 = input_peek(buf, 1);
+		if (seq0 == '[') {
+			if (input_available(buf) < 3)
+				return -1;
+			int seq1 = input_peek(buf, 2);
+			if (seq1 >= '0' && seq1 <= '9') {
+				if (input_available(buf) < 4)
+					return -1;
+				int seq2 = input_peek(buf, 3);
+				if (seq2 == '~') {
+					input_consume(buf, 4);
+					switch (seq1) {
+					case '1': return HOME_KEY;
+					case '3': return DEL_KEY;
+					case '4': return END_KEY;
+					case '5': return PAGE_UP;
+					case '6': return PAGE_DOWN;
+					case '7': return HOME_KEY;
+					case '8': return END_KEY;
+					}
+					return ESC_KEY;
+				} else if (seq2 >= '0' && seq2 <= '9') {
+					if (input_available(buf) < 5)
+						return -1;
+					int terminator = input_peek(buf, 4);
+					input_consume(buf, 5);
+					if (terminator == '~') {
+						int code = (seq1 - '0') * 10
+							 + (seq2 - '0');
+						if (code == 23)
+							return F11_KEY;
+					}
+					return ESC_KEY;
+				}
+				input_consume(buf, 3);
+				return ESC_KEY;
+			} else if (seq1 == '<') {
+				/* SGR mouse sequence — scan for M/m terminator */
+				int end = 3;
+				while (end < input_available(buf) && end < 32) {
+					int b = input_peek(buf, end);
+					if (b == 'M' || b == 'm') {
+						/* Parse the mouse fields from buffer */
+						char mouse_buf[MOUSE_SEQUENCE_SIZE];
+						int mouse_len = end - 3;
+						if (mouse_len > 0 &&
+						    mouse_len < (int)sizeof(mouse_buf) - 2) {
+							for (int i = 0; i < mouse_len; i++)
+								mouse_buf[i] = (char)input_peek(buf, 3 + i);
+							mouse_buf[mouse_len] = (char)b;
+							mouse_buf[mouse_len + 1] = '\0';
+							if (sscanf(mouse_buf, "%d;%d;%d%c",
+								   &mouse_input.button,
+								   &mouse_input.column,
+								   &mouse_input.row,
+								   &mouse_input.pressed) == 4) {
+								input_consume(buf, end + 1);
+								switch (mouse_input.button) {
+								case 0:
+									if (mouse_input.pressed == 'M') {
+										mouse_input.column -= editor.line_number_width + 1;
+										if (mouse_input.column < 0)
+											mouse_input.column = 0;
+										mouse_input.row -= 1;
+										return MOUSE_LEFT_BUTTON_PRESSED;
+									}
+									break;
+								case 64:
+									return MOUSE_SCROLL_UP;
+								case 65:
+									return MOUSE_SCROLL_DOWN;
+								}
+								return ESC_KEY;
+							}
+						}
+						input_consume(buf, end + 1);
+						return ESC_KEY;
+					}
+					end++;
+				}
+				/* No terminator found yet — incomplete sequence */
+				if (end >= 32) {
+					input_consume(buf, end);
+					return ESC_KEY;
+				}
+				return -1;
+			} else {
+				input_consume(buf, 3);
+				switch (seq1) {
+				case 'A': return ARROW_UP;
+				case 'B': return ARROW_DOWN;
+				case 'C': return ARROW_RIGHT;
+				case 'D': return ARROW_LEFT;
+				case 'H': return HOME_KEY;
+				case 'F': return END_KEY;
+				}
+				return ESC_KEY;
+			}
+		} else if (seq0 == 'O') {
+			if (input_available(buf) < 3)
+				return -1;
+			int seq1 = input_peek(buf, 2);
+			input_consume(buf, 3);
+			switch (seq1) {
+			case 'H': return HOME_KEY;
+			case 'F': return END_KEY;
+			}
+			return ESC_KEY;
+		} else {
+			/* ESC + letter = Alt+key */
+			input_consume(buf, 2);
+			return ALT_KEY(seq0);
+		}
+	} else if ((unsigned char)ch >= 0x80) {
+		/* Multi-byte UTF-8: determine expected length from lead byte,
+		 * ensure all continuation bytes are available, then decode. */
+		unsigned char lead = (unsigned char)ch;
 		int expected;
 		if ((lead & 0xE0) == 0xC0) expected = 2;
 		else if ((lead & 0xF0) == 0xE0) expected = 3;
 		else if ((lead & 0xF8) == 0xF0) expected = 4;
-		else return UTF8_REPLACEMENT_CHAR;
-
-		char utf8_buf[4];
-		utf8_buf[0] = character;
-		for (int i = 1; i < expected; i++) {
-			if (read(STDIN_FILENO, &utf8_buf[i], 1) != 1)
-				return UTF8_REPLACEMENT_CHAR;
+		else {
+			input_consume(buf, 1);
+			return UTF8_REPLACEMENT_CHAR;
 		}
+		if (input_available(buf) < expected)
+			return -1;
+		char utf8_buf[4];
+		for (int i = 0; i < expected; i++)
+			utf8_buf[i] = (char)input_peek(buf, i);
+		input_consume(buf, expected);
 		uint32_t codepoint;
 		int consumed = utf8_decode(utf8_buf, expected, &codepoint);
 		if (consumed <= 0)
 			return UTF8_REPLACEMENT_CHAR;
 		return (int)codepoint;
 	} else {
-		return character;
+		input_consume(buf, 1);
+		return ch;
 	}
 }
 
@@ -1541,27 +1649,20 @@ int editor_open(char *filename)
 	editor.dirty = 0;
 	return 0;
 }
-
-/* Saves the current file to disk. Prompts for a filename if one hasn't been
- * set yet. Converts all rows to a string, truncates the file, and writes
- * the content. Displays a status message on success or error.
+/* Writes the current file to disk. The filename must already be set —
+ * callers prompt for one via the mode system if needed. Converts all rows
+ * to a string, truncates the file, and writes the content.
  * Returns 0 on success, negative errno on failure. */
 int editor_save(void)
 {
 	if (editor.filename == NULL) {
-		editor.filename = editor_prompt("Save as: %s (ESC to cancel)", NULL);
-		if (editor.filename == NULL) {
-			editor_set_status_message("Save aborted");
-			return -ECANCELED;
-		}
-		syntax_select_highlight();
+		editor_set_status_message("No filename");
+		return -EINVAL;
 	}
-
 	int ret = 0;
 	int fd = -1;
 	size_t file_length;
 	char *file_content = editor_rows_to_string(&file_length);
-
 	fd = open(editor.filename, O_RDWR | O_CREAT, FILE_PERMISSION_DEFAULT);
 	if (fd == -1) {
 		ret = -errno;
@@ -1584,7 +1685,6 @@ int editor_save(void)
 		}
 		bytes_written += (size_t)result;
 	}
-
 	/* Success */
 	editor.dirty = 0;
 	/* Release old mmap since file content has changed */
@@ -1598,7 +1698,6 @@ int editor_save(void)
 		editor.file_descriptor = -1;
 	}
 	editor_set_status_message("%zu bytes written to disk", file_length);
-
 out:
 	if (fd != -1)
 		close(fd);
@@ -1606,23 +1705,6 @@ out:
 	if (ret < 0)
 		editor_set_status_message("Can't save! I/O error: %s", strerror(-ret));
 	return ret;
-}
-/* Prompts for a new filename and saves the file to it. Always prompts
- * regardless of whether a filename is already set, unlike editor_save
- * which only prompts when no filename exists. Re-runs syntax highlighting
- * since the file extension may have changed.
- * Returns 0 on success, negative errno on failure. */
-int editor_save_as(void)
-{
-	char *new_filename = editor_prompt("Save as: %s (ESC to cancel)", NULL);
-	if (new_filename == NULL) {
-		editor_set_status_message("Save as aborted");
-		return -ECANCELED;
-	}
-	free(editor.filename);
-	editor.filename = new_filename;
-	syntax_select_highlight();
-	return editor_save();
 }
 
 /* Cleans up all allocated resources before exiting. Frees every line's
@@ -1778,10 +1860,10 @@ void editor_find_callback(char *query, int key)
 
 			/* Center the match on the screen */
 			editor.row_offset = editor.cursor_y - screen_middle;
-			if (editor.row_offset < 0)
-				editor.row_offset = 0;
 			if (editor.row_offset > editor.line_count - editor.screen_rows)
 				editor.row_offset = editor.line_count - editor.screen_rows;
+			if (editor.row_offset < 0)
+				editor.row_offset = 0;
 
 			/* Save current syntax and highlight match */
 			saved_highlight_line = current;
@@ -1800,59 +1882,6 @@ void editor_find_callback(char *query, int key)
 			break;
 		}
 		free(render);
-	}
-}
-
-/* Opens the search prompt and performs incremental find. Saves the cursor
- * position before searching and restores it if the user cancels with ESC. */
-void editor_find(void)
-{
-	int saved_cursor_x = editor.cursor_x;
-	int saved_cursor_y = editor.cursor_y;
-	int saved_column_offset = editor.column_offset;
-	int saved_row_offset = editor.row_offset;
-
-	char *query =
-			editor_prompt("Search: %s (Use ESC/Arrows/Enter)", editor_find_callback);
-
-	if (query) {
-		free(query);
-	} else {
-		editor.cursor_x = saved_cursor_x;
-		editor.cursor_y = saved_cursor_y;
-		editor.column_offset = saved_column_offset;
-		editor.row_offset = saved_row_offset;
-	}
-}
-
-/* Prompts the user for a line number and moves the cursor to that line.
- * Centers the target line vertically on screen and resets the horizontal
- * scroll offset. Shows an error message for invalid line numbers. */
-void editor_jump_to_line(void)
-{
-	char *line_number = editor_prompt("Jump to line: %s", NULL);
-	if (line_number == NULL)
-		return;
-
-	int line = atoi(line_number);
-	free(line_number);
-
-	if (line > 0 && line <= editor.line_count) {
-		editor.cursor_y = line - 1;
-		editor.cursor_x = 0;
-
-		/* Calculate the new row offset to center the jumped-to line */
-		int new_row_offset = editor.cursor_y - (editor.screen_rows / 2);
-		if (new_row_offset < 0)
-			new_row_offset = 0;
-		if (new_row_offset > editor.line_count - editor.screen_rows)
-			new_row_offset = editor.line_count - editor.screen_rows;
-		editor.row_offset = new_row_offset;
-
-		/* Ensure the cursor is visible horizontally */
-		editor.column_offset = 0;
-	} else {
-		editor_set_status_message("Invalid line number");
 	}
 }
 
@@ -2312,68 +2341,7 @@ void editor_set_status_message(const char *format, ...)
 	editor.status_message_time = time(NULL);
 }
 
-/*** Input ***/
-
-/* Displays a prompt in the status bar and collects user input character by
- * character. Supports backspace, ESC to cancel (returns NULL), and Enter to
- * confirm. The optional callback is invoked after each keypress for features
- * like incremental search. The caller must free the returned string. */
-char *editor_prompt(char *prompt, void (*callback)(char *, int))
-{
-	size_t buffer_size = PROMPT_INITIAL_SIZE;
-	char *buffer = malloc(buffer_size);
-	if (buffer == NULL)
-		terminal_die("malloc");
-
-	size_t buffer_length = 0;
-	buffer[0] = '\0';
-
-	while (1) {
-		editor_set_status_message(prompt, buffer);
-		editor_refresh_screen();
-
-		int key = terminal_read_key();
-		if (key == DEL_KEY || key == CTRL_KEY('h') || key == BACKSPACE) {
-			if (buffer_length != 0)
-				buffer[--buffer_length] = '\0';
-		} else if (key == ESC_KEY) {
-			editor_set_status_message("");
-			if (callback)
-				callback(buffer, key);
-			free(buffer);
-			return NULL;
-		} else if (key == '\r') {
-			if (buffer_length != 0) {
-				editor_set_status_message("");
-				if (callback)
-					callback(buffer, key);
-				return buffer;
-			}
-		} else if (!iscntrl(key) && key > 0 && key < ARROW_LEFT) {
-			char utf8_buf[UTF8_MAX_BYTES];
-			int byte_count;
-			if (key < ASCII_MAX) {
-				utf8_buf[0] = (char)key;
-				byte_count = 1;
-			} else {
-				byte_count = utf8_encode((uint32_t)key, utf8_buf);
-			}
-			while (buffer_length + byte_count >= buffer_size - 1) {
-				buffer_size *= 2;
-				buffer = realloc(buffer, buffer_size);
-				if (buffer == NULL)
-					terminal_die("realloc");
-			}
-			memcpy(buffer + buffer_length, utf8_buf, byte_count);
-			buffer_length += byte_count;
-			buffer[buffer_length] = '\0';
-		}
-
-		if (callback)
-			callback(buffer, key);
-	}
-}
-
+/*** Input — Mode System ***/
 /* Moves the cursor in the direction indicated by the key parameter. Handles
  * arrow keys, mouse clicks, and line wrapping (moving past the end of a line
  * wraps to the next, and past the start wraps to the previous). Clamps the
@@ -2383,9 +2351,7 @@ void editor_move_cursor(int key)
 	struct line *current_line = (editor.cursor_y >= editor.line_count)
 												? NULL
 												: &editor.lines[editor.cursor_y];
-
 	switch (key) {
-
 	case MOUSE_LEFT_BUTTON_PRESSED:
 		if (mouse_input.row >= 0 && mouse_input.row < editor.screen_rows) {
 			int file_row = mouse_input.row + editor.row_offset;
@@ -2396,9 +2362,7 @@ void editor_move_cursor(int key)
 				editor.cursor_x = line_render_column_to_cell(click_line, render_col);
 			}
 		}
-
 		break;
-
 	case ALT_KEY('h'):
 	case ARROW_LEFT:
 		if (editor.cursor_x != 0) {
@@ -2408,7 +2372,6 @@ void editor_move_cursor(int key)
 			editor.cursor_x = (int)editor.lines[editor.cursor_y].cell_count;
 		}
 		break;
-
 	case ALT_KEY('l'):
 	case ARROW_RIGHT:
 		if (current_line && editor.cursor_x < (int)current_line->cell_count) {
@@ -2420,14 +2383,12 @@ void editor_move_cursor(int key)
 			}
 		}
 		break;
-
 	case ALT_KEY('k'):
 	case ARROW_UP:
 		if (editor.cursor_y != 0) {
 			editor.cursor_y--;
 		}
 		break;
-
 	case ALT_KEY('j'):
 	case ARROW_DOWN:
 		if (editor.cursor_y < editor.line_count) {
@@ -2435,7 +2396,6 @@ void editor_move_cursor(int key)
 		}
 		break;
 	}
-
 	current_line = (editor.cursor_y >= editor.line_count) ? NULL
 																: &editor.lines[editor.cursor_y];
 	int row_length = current_line ? (int)current_line->cell_count : 0;
@@ -2454,68 +2414,201 @@ void editor_move_cursor(int key)
 		}
 	}
 }
-
-/* Main input handler called once per iteration of the editor loop. Reads a
- * keypress and dispatches it to the appropriate action: text insertion,
- * cursor movement, file operations, search, or quit. Prompts to save
- * unsaved changes before quitting. */
-void editor_process_keypress(void)
+/* Clears the screen and exits immediately. Shared by quit paths. */
+void editor_quit_now(void)
 {
-	int key = terminal_read_key();
+	write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
+	write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+	exit(0);
+}
+/* Starts a prompt mode. This replaces every call to the old editor_prompt().
+ * The prompt format, completion action, and optional per-key callback are
+ * stored in editor.prompt. Characters accumulate across ticks until the
+ * user presses Enter or ESC. */
+void prompt_start(char *format, enum prompt_action action,
+		  void (*on_key)(char *, int))
+{
+	editor.prompt.format = format;
+	editor.prompt.action = action;
+	editor.prompt.on_key = on_key;
+	editor.prompt.length = 0;
+	editor.prompt.buffer[0] = '\0';
+	editor.mode = MODE_PROMPT;
+	editor_set_status_message(format, "");
+}
+/* Handles completion when user presses Enter in a prompt. Dispatches
+ * based on the prompt_action to perform the appropriate operation. */
+void prompt_complete(void)
+{
+	char *result = editor.prompt.buffer;
+	editor.mode = MODE_NORMAL;
+	switch (editor.prompt.action) {
+	case PROMPT_SEARCH:
+		/* Incremental search already positioned the cursor via the
+		 * per-key callback. Nothing left to do on Enter. */
+		break;
+	case PROMPT_GOTO: {
+		int line = atoi(result);
+		if (line > 0 && line <= editor.line_count) {
+			editor.cursor_y = line - 1;
+			editor.cursor_x = 0;
+			int new_offset = editor.cursor_y - (editor.screen_rows / 2);
+			if (new_offset > editor.line_count - editor.screen_rows)
+				new_offset = editor.line_count - editor.screen_rows;
+			if (new_offset < 0)
+				new_offset = 0;
+			editor.row_offset = new_offset;
+			editor.column_offset = 0;
+		} else {
+			editor_set_status_message("Invalid line number");
+		}
+		break;
+	}
+	case PROMPT_SAVE:
+		editor.filename = strdup(result);
+		syntax_select_highlight();
+		editor_save();
+		break;
+	case PROMPT_SAVE_AS:
+		free(editor.filename);
+		editor.filename = strdup(result);
+		syntax_select_highlight();
+		editor_save();
+		break;
+	case PROMPT_SAVE_AND_QUIT:
+		editor.filename = strdup(result);
+		syntax_select_highlight();
+		editor_save();
+		editor_quit_now();
+		break;
+	}
+	editor_set_status_message("");
+}
+/* Handles prompt cancel (ESC). Restores saved position for search. */
+void prompt_cancel(void)
+{
+	editor.mode = MODE_NORMAL;
+	if (editor.prompt.action == PROMPT_SEARCH) {
+		editor.cursor_x = editor.saved_position.cursor_x;
+		editor.cursor_y = editor.saved_position.cursor_y;
+		editor.column_offset = editor.saved_position.column_offset;
+		editor.row_offset = editor.saved_position.row_offset;
+	}
+	editor_set_status_message("");
+}
+/* Processes one key in prompt mode. Characters accumulate in
+ * editor.prompt.buffer. This replaces the old editor_prompt()'s
+ * inner while(1) loop — no nested event loop needed. */
+void prompt_on_key(int key)
+{
+	if (key == DEL_KEY || key == CTRL_KEY('h') || key == BACKSPACE) {
+		if (editor.prompt.length != 0)
+			editor.prompt.buffer[--editor.prompt.length] = '\0';
+	} else if (key == ESC_KEY) {
+		if (editor.prompt.on_key)
+			editor.prompt.on_key(editor.prompt.buffer, key);
+		prompt_cancel();
+		return;
+	} else if (key == '\r') {
+		if (editor.prompt.length != 0) {
+			if (editor.prompt.on_key)
+				editor.prompt.on_key(editor.prompt.buffer, key);
+			prompt_complete();
+			return;
+		}
+	} else if (!iscntrl(key) && key > 0 && key < ARROW_LEFT) {
+		if (editor.prompt.length < sizeof(editor.prompt.buffer) - 5) {
+			char utf8_buf[UTF8_MAX_BYTES];
+			int byte_count;
+			if (key < ASCII_MAX) {
+				utf8_buf[0] = (char)key;
+				byte_count = 1;
+			} else {
+				byte_count = utf8_encode((uint32_t)key, utf8_buf);
+			}
+			memcpy(editor.prompt.buffer + editor.prompt.length,
+			       utf8_buf, byte_count);
+			editor.prompt.length += byte_count;
+			editor.prompt.buffer[editor.prompt.length] = '\0';
+		}
+	}
+	editor_set_status_message(editor.prompt.format, editor.prompt.buffer);
+	if (editor.prompt.on_key)
+		editor.prompt.on_key(editor.prompt.buffer, key);
+}
+/* Processes one key in quit-confirm mode (y/n/ESC). */
+void confirm_quit_on_key(int key)
+{
+	if (key == 'y' || key == 'Y') {
+		if (editor.filename == NULL) {
+			prompt_start("Save as: %s (ESC to cancel)",
+				     PROMPT_SAVE_AND_QUIT, NULL);
+		} else {
+			editor_save();
+			editor_quit_now();
+		}
+	} else if (key == 'n' || key == 'N') {
+		editor_quit_now();
+	} else {
+		editor_set_status_message("");
+		editor.mode = MODE_NORMAL;
+	}
+}
+/* Processes one key in normal editing mode. This is the old
+ * editor_process_keypress() switch statement, but it receives the key
+ * as a parameter instead of calling terminal_read_key(), and mode
+ * transitions replace nested loops. */
+void normal_on_key(int key)
+{
 	switch (key) {
 	case '\r':
 		editor_insert_newline();
 		break;
-
 	case ALT_KEY('t'):
 		editor_switch_theme();
 		break;
 	case ALT_KEY('n'):
 		editor_toggle_line_numbers();
 		break;
-
 	case ALT_KEY('g'):
-		editor_jump_to_line();
+		prompt_start("Jump to line: %s", PROMPT_GOTO, NULL);
 		break;
-
 	case ALT_KEY('q'):
 		if (editor.dirty) {
 			editor_set_status_message(
-					"Unsaved changes. Save before quitting? (y/n/ESC)");
-			editor_refresh_screen();
-			int response = terminal_read_key();
-			if (response == 'y' || response == 'Y') {
-				editor_save();
-			} else if (response != 'n' && response != 'N') {
-				editor_set_status_message("");
-				return;
-			}
+				"Unsaved changes. Save before quitting? (y/n/ESC)");
+			editor.mode = MODE_CONFIRM_QUIT;
+			return;
 		}
-		write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
-		write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
-		exit(0);
+		editor_quit_now();
 		break;
-
 	case ALT_KEY('s'):
-		editor_save();
+		if (editor.filename == NULL) {
+			prompt_start("Save as: %s (ESC to cancel)",
+				     PROMPT_SAVE, NULL);
+		} else {
+			editor_save();
+		}
 		break;
 	case ALT_KEY('S'):
-		editor_save_as();
+		prompt_start("Save as: %s (ESC to cancel)",
+			     PROMPT_SAVE_AS, NULL);
 		break;
-
 	case HOME_KEY:
 		editor.cursor_x = 0;
 		break;
-
 	case END_KEY:
 		if (editor.cursor_y < editor.line_count)
 			editor.cursor_x = (int)editor.lines[editor.cursor_y].cell_count;
 		break;
-
 	case ALT_KEY('f'):
-		editor_find();
+		editor.saved_position = (struct saved_position){
+			editor.cursor_x, editor.cursor_y,
+			editor.column_offset, editor.row_offset
+		};
+		prompt_start("Search: %s (Use ESC/Arrows/Enter)",
+			     PROMPT_SEARCH, editor_find_callback);
 		break;
-
 	case BACKSPACE:
 	case CTRL_KEY('h'):
 	case DEL_KEY:
@@ -2523,7 +2616,6 @@ void editor_process_keypress(void)
 			editor_move_cursor(ARROW_RIGHT);
 		editor_delete_char();
 		break;
-
 	case PAGE_UP:
 	case PAGE_DOWN: {
 		if (key == PAGE_UP) {
@@ -2533,12 +2625,10 @@ void editor_process_keypress(void)
 			if (editor.cursor_y > editor.line_count)
 				editor.cursor_y = editor.line_count;
 		}
-
 		int times = editor.screen_rows;
 		while (times--)
 			editor_move_cursor(key == PAGE_UP ? ARROW_UP : ARROW_DOWN);
 	} break;
-
 	case ALT_KEY('h'):
 	case ALT_KEY('j'):
 	case ALT_KEY('k'):
@@ -2549,36 +2639,44 @@ void editor_process_keypress(void)
 	case ARROW_RIGHT:
 		editor_move_cursor(key);
 		break;
-
 	case MOUSE_LEFT_BUTTON_PRESSED:
 		editor_move_cursor(MOUSE_LEFT_BUTTON_PRESSED);
 		break;
-
 	case MOUSE_SCROLL_UP:
 		editor_update_scroll_speed();
 		editor_scroll_rows(ARROW_UP, editor.scroll_speed);
 		break;
-
 	case MOUSE_SCROLL_DOWN:
 		editor_update_scroll_speed();
 		editor_scroll_rows(ARROW_DOWN, editor.scroll_speed);
 		break;
-
 	case F11_KEY:
 		editor_set_status_message("Edit %s", EDIT_VERSION);
 		break;
-
 	case ESC_KEY:
 		break;
-
 	default:
 		editor_insert_char(key);
 		break;
 	}
-
 }
-
-
+/* Routes a key to the current mode's handler. This is the single dispatch
+ * point called from the main loop — no mode uses a nested event loop. */
+void editor_dispatch_key(int key)
+{
+	switch (editor.mode) {
+	case MODE_NORMAL:
+		normal_on_key(key);
+		break;
+	case MODE_PROMPT:
+		prompt_on_key(key);
+		break;
+	case MODE_CONFIRM_QUIT:
+		confirm_quit_on_key(key);
+		break;
+	}
+	editor.needs_render = 1;
+}
 /*** Init ***/
 
 /* Initializes all editor state to default values: cursor at origin, no file
@@ -2614,33 +2712,91 @@ void editor_init(void)
 	editor.file_descriptor = -1;
 	editor.mmap_base = NULL;
 	editor.mmap_size = 0;
+	editor.mode = MODE_NORMAL;
+	editor.needs_render = 1;
+	memset(&editor.prompt, 0, sizeof(editor.prompt));
+	memset(&editor.saved_position, 0, sizeof(editor.saved_position));
 }
 
-/* Entry point. Sets up the terminal (mouse reporting, raw mode), initializes
- * the editor, optionally opens a file from the command line argument, and
- * enters the main loop of refreshing the screen and processing keypresses. */
+/* Returns microseconds until the next tick, or 0 if we are behind schedule. */
+int time_until_tick(struct timeval *next_tick)
+{
+	struct timeval now;
+	gettimeofday(&now, NULL);
+	int diff = (int)((next_tick->tv_sec - now.tv_sec) * MICROSECONDS_PER_SECOND
+		       + (next_tick->tv_usec - now.tv_usec));
+	return diff > 0 ? diff : 0;
+}
+/* Advances a timeval by the given number of microseconds. */
+void timeval_add_us(struct timeval *tv, int us)
+{
+	tv->tv_usec += us;
+	while (tv->tv_usec >= MICROSECONDS_PER_SECOND) {
+		tv->tv_sec++;
+		tv->tv_usec -= MICROSECONDS_PER_SECOND;
+	}
+}
+/* Called once per tick for time-based state updates. Centralizes all
+ * timed behavior that was previously scattered through the renderer. */
+void editor_tick_timers(void)
+{
+	/* Auto-clear status message after timeout */
+	if (editor.status_message[0] &&
+	    time(NULL) - editor.status_message_time >= STATUS_MESSAGE_TIMEOUT_SECONDS) {
+		editor.status_message[0] = '\0';
+		editor.needs_render = 1;
+	}
+}
+/* Entry point. Sets up the terminal, initializes the editor, and enters
+ * the game loop: drain input → parse keys → dispatch to mode → tick
+ * timers → render if dirty → sleep until next tick or input arrives. */
 int main(int argc, char *argv[])
 {
 	atexit(editor_quit);
-
-	/* Enable mouse reporting */
 	terminal_enable_mouse_reporting();
-
-	/* Enable raw mode */
 	terminal_enable_raw_mode();
-
 	editor_init();
-	if (argc >= 2) {
+	if (argc >= 2)
 		editor_open(argv[1]);
-	}
-
+	/* Set stdin non-blocking AFTER init — terminal_get_window_size's
+	 * read-based fallback needs blocking I/O during startup. */
+	int flags = fcntl(STDIN_FILENO, F_GETFL, 0);
+	fcntl(STDIN_FILENO, F_SETFL, flags | O_NONBLOCK);
 	editor_set_status_message(
-			"Alt: S=save Q=quit F=find G=goto N=lines T=theme HJKL=move");
-
+		"Alt: S=save Q=quit F=find G=goto N=lines T=theme HJKL=move");
+	memset(&input, 0, sizeof(input));
+	struct timeval next_tick;
+	gettimeofday(&next_tick, NULL);
 	while (1) {
-		if (resize_pending)
+		/* 1. Drain all available input (non-blocking) */
+		input_drain(&input);
+		/* 2. Parse and dispatch all complete keys */
+		int key;
+		while ((key = input_parse_key(&input)) != -1)
+			editor_dispatch_key(key);
+		/* 3. Handle pending resize signals */
+		if (resize_pending) {
 			terminal_process_resize();
-		editor_refresh_screen();
-		editor_process_keypress();
+			editor.needs_render = 1;
+		}
+		/* 4. Time-based updates */
+		editor_tick_timers();
+		/* 5. Render only if something changed */
+		if (editor.needs_render) {
+			editor_refresh_screen();
+			editor.needs_render = 0;
+		}
+		/* 6. Sleep until next tick or input arrives */
+		int wait_us = time_until_tick(&next_tick);
+		int wait_ms = (wait_us + 999) / 1000;
+		if (wait_ms < 1)
+			wait_ms = 1;
+		struct pollfd pfd = { .fd = STDIN_FILENO, .events = POLLIN };
+		poll(&pfd, 1, wait_ms);
+		/* Advance tick clock */
+		struct timeval now;
+		gettimeofday(&now, NULL);
+		if (time_until_tick(&next_tick) <= 0)
+			timeval_add_us(&next_tick, TICK_INTERVAL_US);
 	}
 }
