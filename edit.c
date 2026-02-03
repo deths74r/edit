@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <sys/types.h>
 #include <signal.h>
@@ -33,7 +34,7 @@
 /* Encodes an Alt+key combination by adding an offset above special keys. */
 #define ALT_KEY(k) ((k) + 2000)
 
-/* Special key codes returned by terminal_read_key(). Values above 127 avoid
+/* Special key codes returned by terminal_decode_key(). Values above 127 avoid
  * collisions with normal ASCII characters. */
 enum editor_key {
 	BACKSPACE = 127,
@@ -111,6 +112,13 @@ struct line {
 	int temperature;
 };
 
+/* Editor mode determines which input handler processes keypresses. */
+enum editor_mode {
+	MODE_NORMAL = 0,
+	MODE_PROMPT,
+	MODE_CONFIRM
+};
+
 /* ASCII escape character used to begin terminal escape sequences. */
 #define ESC_KEY '\x1b'
 
@@ -154,6 +162,7 @@ struct line {
 #define LINE_NUMBER_BUFFER_SIZE 16
 #define ESCAPE_SEQUENCE_SIZE 6
 #define PROMPT_INITIAL_SIZE 128
+#define INPUT_BUFFER_SIZE 256
 
 /* Default Unix file permission mode for newly created files (rw-r--r--). */
 #define FILE_PERMISSION_DEFAULT 0644
@@ -235,19 +244,33 @@ struct editor_syntax {
 	int flags;
 };
 
-/* Tracks the current state of mouse input from SGR mouse reporting.
- * Button values: 0=left, 1=middle, 2=right, 35=movement, 64=scroll up,
- * 65=scroll down */
-struct mouse_input {
-	/* Button identifier from the mouse event. */
-	int button;
-	/* Mouse column coordinate (1-based from terminal). */
-	int column;
-	/* Mouse row coordinate (1-based from terminal). */
-	int row;
-	/* Press state: 'M' for pressed, 'm' for released. */
-	char pressed;
-} mouse_input;
+/* A decoded input event from the terminal. Keyboard events carry only
+ * a key code; mouse events also carry screen coordinates. */
+struct input_event {
+	int key;
+	int mouse_x;
+	int mouse_y;
+};
+
+/* Buffered input from stdin. Filled with a single non-blocking read()
+ * and drained byte-by-byte during key decoding. */
+struct input_buffer {
+	unsigned char data[INPUT_BUFFER_SIZE];
+	int read_position;
+	int count;
+};
+
+/* State for the prompt line (search, save-as, jump-to-line, etc).
+ * Active when editor.mode == MODE_PROMPT. */
+struct prompt_state {
+	char *format;
+	char *buffer;
+	size_t buffer_length;
+	size_t buffer_capacity;
+	void (*per_key_callback)(char *, int);
+	void (*on_accept)(char *);
+	void (*on_cancel)(void);
+};
 
 /* Global editor state containing cursor position, file content, display
  * settings, and terminal configuration. Single instance used throughout. */
@@ -290,12 +313,32 @@ struct editor_state {
 	int show_line_numbers;
 	/* Number of columns reserved for the line number gutter (digits + space). */
 	int line_number_width;
+	/* Buffered input from stdin. */
+	struct input_buffer input;
 	/* File descriptor for mmap, or -1 if not using mmap. */
 	int file_descriptor;
 	/* Base address of the mmap region, or NULL. */
 	char *mmap_base;
 	/* Size of the mmap region in bytes. */
 	size_t mmap_size;
+	/* Current input mode (normal editing, prompt, or confirm). */
+	enum editor_mode mode;
+	/* Prompt state for interactive prompts (search, save-as, etc). */
+	struct prompt_state prompt;
+	/* When set, editor exits after a successful save completes. */
+	int quit_after_save;
+	/* Callback for MODE_CONFIRM single-key responses. */
+	void (*confirm_callback)(int key);
+	/* Saved cursor/viewport for search cancellation. */
+	int saved_cursor_x, saved_cursor_y;
+	int saved_column_offset, saved_row_offset;
+	/* Search state (replaces static locals in find callback). */
+	int search_last_match;
+	int search_last_match_offset;
+	int search_direction;
+	int search_saved_highlight_line;
+	uint16_t *search_saved_syntax;
+	uint32_t search_saved_syntax_count;
 };
 
 /* Global editor state. */
@@ -332,14 +375,27 @@ void editor_set_status_message(const char *format, ...);
 void editor_refresh_screen(void);
 /* Queries terminal size and returns it via the rows/columns out-parameters. */
 int terminal_get_window_size(int *rows, int *columns);
-/* Displays a prompt and collects user input; returns the typed string. */
-char *editor_prompt(char *prompt, void (*callback)(char *, int));
-/* Prompts for a line number and moves the cursor there. */
-void editor_jump_to_line(void);
 /* Recalculates the gutter width based on the current line count. */
 void editor_update_gutter_width(void);
 /* Recalculates syntax highlighting for a line given previous open_comment state. */
 int line_update_syntax(struct line *line, int prev_open_comment);
+/* Opens a prompt in the status bar for user input. */
+void prompt_open(char *format, void (*per_key_callback)(char *, int),
+		 void (*on_accept)(char *), void (*on_cancel)(void));
+/* Handles a keypress while in MODE_PROMPT. */
+void prompt_handle_key(struct input_event event);
+/* Closes the current prompt and returns to MODE_NORMAL. */
+void prompt_close(void);
+/* Opens a single-key confirmation dialog. */
+void confirm_open(const char *message, void (*callback)(int key));
+/* Handles a keypress while in MODE_CONFIRM. */
+void editor_handle_confirm(struct input_event event);
+/* Writes the current file to disk. */
+int editor_save_write(void);
+/* Starts the save flow (prompts for filename if needed). */
+void editor_save_start(void);
+/* Starts incremental search. */
+void editor_find_start(void);
 
 /*** Editor Theme ***/
 
@@ -498,94 +554,154 @@ void terminal_process_resize(void)
 	editor.screen_columns = new_columns;
 	if (editor.cursor_y >= editor.line_count)
 		editor.cursor_y = editor.line_count > 0 ? editor.line_count - 1 : 0;
-	if (editor.cursor_y >= editor.screen_rows)
-		editor.cursor_y = editor.screen_rows - 1;
-	if (editor.cursor_x >= editor.screen_columns)
-		editor.cursor_x = editor.screen_columns - 1;
 }
 
-/* Reads a single keypress from stdin and translates escape sequences into
- * editor_key enum values. Handles arrow keys, page up/down, home/end,
- * delete, SGR mouse events, and Alt+key combinations (ESC followed by a
- * character). Returns the key code or ESC_KEY on unrecognized sequences.
- * Blocks until a key is available. */
-int terminal_read_key(void)
+/* Returns the number of bytes currently available in the input buffer. */
+int input_buffer_available(void)
 {
-	int bytes_read;
-	char character;
+	return editor.input.count;
+}
 
-	while ((bytes_read = read(STDIN_FILENO, &character, 1)) != 1) {
-		if (bytes_read == -1 && errno != EAGAIN && errno != EINTR)
-			terminal_die("read");
+/* Consumes one byte from the input buffer. Returns 1 on success, 0 if empty.
+ * Resets read_position when the buffer is fully drained. */
+int input_buffer_read_byte(unsigned char *out)
+{
+	if (editor.input.count == 0)
+		return 0;
+	*out = editor.input.data[editor.input.read_position];
+	editor.input.read_position++;
+	editor.input.count--;
+	if (editor.input.count == 0)
+		editor.input.read_position = 0;
+	return 1;
+}
+
+/* Fills the input buffer with a single non-blocking read() from stdin.
+ * Compacts the buffer first if the read position has advanced. Returns
+ * the number of bytes read, or 0 if nothing was available. */
+int input_buffer_fill(void)
+{
+	/* Compact: move unread data to the front */
+	if (editor.input.read_position > 0 && editor.input.count > 0) {
+		memmove(editor.input.data,
+			editor.input.data + editor.input.read_position,
+			editor.input.count);
+		editor.input.read_position = 0;
+	} else if (editor.input.count == 0) {
+		editor.input.read_position = 0;
 	}
+	int space = INPUT_BUFFER_SIZE - editor.input.read_position - editor.input.count;
+	if (space <= 0)
+		return 0;
+	int bytes_read = read(STDIN_FILENO,
+			      editor.input.data + editor.input.read_position + editor.input.count,
+			      space);
+	if (bytes_read > 0) {
+		editor.input.count += bytes_read;
+	}
+	return bytes_read > 0 ? bytes_read : 0;
+}
+
+/* Sets VMIN=0, VTIME=0 for fully non-blocking reads from stdin.
+ * Called after editor_init() and editor_open() so the startup
+ * terminal_get_cursor_position() fallback still works with VTIME=1. */
+void terminal_set_nonblocking(void)
+{
+	struct termios raw;
+	if (tcgetattr(STDIN_FILENO, &raw) == -1)
+		terminal_die("tcgetattr");
+	raw.c_cc[VMIN] = 0;
+	raw.c_cc[VTIME] = 0;
+	if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1)
+		terminal_die("tcsetattr");
+}
+
+/* Decodes a single keypress from the input buffer. Returns the decoded
+ * event by value. Key is -1 if the buffer is empty, ESC_KEY if an
+ * escape sequence is incomplete, UTF8_REPLACEMENT_CHAR for broken UTF-8.
+ * Mouse events carry screen coordinates in mouse_x/mouse_y. */
+struct input_event terminal_decode_key(void)
+{
+	unsigned char character;
+	if (!input_buffer_read_byte(&character))
+		return (struct input_event){.key = -1};
 
 	if (character == ESC_KEY) {
-		char sequence[ESCAPE_SEQUENCE_SIZE];
+		unsigned char sequence[ESCAPE_SEQUENCE_SIZE];
 
-		if (read(STDIN_FILENO, &sequence[0], 1) != 1)
-			return ESC_KEY;
+		if (!input_buffer_read_byte(&sequence[0]))
+			return (struct input_event){.key = ESC_KEY};
 
 		if (sequence[0] == '[') {
-			if (read(STDIN_FILENO, &sequence[1], 1) != 1)
-				return ESC_KEY;
+			if (!input_buffer_read_byte(&sequence[1]))
+				return (struct input_event){.key = ESC_KEY};
 
 			if (sequence[1] >= '0' && sequence[1] <= '9') {
-				if (read(STDIN_FILENO, &sequence[2], 1) != 1)
-					return ESC_KEY;
+				if (!input_buffer_read_byte(&sequence[2]))
+					return (struct input_event){.key = ESC_KEY};
 				if (sequence[2] == '~') {
 					switch (sequence[1]) {
 					case '1':
-						return HOME_KEY;
+						return (struct input_event){.key = HOME_KEY};
 					case '3':
-						return DEL_KEY;
+						return (struct input_event){.key = DEL_KEY};
 					case '4':
-						return END_KEY;
+						return (struct input_event){.key = END_KEY};
 					case '5':
-						return PAGE_UP;
+						return (struct input_event){.key = PAGE_UP};
 					case '6':
-						return PAGE_DOWN;
+						return (struct input_event){.key = PAGE_DOWN};
 					case '7':
-						return HOME_KEY;
+						return (struct input_event){.key = HOME_KEY};
 					case '8':
-						return END_KEY;
+						return (struct input_event){.key = END_KEY};
 					}
 				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
-					char terminator;
-					if (read(STDIN_FILENO, &terminator, 1) != 1)
-						return ESC_KEY;
+					unsigned char terminator;
+					if (!input_buffer_read_byte(&terminator))
+						return (struct input_event){.key = ESC_KEY};
 					if (terminator == '~') {
 						int code = (sequence[1] - '0') * 10
 							+ (sequence[2] - '0');
 						switch (code) {
 						case 23:
-							return F11_KEY;
+							return (struct input_event){.key = F11_KEY};
 						}
 					}
 				}
 			} else if (sequence[1] == '<') {
 
 				char mouse_sequence[MOUSE_SEQUENCE_SIZE];
+				int mouse_bytes = 0;
 
-				/* Read the mouse sequence and null-terminate at the
-				 * actual read length to avoid parsing uninitialized bytes. */
-				int mouse_bytes = read(STDIN_FILENO, mouse_sequence,
-						       sizeof(mouse_sequence) - 1);
-				if (mouse_bytes <= 0) {
-					return ESC_KEY;
+				/* Read mouse sequence bytes from the input buffer */
+				while (mouse_bytes < (int)sizeof(mouse_sequence) - 1) {
+					unsigned char mb;
+					if (!input_buffer_read_byte(&mb))
+						break;
+					mouse_sequence[mouse_bytes++] = (char)mb;
+					if (mb == 'M' || mb == 'm')
+						break;
 				}
 				mouse_sequence[mouse_bytes] = '\0';
 
-				if (sscanf(mouse_sequence, "%d;%d;%d%c", &mouse_input.button, &mouse_input.column,
-									 &mouse_input.row, &mouse_input.pressed) == 4) {
+				int button, column, row;
+				char pressed;
+				if (sscanf(mouse_sequence, "%d;%d;%d%c", &button, &column,
+									 &row, &pressed) == 4) {
 
-					switch (mouse_input.button) {
+					switch (button) {
 					case 0:
-						if (mouse_input.pressed == 'M') {
-							mouse_input.column = mouse_input.column - editor.line_number_width - 1;
-							if (mouse_input.column < 0)
-								mouse_input.column = 0;
-							mouse_input.row = mouse_input.row - 1;
-							return MOUSE_LEFT_BUTTON_PRESSED;
+						if (pressed == 'M') {
+							column = column - editor.line_number_width - 1;
+							if (column < 0)
+								column = 0;
+							row = row - 1;
+							return (struct input_event){
+								.key = MOUSE_LEFT_BUTTON_PRESSED,
+								.mouse_x = column,
+								.mouse_y = row
+							};
 						}
 						break;
 					case 1:
@@ -595,67 +711,69 @@ int terminal_read_key(void)
 					case 35:
 						break;
 					case 64:
-						return MOUSE_SCROLL_UP;
+						return (struct input_event){.key = MOUSE_SCROLL_UP};
 					case 65:
-						return MOUSE_SCROLL_DOWN;
+						return (struct input_event){.key = MOUSE_SCROLL_DOWN};
 					}
 				}
 
-				return ESC_KEY;
+				return (struct input_event){.key = ESC_KEY};
 
 			} else {
 				switch (sequence[1]) {
 				case 'A':
-					return ARROW_UP;
+					return (struct input_event){.key = ARROW_UP};
 				case 'B':
-					return ARROW_DOWN;
+					return (struct input_event){.key = ARROW_DOWN};
 				case 'C':
-					return ARROW_RIGHT;
+					return (struct input_event){.key = ARROW_RIGHT};
 				case 'D':
-					return ARROW_LEFT;
+					return (struct input_event){.key = ARROW_LEFT};
 				case 'H':
-					return HOME_KEY;
+					return (struct input_event){.key = HOME_KEY};
 				case 'F':
-					return END_KEY;
+					return (struct input_event){.key = END_KEY};
 				}
 			}
 		} else if (sequence[0] == 'O') {
-			if (read(STDIN_FILENO, &sequence[1], 1) != 1)
-				return ESC_KEY;
+			if (!input_buffer_read_byte(&sequence[1]))
+				return (struct input_event){.key = ESC_KEY};
 
 			switch (sequence[1]) {
 			case 'H':
-				return HOME_KEY;
+				return (struct input_event){.key = HOME_KEY};
 			case 'F':
-				return END_KEY;
+				return (struct input_event){.key = END_KEY};
 			}
 		} else {
-			return ALT_KEY(sequence[0]);
+			return (struct input_event){.key = ALT_KEY(sequence[0])};
 		}
-		return ESC_KEY;
-	} else if ((unsigned char)character >= 0x80) {
+		return (struct input_event){.key = ESC_KEY};
+	} else if (character >= 0x80) {
 		/* Multi-byte UTF-8 sequence: determine expected length from
 		 * the leading byte, read continuation bytes, then decode. */
-		unsigned char lead = (unsigned char)character;
+		unsigned char lead = character;
 		int expected;
 		if ((lead & 0xE0) == 0xC0) expected = 2;
 		else if ((lead & 0xF0) == 0xE0) expected = 3;
 		else if ((lead & 0xF8) == 0xF0) expected = 4;
-		else return UTF8_REPLACEMENT_CHAR;
+		else return (struct input_event){.key = UTF8_REPLACEMENT_CHAR};
 
 		char utf8_buf[4];
-		utf8_buf[0] = character;
+		utf8_buf[0] = (char)character;
 		for (int i = 1; i < expected; i++) {
-			if (read(STDIN_FILENO, &utf8_buf[i], 1) != 1)
-				return UTF8_REPLACEMENT_CHAR;
+			unsigned char cb;
+			if (!input_buffer_read_byte(&cb))
+				return (struct input_event){.key = UTF8_REPLACEMENT_CHAR};
+			utf8_buf[i] = (char)cb;
 		}
 		uint32_t codepoint;
 		int consumed = utf8_decode(utf8_buf, expected, &codepoint);
 		if (consumed <= 0)
-			return UTF8_REPLACEMENT_CHAR;
-		return (int)codepoint;
+			return (struct input_event){.key = UTF8_REPLACEMENT_CHAR};
+		return (struct input_event){.key = (int)codepoint};
 	} else {
-		return character;
+		return (struct input_event){.key = (int)character};
 	}
 }
 
@@ -713,7 +831,11 @@ int terminal_get_window_size(int *rows, int *columns)
  * characters that separate tokens in C code. */
 int syntax_is_separator(int character)
 {
-	return isspace(character) || character == '\0' || strchr(",.()+-/*=~%<>[];", character) != NULL;
+	if (character == '\0')
+		return 1;
+	if (character < 0 || character > 127)
+		return 0;
+	return isspace(character) || strchr(",.()+-/*=~%<>[];", character) != NULL;
 }
 
 /* Maps a highlight type enum value to its hex color string from the current
@@ -1233,6 +1355,16 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 	line->open_comment = in_comment;
 	return changed;
 }
+/* Propagates syntax highlighting forward from the given line until
+ * the open_comment state stabilizes. */
+void syntax_propagate(int from_line)
+{
+	for (int i = from_line; i < editor.line_count; i++) {
+		int prev_open = (i > 0) ? editor.lines[i - 1].open_comment : 0;
+		if (!line_update_syntax(&editor.lines[i], prev_open))
+			break;
+	}
+}
 /* Recalculates the number of columns reserved for the line number gutter
  * based on the current row count. The width equals the number of digits
  * needed to display the highest line number, plus one trailing space. */
@@ -1272,13 +1404,12 @@ void editor_line_insert(int position, const char *string, size_t length)
 	line_init(&editor.lines[position], position);
 	line_populate_from_bytes(&editor.lines[position], string, length);
 
-	/* Run syntax highlighting on the new line */
-	int prev_open = (position > 0) ? editor.lines[position - 1].open_comment : 0;
-	line_update_syntax(&editor.lines[position], prev_open);
-
 	editor.line_count++;
 	editor_update_gutter_width();
 	editor.dirty++;
+
+	/* Run syntax highlighting on the new line and propagate changes */
+	syntax_propagate(position);
 }
 
 /* Removes the line at the given position. Frees its memory, shifts remaining
@@ -1316,8 +1447,7 @@ void editor_insert_char(int character)
 		.context = 0,
 	};
 	line_insert_cell(ln, (uint32_t)editor.cursor_x, c);
-	int prev_open = (editor.cursor_y > 0) ? editor.lines[editor.cursor_y - 1].open_comment : 0;
-	line_update_syntax(ln, prev_open);
+	syntax_propagate(editor.cursor_y);
 	editor.dirty++;
 	editor.cursor_x++;
 
@@ -1357,8 +1487,7 @@ void editor_insert_newline(void)
 		/* Truncate the current line at the cursor position */
 		ln = &editor.lines[editor.cursor_y];
 		ln->cell_count = (uint32_t)editor.cursor_x;
-		int prev_open = (editor.cursor_y > 0) ? editor.lines[editor.cursor_y - 1].open_comment : 0;
-		line_update_syntax(ln, prev_open);
+		syntax_propagate(editor.cursor_y);
 		editor.dirty++;
 	}
 	editor.cursor_y++;
@@ -1382,19 +1511,17 @@ void editor_delete_char(void)
 		for (int i = editor.cursor_x - 1; i >= prev; i--) {
 			line_delete_cell(ln, (uint32_t)i);
 		}
-		int prev_open = (editor.cursor_y > 0) ? editor.lines[editor.cursor_y - 1].open_comment : 0;
-		line_update_syntax(ln, prev_open);
+		syntax_propagate(editor.cursor_y);
 		editor.dirty++;
 		editor.cursor_x = prev;
 	} else {
 		line_ensure_warm(&editor.lines[editor.cursor_y - 1]);
 		editor.cursor_x = (int)editor.lines[editor.cursor_y - 1].cell_count;
 		line_append_cells(&editor.lines[editor.cursor_y - 1], ln, 0);
-		int prev_open = (editor.cursor_y > 1) ? editor.lines[editor.cursor_y - 2].open_comment : 0;
-		line_update_syntax(&editor.lines[editor.cursor_y - 1], prev_open);
-		editor.dirty++;
 		editor_line_delete(editor.cursor_y);
 		editor.cursor_y--;
+		syntax_propagate(editor.cursor_y);
+		editor.dirty++;
 	}
 }
 
@@ -1464,6 +1591,7 @@ int editor_open_mmap(char *filename)
 	fd = -1;
 
 	/* Scan for newlines to build line index */
+	int line_capacity = 0;
 	size_t line_start = 0;
 	for (size_t i = 0; i < (size_t)file_size; i++) {
 		if (base[i] == '\n') {
@@ -1472,10 +1600,13 @@ int editor_open_mmap(char *filename)
 			if (line_len > 0 && base[line_start + line_len - 1] == '\r')
 				line_len--;
 
-			editor.lines = realloc(editor.lines,
-								   sizeof(struct line) * (editor.line_count + 1));
-			if (editor.lines == NULL)
-				terminal_die("realloc");
+			if (editor.line_count >= line_capacity) {
+				line_capacity = line_capacity ? line_capacity * 2 : 1024;
+				editor.lines = realloc(editor.lines,
+						       sizeof(struct line) * line_capacity);
+				if (editor.lines == NULL)
+					terminal_die("realloc");
+			}
 			struct line *ln = &editor.lines[editor.line_count];
 			ln->cells = NULL;
 			ln->cell_count = 0;
@@ -1497,10 +1628,13 @@ int editor_open_mmap(char *filename)
 		if (line_len > 0 && base[line_start + line_len - 1] == '\r')
 			line_len--;
 
-		editor.lines = realloc(editor.lines,
-							   sizeof(struct line) * (editor.line_count + 1));
-		if (editor.lines == NULL)
-			terminal_die("realloc");
+		if (editor.line_count >= line_capacity) {
+			line_capacity = line_capacity ? line_capacity * 2 : 1024;
+			editor.lines = realloc(editor.lines,
+					       sizeof(struct line) * line_capacity);
+			if (editor.lines == NULL)
+				terminal_die("realloc");
+		}
 		struct line *ln = &editor.lines[editor.line_count];
 		ln->cells = NULL;
 		ln->cell_count = 0;
@@ -1511,6 +1645,14 @@ int editor_open_mmap(char *filename)
 		ln->mmap_length = (uint32_t)line_len;
 		ln->temperature = LINE_COLD;
 		editor.line_count++;
+	}
+
+	/* Shrink to fit */
+	if (editor.line_count > 0 && editor.line_count < line_capacity) {
+		editor.lines = realloc(editor.lines,
+				       sizeof(struct line) * editor.line_count);
+		if (editor.lines == NULL)
+			terminal_die("realloc");
 	}
 
 out:
@@ -1528,6 +1670,8 @@ int editor_open(char *filename)
 {
 	free(editor.filename);
 	editor.filename = strdup(filename);
+	if (editor.filename == NULL)
+		terminal_die("strdup");
 
 	int ret = editor_open_mmap(filename);
 	if (ret < 0) {
@@ -1542,25 +1686,27 @@ int editor_open(char *filename)
 	return 0;
 }
 
-/* Saves the current file to disk. Prompts for a filename if one hasn't been
- * set yet. Converts all rows to a string, truncates the file, and writes
- * the content. Displays a status message on success or error.
+/* Writes the current file content to disk. Assumes editor.filename is set.
+ * Converts all rows to a string, releases mmap, truncates the file, and
+ * writes the content. If quit_after_save is set, exits after success.
  * Returns 0 on success, negative errno on failure. */
-int editor_save(void)
+int editor_save_write(void)
 {
-	if (editor.filename == NULL) {
-		editor.filename = editor_prompt("Save as: %s (ESC to cancel)", NULL);
-		if (editor.filename == NULL) {
-			editor_set_status_message("Save aborted");
-			return -ECANCELED;
-		}
-		syntax_select_highlight();
-	}
-
 	int ret = 0;
 	int fd = -1;
 	size_t file_length;
 	char *file_content = editor_rows_to_string(&file_length);
+
+	/* Release mmap before writing — all lines are now warm. */
+	if (editor.mmap_base) {
+		munmap(editor.mmap_base, editor.mmap_size);
+		editor.mmap_base = NULL;
+		editor.mmap_size = 0;
+	}
+	if (editor.file_descriptor != -1) {
+		close(editor.file_descriptor);
+		editor.file_descriptor = -1;
+	}
 
 	fd = open(editor.filename, O_RDWR | O_CREAT, FILE_PERMISSION_DEFAULT);
 	if (fd == -1) {
@@ -1571,6 +1717,8 @@ int editor_save(void)
 		ret = -errno;
 		goto out;
 	}
+	if (file_length == 0)
+		goto success;
 	/* Write all content, retrying on short writes. */
 	size_t bytes_written = 0;
 	while (bytes_written < file_length) {
@@ -1585,18 +1733,9 @@ int editor_save(void)
 		bytes_written += (size_t)result;
 	}
 
+success:
 	/* Success */
 	editor.dirty = 0;
-	/* Release old mmap since file content has changed */
-	if (editor.mmap_base) {
-		munmap(editor.mmap_base, editor.mmap_size);
-		editor.mmap_base = NULL;
-		editor.mmap_size = 0;
-	}
-	if (editor.file_descriptor != -1) {
-		close(editor.file_descriptor);
-		editor.file_descriptor = -1;
-	}
 	editor_set_status_message("%zu bytes written to disk", file_length);
 
 out:
@@ -1605,24 +1744,80 @@ out:
 	free(file_content);
 	if (ret < 0)
 		editor_set_status_message("Can't save! I/O error: %s", strerror(-ret));
+
+	if (ret == 0 && editor.quit_after_save) {
+		write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
+		write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+		exit(0);
+	}
 	return ret;
 }
-/* Prompts for a new filename and saves the file to it. Always prompts
- * regardless of whether a filename is already set, unlike editor_save
- * which only prompts when no filename exists. Re-runs syntax highlighting
- * since the file extension may have changed.
- * Returns 0 on success, negative errno on failure. */
-int editor_save_as(void)
+
+/* Called when the user accepts a filename in the save prompt. Sets the
+ * filename, selects syntax highlighting, and writes the file. */
+void editor_save_accept(char *filename)
 {
-	char *new_filename = editor_prompt("Save as: %s (ESC to cancel)", NULL);
-	if (new_filename == NULL) {
-		editor_set_status_message("Save as aborted");
-		return -ECANCELED;
-	}
-	free(editor.filename);
-	editor.filename = new_filename;
+	editor.filename = filename;
 	syntax_select_highlight();
-	return editor_save();
+	editor_save_write();
+}
+
+/* Called when the user cancels the save prompt. */
+void editor_save_cancel(void)
+{
+	editor_set_status_message("Save aborted");
+	editor.quit_after_save = 0;
+}
+
+/* Starts the save flow. If a filename exists, writes immediately.
+ * Otherwise opens a prompt to ask for one. */
+void editor_save_start(void)
+{
+	if (editor.filename != NULL) {
+		editor_save_write();
+	} else {
+		prompt_open("Save as: %s (ESC to cancel)", NULL,
+			    editor_save_accept, editor_save_cancel);
+	}
+}
+
+/* Called when the user accepts a filename in the save-as prompt. Replaces
+ * the current filename, re-runs syntax highlighting, and writes. */
+void editor_save_as_accept(char *filename)
+{
+	free(editor.filename);
+	editor.filename = filename;
+	syntax_select_highlight();
+	editor_save_write();
+}
+
+/* Called when the user cancels the save-as prompt. */
+void editor_save_as_cancel(void)
+{
+	editor_set_status_message("Save as aborted");
+}
+
+/* Opens a save-as prompt, always asking for a filename. */
+void editor_save_as_start(void)
+{
+	prompt_open("Save as: %s (ESC to cancel)", NULL,
+		    editor_save_as_accept, editor_save_as_cancel);
+}
+
+/* Handles the quit confirmation response. 'y' saves then exits, 'n'
+ * exits without saving, anything else returns to normal editing. */
+void editor_quit_confirm(int key)
+{
+	if (key == 'y' || key == 'Y') {
+		editor.quit_after_save = 1;
+		editor_save_start();
+	} else if (key == 'n' || key == 'N') {
+		write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
+		write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+		exit(0);
+	} else {
+		editor_set_status_message("");
+	}
 }
 
 /* Cleans up all allocated resources before exiting. Frees every line's
@@ -1657,53 +1852,45 @@ void editor_quit(void)
 
 /*** Find ***/
 
-/* Callback invoked on each keypress during incremental search. Tracks the
- * last match position and search direction, highlights the matching text,
- * and scrolls the view to center the match. Restores original highlighting
- * when the search is cancelled or a new match is found. */
+/* Callback invoked on each keypress during incremental search. Uses
+ * editor.search_* fields to track state instead of static locals, enabling
+ * proper interaction with the non-blocking mode system. */
 void editor_find_callback(char *query, int key)
 {
-	static int last_match = -1;
-	static int last_match_offset = -1;
-	static int direction = 1;
-	static int saved_highlight_line;
-	static uint16_t *saved_syntax = NULL;
-	static uint32_t saved_syntax_count = 0;
-
-	if (saved_syntax) {
-		struct line *restore_ln = &editor.lines[saved_highlight_line];
+	if (editor.search_saved_syntax) {
+		struct line *restore_ln = &editor.lines[editor.search_saved_highlight_line];
 		line_ensure_warm(restore_ln);
-		for (uint32_t k = 0; k < saved_syntax_count && k < restore_ln->cell_count; k++)
-			restore_ln->cells[k].syntax = saved_syntax[k];
-		free(saved_syntax);
-		saved_syntax = NULL;
-		saved_syntax_count = 0;
+		for (uint32_t k = 0; k < editor.search_saved_syntax_count && k < restore_ln->cell_count; k++)
+			restore_ln->cells[k].syntax = editor.search_saved_syntax[k];
+		free(editor.search_saved_syntax);
+		editor.search_saved_syntax = NULL;
+		editor.search_saved_syntax_count = 0;
 	}
 
 	if (key == '\r' || key == ESC_KEY) {
-		last_match = -1;
-		last_match_offset = -1;
-		direction = 1;
+		editor.search_last_match = -1;
+		editor.search_last_match_offset = -1;
+		editor.search_direction = 1;
 		return;
 	} else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
-		direction = 1;
+		editor.search_direction = 1;
 	} else if (key == ARROW_LEFT || key == ARROW_UP) {
-		direction = -1;
+		editor.search_direction = -1;
 	} else {
-		last_match = -1;
-		last_match_offset = -1;
-		direction = 1;
+		editor.search_last_match = -1;
+		editor.search_last_match_offset = -1;
+		editor.search_direction = 1;
 	}
 
 	int current;
 	int search_offset;
-	if (last_match == -1) {
-		direction = 1;
+	if (editor.search_last_match == -1) {
+		editor.search_direction = 1;
 		current = editor.cursor_y;
 		search_offset = -1;
 	} else {
-		current = last_match;
-		search_offset = last_match_offset;
+		current = editor.search_last_match;
+		search_offset = editor.search_last_match_offset;
 	}
 	int screen_middle = editor.screen_rows / 2;
 	size_t query_len = strlen(query);
@@ -1713,7 +1900,7 @@ void editor_find_callback(char *query, int key)
 			/* First iteration: try to find another match on the
 			 * same line before moving to the next one. */
 		} else {
-			current += direction;
+			current += editor.search_direction;
 			search_offset = -1;
 		}
 		if (current == -1)
@@ -1728,7 +1915,7 @@ void editor_find_callback(char *query, int key)
 		char *render = line_to_bytes(ln, &byte_len);
 		char *match = NULL;
 
-		if (direction == 1) {
+		if (editor.search_direction == 1) {
 			/* Forward: search after the previous match offset */
 			int start = (search_offset >= 0) ? search_offset + 1 : 0;
 			if (start < (int)byte_len)
@@ -1748,8 +1935,8 @@ void editor_find_callback(char *query, int key)
 
 		if (match) {
 			int match_byte_offset = (int)(match - render);
-			last_match = current;
-			last_match_offset = match_byte_offset;
+			editor.search_last_match = current;
+			editor.search_last_match_offset = match_byte_offset;
 			editor.cursor_y = current;
 
 			/* Convert byte offset to cell index by counting
@@ -1780,19 +1967,22 @@ void editor_find_callback(char *query, int key)
 			editor.row_offset = editor.cursor_y - screen_middle;
 			if (editor.row_offset < 0)
 				editor.row_offset = 0;
-			if (editor.row_offset > editor.line_count - editor.screen_rows)
-				editor.row_offset = editor.line_count - editor.screen_rows;
+			int max_offset = editor.line_count - editor.screen_rows;
+			if (max_offset < 0)
+				max_offset = 0;
+			if (editor.row_offset > max_offset)
+				editor.row_offset = max_offset;
 
 			/* Save current syntax and highlight match */
-			saved_highlight_line = current;
-			saved_syntax_count = ln->cell_count;
-			saved_syntax = malloc(sizeof(uint16_t) * ln->cell_count);
-			if (saved_syntax == NULL) {
+			editor.search_saved_highlight_line = current;
+			editor.search_saved_syntax_count = ln->cell_count;
+			editor.search_saved_syntax = malloc(sizeof(uint16_t) * ln->cell_count);
+			if (editor.search_saved_syntax == NULL) {
 				free(render);
 				break;
 			}
 			for (uint32_t k = 0; k < ln->cell_count; k++)
-				saved_syntax[k] = ln->cells[k].syntax;
+				editor.search_saved_syntax[k] = ln->cells[k].syntax;
 			for (int k = 0; k < query_cell_count && cell_index + k < (int)ln->cell_count; k++)
 				ln->cells[cell_index + k].syntax = HL_MATCH;
 
@@ -1803,39 +1993,44 @@ void editor_find_callback(char *query, int key)
 	}
 }
 
-/* Opens the search prompt and performs incremental find. Saves the cursor
- * position before searching and restores it if the user cancels with ESC. */
-void editor_find(void)
+/* Called when the user accepts a search result (Enter). Frees the query
+ * string and leaves the cursor at the match position. */
+void editor_find_accept(char *query)
 {
-	int saved_cursor_x = editor.cursor_x;
-	int saved_cursor_y = editor.cursor_y;
-	int saved_column_offset = editor.column_offset;
-	int saved_row_offset = editor.row_offset;
-
-	char *query =
-			editor_prompt("Search: %s (Use ESC/Arrows/Enter)", editor_find_callback);
-
-	if (query) {
-		free(query);
-	} else {
-		editor.cursor_x = saved_cursor_x;
-		editor.cursor_y = saved_cursor_y;
-		editor.column_offset = saved_column_offset;
-		editor.row_offset = saved_row_offset;
-	}
+	free(query);
 }
 
-/* Prompts the user for a line number and moves the cursor to that line.
- * Centers the target line vertically on screen and resets the horizontal
- * scroll offset. Shows an error message for invalid line numbers. */
-void editor_jump_to_line(void)
+/* Called when the user cancels a search (ESC). Restores the cursor and
+ * viewport to the position saved before the search started. */
+void editor_find_cancel(void)
 {
-	char *line_number = editor_prompt("Jump to line: %s", NULL);
-	if (line_number == NULL)
-		return;
+	editor.cursor_x = editor.saved_cursor_x;
+	editor.cursor_y = editor.saved_cursor_y;
+	editor.column_offset = editor.saved_column_offset;
+	editor.row_offset = editor.saved_row_offset;
+}
 
-	int line = atoi(line_number);
-	free(line_number);
+/* Starts an incremental search. Saves cursor/viewport state and opens
+ * the search prompt. */
+void editor_find_start(void)
+{
+	editor.saved_cursor_x = editor.cursor_x;
+	editor.saved_cursor_y = editor.cursor_y;
+	editor.saved_column_offset = editor.column_offset;
+	editor.saved_row_offset = editor.row_offset;
+	editor.search_last_match = -1;
+	editor.search_last_match_offset = -1;
+	editor.search_direction = 1;
+	prompt_open("Search: %s (Use ESC/Arrows/Enter)",
+		    editor_find_callback, editor_find_accept, editor_find_cancel);
+}
+
+/* Called when the user accepts a jump-to-line input. Parses the line
+ * number, validates it, and moves the cursor. */
+void editor_jump_to_line_accept(char *input)
+{
+	int line = atoi(input);
+	free(input);
 
 	if (line > 0 && line <= editor.line_count) {
 		editor.cursor_y = line - 1;
@@ -1845,8 +2040,11 @@ void editor_jump_to_line(void)
 		int new_row_offset = editor.cursor_y - (editor.screen_rows / 2);
 		if (new_row_offset < 0)
 			new_row_offset = 0;
-		if (new_row_offset > editor.line_count - editor.screen_rows)
-			new_row_offset = editor.line_count - editor.screen_rows;
+		int max_offset = editor.line_count - editor.screen_rows;
+		if (max_offset < 0)
+			max_offset = 0;
+		if (new_row_offset > max_offset)
+			new_row_offset = max_offset;
 		editor.row_offset = new_row_offset;
 
 		/* Ensure the cursor is visible horizontally */
@@ -1854,6 +2052,12 @@ void editor_jump_to_line(void)
 	} else {
 		editor_set_status_message("Invalid line number");
 	}
+}
+
+/* Opens the jump-to-line prompt. */
+void editor_jump_to_line_start(void)
+{
+	prompt_open("Jump to line: %s", NULL, editor_jump_to_line_accept, NULL);
 }
 
 /*** Append buffer ***/
@@ -2060,6 +2264,11 @@ void editor_scroll_rows(int scroll_direction, int scroll_amount)
 			editor.cursor_y += scroll_amount;
 		}
 	}
+	/* Final bounds clamp */
+	if (editor.cursor_y < 0)
+		editor.cursor_y = 0;
+	if (editor.cursor_y > editor.line_count)
+		editor.cursor_y = editor.line_count;
 }
 
 /* Updates the scroll speed based on the time between consecutive scroll
@@ -2314,85 +2523,129 @@ void editor_set_status_message(const char *format, ...)
 
 /*** Input ***/
 
-/* Displays a prompt in the status bar and collects user input character by
- * character. Supports backspace, ESC to cancel (returns NULL), and Enter to
- * confirm. The optional callback is invoked after each keypress for features
- * like incremental search. The caller must free the returned string. */
-char *editor_prompt(char *prompt, void (*callback)(char *, int))
+/* Opens a prompt in the status bar. Sets mode to MODE_PROMPT and stores
+ * the callbacks for per-key updates, accept, and cancel actions. */
+void prompt_open(char *format, void (*per_key_callback)(char *, int),
+		 void (*on_accept)(char *), void (*on_cancel)(void))
 {
-	size_t buffer_size = PROMPT_INITIAL_SIZE;
-	char *buffer = malloc(buffer_size);
-	if (buffer == NULL)
+	editor.mode = MODE_PROMPT;
+	editor.prompt.format = format;
+	editor.prompt.buffer_capacity = PROMPT_INITIAL_SIZE;
+	editor.prompt.buffer = malloc(editor.prompt.buffer_capacity);
+	if (editor.prompt.buffer == NULL)
 		terminal_die("malloc");
-
-	size_t buffer_length = 0;
-	buffer[0] = '\0';
-
-	while (1) {
-		editor_set_status_message(prompt, buffer);
-		editor_refresh_screen();
-
-		int key = terminal_read_key();
-		if (key == DEL_KEY || key == CTRL_KEY('h') || key == BACKSPACE) {
-			if (buffer_length != 0)
-				buffer[--buffer_length] = '\0';
-		} else if (key == ESC_KEY) {
-			editor_set_status_message("");
-			if (callback)
-				callback(buffer, key);
-			free(buffer);
-			return NULL;
-		} else if (key == '\r') {
-			if (buffer_length != 0) {
-				editor_set_status_message("");
-				if (callback)
-					callback(buffer, key);
-				return buffer;
-			}
-		} else if (!iscntrl(key) && key > 0 && key < ARROW_LEFT) {
-			char utf8_buf[UTF8_MAX_BYTES];
-			int byte_count;
-			if (key < ASCII_MAX) {
-				utf8_buf[0] = (char)key;
-				byte_count = 1;
-			} else {
-				byte_count = utf8_encode((uint32_t)key, utf8_buf);
-			}
-			while (buffer_length + byte_count >= buffer_size - 1) {
-				buffer_size *= 2;
-				buffer = realloc(buffer, buffer_size);
-				if (buffer == NULL)
-					terminal_die("realloc");
-			}
-			memcpy(buffer + buffer_length, utf8_buf, byte_count);
-			buffer_length += byte_count;
-			buffer[buffer_length] = '\0';
-		}
-
-		if (callback)
-			callback(buffer, key);
-	}
+	editor.prompt.buffer[0] = '\0';
+	editor.prompt.buffer_length = 0;
+	editor.prompt.per_key_callback = per_key_callback;
+	editor.prompt.on_accept = on_accept;
+	editor.prompt.on_cancel = on_cancel;
+	editor_set_status_message(format, "");
 }
 
-/* Moves the cursor in the direction indicated by the key parameter. Handles
+/* Handles a keypress while in MODE_PROMPT. Processes backspace, ESC,
+ * Enter, and printable characters. Calls per_key_callback after each
+ * keypress, and on_accept/on_cancel on Enter/ESC. */
+void prompt_handle_key(struct input_event event)
+{
+	int key = event.key;
+	if (key == DEL_KEY || key == CTRL_KEY('h') || key == BACKSPACE) {
+		if (editor.prompt.buffer_length != 0)
+			editor.prompt.buffer[--editor.prompt.buffer_length] = '\0';
+	} else if (key == ESC_KEY) {
+		editor_set_status_message("");
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(editor.prompt.buffer, key);
+		void (*on_cancel)(void) = editor.prompt.on_cancel;
+		free(editor.prompt.buffer);
+		editor.prompt.buffer = NULL;
+		editor.mode = MODE_NORMAL;
+		if (on_cancel)
+			on_cancel();
+		return;
+	} else if (key == '\r') {
+		if (editor.prompt.buffer_length != 0) {
+			editor_set_status_message("");
+			if (editor.prompt.per_key_callback)
+				editor.prompt.per_key_callback(editor.prompt.buffer, key);
+			/* on_accept takes ownership of the buffer */
+			char *buffer = editor.prompt.buffer;
+			void (*on_accept)(char *) = editor.prompt.on_accept;
+			editor.prompt.buffer = NULL;
+			editor.mode = MODE_NORMAL;
+			if (on_accept)
+				on_accept(buffer);
+			return;
+		}
+	} else if (key > 0 && key < ARROW_LEFT && (key >= 128 || !iscntrl(key))) {
+		char utf8_buf[UTF8_MAX_BYTES];
+		int byte_count;
+		if (key < ASCII_MAX) {
+			utf8_buf[0] = (char)key;
+			byte_count = 1;
+		} else {
+			byte_count = utf8_encode((uint32_t)key, utf8_buf);
+		}
+		while (editor.prompt.buffer_length + byte_count >= editor.prompt.buffer_capacity - 1) {
+			editor.prompt.buffer_capacity *= 2;
+			editor.prompt.buffer = realloc(editor.prompt.buffer,
+						       editor.prompt.buffer_capacity);
+			if (editor.prompt.buffer == NULL)
+				terminal_die("realloc");
+		}
+		memcpy(editor.prompt.buffer + editor.prompt.buffer_length,
+		       utf8_buf, byte_count);
+		editor.prompt.buffer_length += byte_count;
+		editor.prompt.buffer[editor.prompt.buffer_length] = '\0';
+	}
+
+	if (editor.prompt.per_key_callback)
+		editor.prompt.per_key_callback(editor.prompt.buffer, key);
+	editor_set_status_message(editor.prompt.format, editor.prompt.buffer);
+}
+
+/* Closes the current prompt and returns to MODE_NORMAL. */
+void prompt_close(void)
+{
+	editor.mode = MODE_NORMAL;
+	editor_set_status_message("");
+}
+
+/* Opens a single-key confirmation dialog in the status bar. */
+void confirm_open(const char *message, void (*callback)(int key))
+{
+	editor.mode = MODE_CONFIRM;
+	editor.confirm_callback = callback;
+	editor_set_status_message("%s", message);
+}
+
+/* Handles a keypress while in MODE_CONFIRM. Calls the stored callback
+ * and returns to MODE_NORMAL. */
+void editor_handle_confirm(struct input_event event)
+{
+	editor.mode = MODE_NORMAL;
+	if (editor.confirm_callback)
+		editor.confirm_callback(event.key);
+}
+
+/* Moves the cursor in the direction indicated by the event parameter. Handles
  * arrow keys, mouse clicks, and line wrapping (moving past the end of a line
  * wraps to the next, and past the start wraps to the previous). Clamps the
  * cursor to the current line length after vertical movement. */
-void editor_move_cursor(int key)
+void editor_move_cursor(struct input_event event)
 {
 	struct line *current_line = (editor.cursor_y >= editor.line_count)
 												? NULL
 												: &editor.lines[editor.cursor_y];
 
-	switch (key) {
+	switch (event.key) {
 
 	case MOUSE_LEFT_BUTTON_PRESSED:
-		if (mouse_input.row >= 0 && mouse_input.row < editor.screen_rows) {
-			int file_row = mouse_input.row + editor.row_offset;
+		if (event.mouse_y >= 0 && event.mouse_y < editor.screen_rows) {
+			int file_row = event.mouse_y + editor.row_offset;
 			if (file_row < editor.line_count) {
 				editor.cursor_y = file_row;
 				struct line *click_line = &editor.lines[editor.cursor_y];
-				int render_col = mouse_input.column + editor.column_offset;
+				int render_col = event.mouse_x + editor.column_offset;
 				editor.cursor_x = line_render_column_to_cell(click_line, render_col);
 			}
 		}
@@ -2401,6 +2654,8 @@ void editor_move_cursor(int key)
 
 	case ALT_KEY('h'):
 	case ARROW_LEFT:
+		if (current_line == NULL)
+			break;
 		if (editor.cursor_x != 0) {
 			editor.cursor_x = cursor_prev_grapheme(current_line, editor.cursor_x);
 		} else if (editor.cursor_y > 0) {
@@ -2455,13 +2710,12 @@ void editor_move_cursor(int key)
 	}
 }
 
-/* Main input handler called once per iteration of the editor loop. Reads a
- * keypress and dispatches it to the appropriate action: text insertion,
- * cursor movement, file operations, search, or quit. Prompts to save
- * unsaved changes before quitting. */
-void editor_process_keypress(void)
+/* Main input handler for MODE_NORMAL. Dispatches the input event to the
+ * appropriate action: text insertion, cursor movement, file operations,
+ * search, or quit. Event is passed in from the main loop. */
+void editor_process_keypress(struct input_event event)
 {
-	int key = terminal_read_key();
+	int key = event.key;
 	switch (key) {
 	case '\r':
 		editor_insert_newline();
@@ -2475,32 +2729,25 @@ void editor_process_keypress(void)
 		break;
 
 	case ALT_KEY('g'):
-		editor_jump_to_line();
+		editor_jump_to_line_start();
 		break;
 
 	case ALT_KEY('q'):
 		if (editor.dirty) {
-			editor_set_status_message(
-					"Unsaved changes. Save before quitting? (y/n/ESC)");
-			editor_refresh_screen();
-			int response = terminal_read_key();
-			if (response == 'y' || response == 'Y') {
-				editor_save();
-			} else if (response != 'n' && response != 'N') {
-				editor_set_status_message("");
-				return;
-			}
+			confirm_open("Unsaved changes. Save before quitting? (y/n/ESC)",
+				     editor_quit_confirm);
+		} else {
+			write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
+			write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+			exit(0);
 		}
-		write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
-		write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
-		exit(0);
 		break;
 
 	case ALT_KEY('s'):
-		editor_save();
+		editor_save_start();
 		break;
 	case ALT_KEY('S'):
-		editor_save_as();
+		editor_save_as_start();
 		break;
 
 	case HOME_KEY:
@@ -2513,16 +2760,22 @@ void editor_process_keypress(void)
 		break;
 
 	case ALT_KEY('f'):
-		editor_find();
+		editor_find_start();
 		break;
 
 	case BACKSPACE:
 	case CTRL_KEY('h'):
-	case DEL_KEY:
-		if (key == DEL_KEY)
-			editor_move_cursor(ARROW_RIGHT);
 		editor_delete_char();
 		break;
+	case DEL_KEY: {
+		int saved_y = editor.cursor_y;
+		int saved_x = editor.cursor_x;
+		editor_move_cursor((struct input_event){.key = ARROW_RIGHT});
+		if (editor.cursor_y == saved_y && editor.cursor_x == saved_x)
+			break;
+		editor_delete_char();
+		break;
+	}
 
 	case PAGE_UP:
 	case PAGE_DOWN: {
@@ -2536,7 +2789,7 @@ void editor_process_keypress(void)
 
 		int times = editor.screen_rows;
 		while (times--)
-			editor_move_cursor(key == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+			editor_move_cursor((struct input_event){.key = key == PAGE_UP ? ARROW_UP : ARROW_DOWN});
 	} break;
 
 	case ALT_KEY('h'):
@@ -2547,11 +2800,11 @@ void editor_process_keypress(void)
 	case ARROW_DOWN:
 	case ARROW_LEFT:
 	case ARROW_RIGHT:
-		editor_move_cursor(key);
+		editor_move_cursor(event);
 		break;
 
 	case MOUSE_LEFT_BUTTON_PRESSED:
-		editor_move_cursor(MOUSE_LEFT_BUTTON_PRESSED);
+		editor_move_cursor(event);
 		break;
 
 	case MOUSE_SCROLL_UP:
@@ -2600,7 +2853,7 @@ void editor_init(void)
 	editor.status_message[0] = '\0';
 	editor.status_message_time = 0;
 	editor.syntax = NULL;
-	editor_set_theme(3);
+	editor_set_theme(current_theme_index);
 
 	signal(SIGWINCH, terminal_handle_resize);
 	if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns) ==
@@ -2614,11 +2867,27 @@ void editor_init(void)
 	editor.file_descriptor = -1;
 	editor.mmap_base = NULL;
 	editor.mmap_size = 0;
+
+	editor.mode = MODE_NORMAL;
+	editor.prompt = (struct prompt_state){0};
+	editor.quit_after_save = 0;
+	editor.confirm_callback = NULL;
+	editor.saved_cursor_x = 0;
+	editor.saved_cursor_y = 0;
+	editor.saved_column_offset = 0;
+	editor.saved_row_offset = 0;
+	editor.search_last_match = -1;
+	editor.search_last_match_offset = -1;
+	editor.search_direction = 1;
+	editor.search_saved_highlight_line = 0;
+	editor.search_saved_syntax = NULL;
+	editor.search_saved_syntax_count = 0;
 }
 
 /* Entry point. Sets up the terminal (mouse reporting, raw mode), initializes
  * the editor, optionally opens a file from the command line argument, and
- * enters the main loop of refreshing the screen and processing keypresses. */
+ * enters a poll()-based main loop. Input is buffered and decoded without
+ * blocking, so paste and resize are handled efficiently. */
 int main(int argc, char *argv[])
 {
 	atexit(editor_quit);
@@ -2637,10 +2906,40 @@ int main(int argc, char *argv[])
 	editor_set_status_message(
 			"Alt: S=save Q=quit F=find G=goto N=lines T=theme HJKL=move");
 
+	/* Switch to fully non-blocking reads now that startup terminal
+	 * queries (which need VTIME=1) are complete. */
+	terminal_set_nonblocking();
+
 	while (1) {
 		if (resize_pending)
 			terminal_process_resize();
+
 		editor_refresh_screen();
-		editor_process_keypress();
+
+		struct pollfd stdin_poll = {STDIN_FILENO, POLLIN, 0};
+		if (poll(&stdin_poll, 1, -1) == -1) {
+			if (errno == EINTR)
+				continue;
+			terminal_die("poll");
+		}
+
+		input_buffer_fill();
+
+		struct input_event event;
+		while ((event = terminal_decode_key()).key != -1) {
+			switch (editor.mode) {
+			case MODE_NORMAL:
+				editor_process_keypress(event);
+				break;
+			case MODE_PROMPT:
+				prompt_handle_key(event);
+				break;
+			case MODE_CONFIRM:
+				editor_handle_confirm(event);
+				break;
+			}
+			if (input_buffer_available() == 0)
+				input_buffer_fill();
+		}
 	}
 }
