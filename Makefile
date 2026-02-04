@@ -19,7 +19,7 @@ TARGET = edit
 SRC = edit.c
 OBJ = $(SRC:.c=.o)
 
-.PHONY: all clean debug release lint
+.PHONY: all clean debug release lint test
 
 all: $(TARGET)
 
@@ -43,5 +43,11 @@ lint:
 		echo "OK: no stray bytes"; \
 	fi
 
+test: test_edit
+	./test_edit
+
+test_edit: test_edit.c edit.c lib/gstr/include/gstr.h
+	$(CC) $(CFLAGS) -o test_edit test_edit.c
+
 clean:
-	rm -f $(TARGET) $(OBJ)
+	rm -f $(TARGET) $(OBJ) test_edit
