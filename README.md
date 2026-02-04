@@ -135,6 +135,27 @@ The transition is one-way: COLD -> WARM -> HOT. When a line is accessed
 for rendering or editing, `line_ensure_warm()` decodes the mmap bytes
 into cells. Any mutation (insert, delete) marks the line HOT.
 
+### Input Events
+
+All terminal input flows through a single path: `input_buffer_fill()`
+reads stdin into a buffer inside `editor_state`, then
+`terminal_decode_key()` decodes one event at a time, returning a
+`struct input_event` by value:
+
+```c
+struct input_event {
+    int key;       // key code or special key enum
+    int mouse_x;   // column (zero for non-mouse events)
+    int mouse_y;   // row (zero for non-mouse events)
+};
+```
+
+Keyboard events carry only a key code. Mouse events (click, scroll)
+also carry screen coordinates. The main loop threads this struct through
+the dispatch chain (`editor_process_keypress`, `editor_move_cursor`,
+`prompt_handle_key`, `editor_handle_confirm`) so mouse coordinates
+travel with the event rather than through a global.
+
 ### Rendering Pipeline
 
 Each frame follows the same sequence:
