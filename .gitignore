@@ -5,3 +5,10 @@ debug.log
 
 # Sift agent memory (per-project database)
 .sift/
+
+# LMI memory (per-project database)
+.lmi/
+
+# Generated docs
+AGENTS.md
+EDITOR_STATE_PLAN.md
