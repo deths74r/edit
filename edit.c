@@ -26,6 +26,16 @@
 #define EDIT_VERSION "unknown"
 #endif
 
+/* Error codes for operations that can fail gracefully. */
+enum editor_error {
+	EDITOR_OK = 0,
+	EDITOR_ERROR_IO,
+	EDITOR_ERROR_MEMORY,
+	EDITOR_ERROR_TERMINAL,
+	EDITOR_ERROR_FILE_NOT_FOUND,
+	EDITOR_ERROR_PERMISSION_DENIED
+};
+
 /* Number of spaces used to render a tab character. */
 #define EDIT_TAB_STOP 8
 /* Maps a letter key to its Ctrl+key equivalent by masking the upper bits. */
@@ -475,12 +485,66 @@ void editor_toggle_line_numbers(void)
 /* Forward declaration so early terminal functions can call terminal_die(). */
 void terminal_die(const char *message);
 
+/* Attempts to save the current buffer to an emergency recovery file before
+ * the editor exits due to a fatal error. Only saves if there are unsaved
+ * changes. Returns 0 on success, -1 on failure. */
+int editor_emergency_save(void)
+{
+	if (!editor.dirty || editor.line_count == 0)
+		return 0;
+
+	char recovery_filename[256];
+	snprintf(recovery_filename, sizeof(recovery_filename),
+		 ".edit_recovery_%d", getpid());
+
+	int fd = open(recovery_filename, O_WRONLY | O_CREAT | O_TRUNC,
+		      FILE_PERMISSION_DEFAULT);
+	if (fd == -1)
+		return -1;
+
+	size_t file_length;
+	char *file_content = editor_rows_to_string(&file_length);
+	if (!file_content) {
+		close(fd);
+		return -1;
+	}
+
+	size_t bytes_written = 0;
+	while (bytes_written < file_length) {
+		ssize_t result = write(fd, file_content + bytes_written,
+				       file_length - bytes_written);
+		if (result == -1) {
+			if (errno == EINTR)
+				continue;
+			free(file_content);
+			close(fd);
+			return -1;
+		}
+		bytes_written += (size_t)result;
+	}
+
+	free(file_content);
+	close(fd);
+
+	/* Inform the user about the recovery file */
+	char message[512];
+	snprintf(message, sizeof(message),
+		 "\r\nUnsaved changes saved to: %s\r\n", recovery_filename);
+	write(STDOUT_FILENO, message, strlen(message));
+
+	return 0;
+}
+
 /* Prints an error message and exits. Clears the screen first to leave the
- * terminal in a clean state before displaying the error via perror(). */
+ * terminal in a clean state before displaying the error via perror().
+ * Attempts to save unsaved changes to a recovery file before exiting. */
 void terminal_die(const char *message)
 {
 	write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
 	write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+
+	/* Try to save unsaved work before dying */
+	editor_emergency_save();
 
 	perror(message);
 	exit(1);
@@ -525,10 +589,13 @@ void terminal_disable_mouse_reporting(void)
 }
 
 /* Sends escape sequences to enable SGR mouse tracking in the terminal.
- * This allows the editor to receive click, scroll, and movement events. */
-void terminal_enable_mouse_reporting(void)
+ * This allows the editor to receive click, scroll, and movement events.
+ * Returns 0 on success, -1 on failure (non-fatal). */
+int terminal_enable_mouse_reporting(void)
 {
-	write(STDOUT_FILENO, ENABLE_MOUSE_REPORTING, strlen(ENABLE_MOUSE_REPORTING));
+	ssize_t result = write(STDOUT_FILENO, ENABLE_MOUSE_REPORTING,
+			       strlen(ENABLE_MOUSE_REPORTING));
+	return (result == (ssize_t)strlen(ENABLE_MOUSE_REPORTING)) ? 0 : -1;
 }
 /* Flag set by the SIGWINCH handler to signal the main loop that a resize
  * occurred. Using volatile sig_atomic_t ensures async-signal-safety. */
@@ -807,21 +874,29 @@ int terminal_get_cursor_position(int *rows, int *columns)
 
 /* Determines the terminal dimensions. Tries ioctl first for speed; falls
  * back to moving the cursor to the bottom-right corner and querying its
- * position. Stores results in the provided row and column pointers.
- * Returns 0 on success, -1 on failure. */
+ * position. If all methods fail, uses sensible defaults (80x24).
+ * Returns 0 on success, -1 if defaults were used. */
 int terminal_get_window_size(int *rows, int *columns)
 {
 	struct winsize window;
 
 	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &window) == -1 || window.ws_col == 0) {
 		if (write(STDOUT_FILENO, CURSOR_BOTTOM_RIGHT, strlen(CURSOR_BOTTOM_RIGHT)) != (ssize_t)strlen(CURSOR_BOTTOM_RIGHT))
-			return -1;
-		return terminal_get_cursor_position(rows, columns);
+			goto use_defaults;
+		if (terminal_get_cursor_position(rows, columns) == -1)
+			goto use_defaults;
+		return 0;
 	} else {
 		*columns = window.ws_col;
 		*rows = window.ws_row;
 		return 0;
 	}
+
+use_defaults:
+	/* Use standard 80x24 terminal size as fallback */
+	*columns = 80;
+	*rows = 24;
+	return -1;
 }
 
 /*** Syntax highlighting ***/
@@ -1670,12 +1745,29 @@ int editor_open(char *filename)
 {
 	free(editor.filename);
 	editor.filename = strdup(filename);
-	if (editor.filename == NULL)
-		terminal_die("strdup");
+	if (editor.filename == NULL) {
+		editor_set_status_message("Out of memory");
+		return -ENOMEM;
+	}
 
 	int ret = editor_open_mmap(filename);
 	if (ret < 0) {
-		editor_set_status_message("Can't open file: %s", strerror(-ret));
+		const char *error_msg;
+		switch (-ret) {
+		case ENOENT:
+			error_msg = "File not found";
+			break;
+		case EACCES:
+			error_msg = "Permission denied";
+			break;
+		case ENOMEM:
+			error_msg = "Out of memory";
+			break;
+		default:
+			error_msg = strerror(-ret);
+			break;
+		}
+		editor_set_status_message("Can't open file: %s", error_msg);
 		return ret;
 	}
 	editor_update_gutter_width();
@@ -1742,8 +1834,27 @@ out:
 	if (fd != -1)
 		close(fd);
 	free(file_content);
-	if (ret < 0)
-		editor_set_status_message("Can't save! I/O error: %s", strerror(-ret));
+	if (ret < 0) {
+		const char *error_msg;
+		switch (-ret) {
+		case EACCES:
+			error_msg = "Permission denied";
+			break;
+		case ENOSPC:
+			error_msg = "No space left on device";
+			break;
+		case EROFS:
+			error_msg = "Read-only file system";
+			break;
+		case ENOMEM:
+			error_msg = "Out of memory";
+			break;
+		default:
+			error_msg = strerror(-ret);
+			break;
+		}
+		editor_set_status_message("Can't save! %s", error_msg);
+	}
 
 	if (ret == 0 && editor.quit_after_save) {
 		write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
@@ -2858,7 +2969,8 @@ void editor_init(void)
 	signal(SIGWINCH, terminal_handle_resize);
 	if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns) ==
 			-1) {
-		terminal_die("terminal_get_window_size");
+		/* terminal_get_window_size already set defaults, just warn */
+		editor_set_status_message("Warning: Using default terminal size (80x24)");
 	}
 	editor.screen_rows -= 2;
 
@@ -2892,8 +3004,10 @@ int main(int argc, char *argv[])
 {
 	atexit(editor_quit);
 
-	/* Enable mouse reporting */
-	terminal_enable_mouse_reporting();
+	/* Enable mouse reporting (non-fatal if it fails) */
+	if (terminal_enable_mouse_reporting() == -1) {
+		/* Mouse support unavailable, continue without it */
+	}
 
 	/* Enable raw mode */
 	terminal_enable_raw_mode();
