@@ -385,6 +385,8 @@ void editor_set_status_message(const char *format, ...);
 void editor_refresh_screen(void);
 /* Queries terminal size and returns it via the rows/columns out-parameters. */
 int terminal_get_window_size(int *rows, int *columns);
+/* Concatenates all editor lines into a single newline-separated string. */
+char *editor_rows_to_string(size_t *buffer_length);
 /* Recalculates the gutter width based on the current line count. */
 void editor_update_gutter_width(void);
 /* Recalculates syntax highlighting for a line given previous open_comment state. */
