@@ -1178,7 +1178,7 @@ int cursor_prev_grapheme(struct line *line, int cell_index)
 	}
 	byte_offsets[count] = byte_len;
 	/* Find the previous grapheme boundary in byte offsets */
-	int prev_byte = utf8_prev_grapheme(buf, byte_len);
+	int prev_byte = utf8_prev_grapheme(buf, byte_len, byte_len);
 	/* Convert byte offset back to cell index */
 	for (int i = 0; i < count; i++) {
 		if (byte_offsets[i] >= prev_byte)
