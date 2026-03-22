@@ -1,14 +1,18 @@
 # edit
 
-A terminal text editor in a single C file. Fast, Unicode-aware, no runtime dependencies.
+An experimental terminal text editor in a single C file.
 
-`edit` is a ~3000-line C23 text editor built for developers who want something
-between `nano` and `vim` -- readable source, real Unicode support, and enough
-features to edit code comfortably. It uses the
-[gstr](https://github.com/eedmonds/gstr) library for grapheme cluster
-segmentation so the cursor never lands inside a multi-codepoint character.
+`edit` is a testbed for two ideas: a **cell-based metadata architecture**
+where each codepoint carries inline syntax and rendering state, and
+**mmap lazy loading with line temperatures** (COLD/WARM/HOT) for fast
+file opens. It uses [gstr](https://github.com/deths74r/gstr) for
+grapheme-aware cursor movement and Unicode 17.0 width tables.
 
-**Current release: v0.1.3** | gstr v3.0.0 | MIT License
+This is experimental software. Basic editing works, but there is no
+undo, no selection, no clipboard, and no configuration file. See
+[Limitations](#limitations--known-issues) for the full list.
+
+**v0.1.3** | gstr v3.0.0 | MIT License
 
 ## Features
 
