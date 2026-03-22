@@ -5,8 +5,10 @@ An experimental terminal text editor in a single C file.
 `edit` is a testbed for two ideas: a **cell-based metadata architecture**
 where each codepoint carries inline syntax and rendering state, and
 **mmap lazy loading with line temperatures** (COLD/WARM/HOT) for fast
-file opens. It uses [gstr](https://github.com/deths74r/gstr) for
-grapheme-aware cursor movement and Unicode 17.0 width tables.
+file opens. It also serves as a real-world test case and case study for
+[gstr](https://github.com/deths74r/gstr), a grapheme-based string
+library for C — exercising its grapheme segmentation, cursor navigation,
+and display width calculation in an interactive editing context.
 
 This is experimental software. Basic editing works, but there is no
 undo, no selection, no clipboard, and no configuration file. See
