@@ -1849,9 +1849,22 @@ void undo_group_push_entry(struct undo_group *group, struct undo_entry entry)
 }
 
 /* Records an undo entry. force_new_group causes a new group boundary
- * (used for structural operations like Enter and line joins). */
+ * (used for structural operations like Enter and line joins).
+ * Also forces a new group when the cursor has moved to a different
+ * line since the last entry — edits on different lines should not
+ * be grouped together. */
 void undo_push(struct undo_entry entry, int force_new_group)
 {
+	if (!force_new_group && editor.undo.current > 0) {
+		struct undo_group *last =
+			&editor.undo.groups[editor.undo.current - 1];
+		if (last->entry_count > 0) {
+			struct undo_entry *prev =
+				&last->entries[last->entry_count - 1];
+			if (prev->line_index != entry.line_index)
+				force_new_group = 1;
+		}
+	}
 	struct undo_group *group =
 		undo_stack_current_group(&editor.undo, force_new_group);
 	undo_group_push_entry(group, entry);
@@ -2431,6 +2444,19 @@ void editor_duplicate_line(void)
 
 /*** Word Movement ***/
 
+/* Classifies a codepoint for word movement: 0 = whitespace,
+ * 1 = punctuation/separator, 2 = word character. This gives
+ * three classes so punctuation like = and ; act as their own
+ * "words" rather than being skipped with whitespace. */
+int word_char_class(uint32_t codepoint)
+{
+	if (codepoint == ' ' || codepoint == '\t' || codepoint == '\0')
+		return 0;
+	if (codepoint < 128 && syntax_is_separator((int)codepoint))
+		return 1;
+	return 2;
+}
+
 /* Returns the cell index of the start of the previous word. */
 int cursor_prev_word(struct line *line, int cell_index)
 {
@@ -2438,13 +2464,15 @@ int cursor_prev_word(struct line *line, int cell_index)
 		return 0;
 	line_ensure_warm(line);
 	int pos = cell_index - 1;
-	/* Skip separators */
-	while (pos > 0 && syntax_is_separator((int)line->cells[pos].codepoint))
+	/* Skip whitespace */
+	while (pos > 0 && word_char_class(line->cells[pos].codepoint) == 0)
 		pos--;
-	/* Skip word body */
-	while (pos > 0 &&
-	       !syntax_is_separator((int)line->cells[pos - 1].codepoint))
-		pos--;
+	/* Skip run of same class */
+	if (pos >= 0) {
+		int cls = word_char_class(line->cells[pos].codepoint);
+		while (pos > 0 && word_char_class(line->cells[pos - 1].codepoint) == cls)
+			pos--;
+	}
 	return pos;
 }
 
@@ -2456,13 +2484,12 @@ int cursor_next_word(struct line *line, int cell_index)
 	if (cell_index >= count)
 		return count;
 	int pos = cell_index;
-	/* Skip current word body */
-	while (pos < count &&
-	       !syntax_is_separator((int)line->cells[pos].codepoint))
+	/* Skip run of current class */
+	int cls = word_char_class(line->cells[pos].codepoint);
+	while (pos < count && word_char_class(line->cells[pos].codepoint) == cls)
 		pos++;
-	/* Skip separators */
-	while (pos < count &&
-	       syntax_is_separator((int)line->cells[pos].codepoint))
+	/* Skip whitespace */
+	while (pos < count && word_char_class(line->cells[pos].codepoint) == 0)
 		pos++;
 	return pos;
 }
@@ -3697,14 +3724,11 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 							append_buffer_write_color(append_buffer, current_color);
 						}
 					} else {
-						/* Selection: invert colors for selected cells */
+						/* Selection: use terminal reverse video */
 						int selected = ln->cells[ci].flags & CELL_FLAG_SELECTED;
 						if (selected) {
-							append_buffer_write_background(append_buffer,
-								editor.theme.highlight_foreground);
-							append_buffer_write_color(append_buffer,
-								editor.theme.background);
-							current_color = editor.theme.background;
+							append_buffer_write(append_buffer,
+								INVERT_COLOR, strlen(INVERT_COLOR));
 						} else if (hl == HL_NORMAL) {
 							if (current_color != NULL) {
 								append_buffer_write_color(
@@ -3726,12 +3750,17 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 									ln->cells[gi].codepoint, utf8_buf);
 							append_buffer_write(append_buffer, utf8_buf, utf8_len);
 						}
-						/* Reset background after selected cells */
+						/* End reverse video after selected cells */
 						if (selected) {
-							char *bg = (file_row == editor.cursor_y)
-								? editor.theme.highlight_background
-								: editor.theme.background;
-							append_buffer_write_background(append_buffer, bg);
+							append_buffer_write(append_buffer,
+								RESET_ALL_ATTRIBUTES, strlen(RESET_ALL_ATTRIBUTES));
+							/* Re-establish line background and reset color tracking */
+							if (file_row == editor.cursor_y)
+								append_buffer_write_background(append_buffer,
+									editor.theme.highlight_background);
+							else
+								append_buffer_write_background(append_buffer,
+									editor.theme.background);
 							current_color = NULL;
 						}
 					}
@@ -4229,16 +4258,27 @@ void editor_process_keypress(struct input_event event)
 	case SHIFT_END_KEY: {
 		if (!editor.selection.active)
 			selection_start();
-		struct input_event dir = event;
 		switch (key) {
-		case SHIFT_ARROW_LEFT: dir.key = ARROW_LEFT; break;
-		case SHIFT_ARROW_RIGHT: dir.key = ARROW_RIGHT; break;
-		case SHIFT_ARROW_UP: dir.key = ARROW_UP; break;
-		case SHIFT_ARROW_DOWN: dir.key = ARROW_DOWN; break;
-		case SHIFT_HOME_KEY: dir.key = HOME_KEY; break;
-		case SHIFT_END_KEY: dir.key = END_KEY; break;
+		case SHIFT_ARROW_LEFT:
+			editor_move_cursor((struct input_event){.key = ARROW_LEFT});
+			break;
+		case SHIFT_ARROW_RIGHT:
+			editor_move_cursor((struct input_event){.key = ARROW_RIGHT});
+			break;
+		case SHIFT_ARROW_UP:
+			editor_move_cursor((struct input_event){.key = ARROW_UP});
+			break;
+		case SHIFT_ARROW_DOWN:
+			editor_move_cursor((struct input_event){.key = ARROW_DOWN});
+			break;
+		case SHIFT_HOME_KEY:
+			editor.cursor_x = 0;
+			break;
+		case SHIFT_END_KEY:
+			if (editor.cursor_y < editor.line_count)
+				editor.cursor_x = (int)editor.lines[editor.cursor_y].cell_count;
+			break;
 		}
-		editor_move_cursor(dir);
 		selection_update();
 		break;
 	}
@@ -4366,6 +4406,8 @@ void editor_process_keypress(struct input_event event)
 			editor_help_close();
 			break;
 		}
+		if (editor.selection.active)
+			selection_clear();
 		break;
 
 	default:
