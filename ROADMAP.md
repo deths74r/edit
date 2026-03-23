@@ -71,15 +71,15 @@
 
 *Theme: Daily-driver editing capabilities.*
 
-- [ ] **Find and replace** — single + all occurrences, extending existing search infrastructure
-- [ ] **Case-insensitive search toggle** (Alt+C during search)
+- [x] **Find and replace** — Alt+R, two-prompt flow, y/n/a/ESC confirmation, replace-all with count
+- [x] **Case-insensitive search toggle** — Alt+C during search, editor_memmem with tolower
 - [ ] **All-match highlighting** — show all visible matches, active match in distinct color
 - [ ] **Match count** — `"Match 3 of 15"` in prompt
 - [ ] **Wrap indicator** — `[Wrapped]` when search passes EOF
-- [ ] **8+ syntax languages** — Python, JavaScript, Go, Rust, Bash, JSON, YAML, Markdown
+- [x] **8+ syntax languages** — Python, JavaScript, Go, Rust, Bash, JSON, YAML, Markdown
 - [ ] **Regex search** — POSIX ERE via `<regex.h>`, no new dependency
 - [ ] **Search history** — up arrow recalls previous searches
-- [ ] **Read from stdin** — `cat file | edit` or `edit -`
+- [x] **Read from stdin** — `cat file | edit` or `edit -`, reopens /dev/tty
 
 ---
 
