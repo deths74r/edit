@@ -344,6 +344,9 @@ struct editor_syntax {
 	char *multiline_comment_end;
 	/* Bit flags controlling highlighting behavior (HL_HIGHLIGHT_*). */
 	int flags;
+	/* Additional string delimiter character (e.g., '`' for Go/JS template literals).
+	 * Set to 0 for languages that only use ' and ". */
+	char extra_string_delimiter;
 };
 
 /* A decoded input event from the terminal. Keyboard events carry only
@@ -460,6 +463,9 @@ struct editor_state {
 	int search_saved_highlight_line;
 	uint16_t *search_saved_syntax;
 	uint32_t search_saved_syntax_count;
+	/* When set, search and replace ignore letter case. Toggled
+	 * with Alt+C during an active search prompt. */
+	int search_case_insensitive;
 	/* Desired render column preserved across vertical movement. */
 	int preferred_column;
 	/* When set, editor_scroll() skips the margin and uses simple
@@ -472,6 +478,12 @@ struct editor_state {
 	struct clipboard clipboard;
 	/* Undo/redo history for the current file. */
 	struct undo_stack undo;
+	/* Search string for find-and-replace, or NULL when inactive. */
+	char *replace_query;
+	/* Replacement string for find-and-replace, or NULL when inactive. */
+	char *replace_with;
+	/* Number of replacements performed in the current replace-all pass. */
+	int replace_count;
 	/* True when displaying a temporary read-only buffer (help text). */
 	int viewing_help;
 	/* Saved state for returning from a temporary view. */
@@ -543,10 +555,122 @@ char *c_highlight_keywords[] = {
 	"unsigned|", "signed|", "void|", NULL
 };
 
+/* File extensions recognized as Python source files. */
+char *python_highlight_extensions[] = {".py", NULL};
+
+/* Python keywords and built-in type names. */
+char *python_highlight_keywords[] = {
+	"and", "as", "assert", "async", "await", "break", "class",
+	"continue", "def", "del", "elif", "else", "except", "finally",
+	"for", "from", "global", "if", "import", "in", "is", "lambda",
+	"nonlocal", "not", "or", "pass", "raise", "return", "try",
+	"while", "with", "yield",
+	"True|", "False|", "None|", "int|", "float|", "str|", "list|",
+	"dict|", "tuple|", "set|", "bool|", "bytes|", "type|", NULL
+};
+
+/* File extensions recognized as JavaScript source files. */
+char *javascript_highlight_extensions[] = {".js", ".jsx", ".mjs", NULL};
+
+/* JavaScript keywords and built-in type names. */
+char *javascript_highlight_keywords[] = {
+	"break", "case", "catch", "class", "const", "continue", "debugger",
+	"default", "delete", "do", "else", "export", "extends", "finally",
+	"for", "function", "if", "import", "in", "instanceof", "new", "of",
+	"return", "super", "switch", "this", "throw", "try", "typeof",
+	"var", "void", "while", "with", "yield", "async", "await", "let",
+	"static",
+	"true|", "false|", "null|", "undefined|", "NaN|", "Infinity|",
+	"Array|", "Object|", "String|", "Number|", "Boolean|", "Map|",
+	"Set|", "Promise|", "Symbol|", NULL
+};
+
+/* File extensions recognized as Go source files. */
+char *go_highlight_extensions[] = {".go", NULL};
+
+/* Go keywords and built-in type names. */
+char *go_highlight_keywords[] = {
+	"break", "case", "chan", "const", "continue", "default", "defer",
+	"else", "fallthrough", "for", "func", "go", "goto", "if", "import",
+	"interface", "map", "package", "range", "return", "select", "struct",
+	"switch", "type", "var",
+	"bool|", "byte|", "complex64|", "complex128|", "error|", "float32|",
+	"float64|", "int|", "int8|", "int16|", "int32|", "int64|", "rune|",
+	"string|", "uint|", "uint8|", "uint16|", "uint32|", "uint64|",
+	"uintptr|", "true|", "false|", "nil|", "iota|", NULL
+};
+
+/* File extensions recognized as Rust source files. */
+char *rust_highlight_extensions[] = {".rs", NULL};
+
+/* Rust keywords and built-in type names. */
+char *rust_highlight_keywords[] = {
+	"as", "async", "await", "break", "const", "continue", "crate",
+	"dyn", "else", "enum", "extern", "fn", "for", "if", "impl", "in",
+	"let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+	"return", "self", "static", "struct", "super", "trait", "type",
+	"unsafe", "use", "where", "while", "yield",
+	"bool|", "char|", "f32|", "f64|", "i8|", "i16|", "i32|", "i64|",
+	"i128|", "isize|", "str|", "u8|", "u16|", "u32|", "u64|", "u128|",
+	"usize|", "String|", "Vec|", "Option|", "Result|", "Box|", "Self|",
+	"true|", "false|", NULL
+};
+
+/* File extensions recognized as Bash shell scripts. */
+char *bash_highlight_extensions[] = {".sh", ".bash", NULL};
+
+/* Bash keywords and common builtins. */
+char *bash_highlight_keywords[] = {
+	"case", "do", "done", "elif", "else", "esac", "fi", "for",
+	"function", "if", "in", "select", "then", "until", "while",
+	"break", "continue", "return", "exit",
+	"echo|", "printf|", "read|", "export|", "local|", "declare|",
+	"unset|", "shift|", "source|", "eval|", "exec|", "trap|", "set|",
+	"cd|", "test|", NULL
+};
+
+/* File extensions recognized as JSON data files. */
+char *json_highlight_extensions[] = {".json", NULL};
+
+/* JSON has no keywords, only type-highlighted literals. */
+char *json_highlight_keywords[] = {
+	"true|", "false|", "null|", NULL
+};
+
+/* File extensions recognized as YAML data files. */
+char *yaml_highlight_extensions[] = {".yml", ".yaml", NULL};
+
+/* YAML type-highlighted boolean and null literals. */
+char *yaml_highlight_keywords[] = {
+	"true|", "false|", "null|", "yes|", "no|", "on|", "off|", NULL
+};
+
+/* File extensions recognized as Markdown documents. */
+char *markdown_highlight_extensions[] = {".md", ".markdown", NULL};
+
+/* Markdown has no keywords; headers are highlighted via '#' comment syntax. */
+char *markdown_highlight_keywords[] = {NULL};
+
 /* Registry of all supported file types and their highlighting rules. */
 struct editor_syntax syntax_highlight_database[] = {
 	{"c", c_highlight_extensions, c_highlight_keywords, NULL, "//", "/*", "*/",
-		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = 0},
+	{"python", python_highlight_extensions, python_highlight_keywords, NULL, "#", "\"\"\"", "\"\"\"",
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = 0},
+	{"javascript", javascript_highlight_extensions, javascript_highlight_keywords, NULL, "//", "/*", "*/",
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = '`'},
+	{"go", go_highlight_extensions, go_highlight_keywords, NULL, "//", "/*", "*/",
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = '`'},
+	{"rust", rust_highlight_extensions, rust_highlight_keywords, NULL, "//", "/*", "*/",
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = 0},
+	{"bash", bash_highlight_extensions, bash_highlight_keywords, NULL, "#", NULL, NULL,
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = 0},
+	{"json", json_highlight_extensions, json_highlight_keywords, NULL, NULL, NULL, NULL,
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = 0},
+	{"yaml", yaml_highlight_extensions, yaml_highlight_keywords, NULL, "#", NULL, NULL,
+		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = 0},
+	{"markdown", markdown_highlight_extensions, markdown_highlight_keywords, NULL, "#", NULL, NULL,
+		HL_HIGHLIGHT_STRINGS, .extra_string_delimiter = '`'},
 };
 
 /* Number of entries in the syntax highlighting database. */
@@ -583,6 +707,11 @@ int editor_save_write(void);
 void editor_save_start(void);
 /* Starts incremental search. */
 void editor_find_start(void);
+/* Starts the find-and-replace flow. */
+void editor_replace_start(void);
+/* Reads all data from stdin when piped, returning a malloc'd buffer.
+ * Stores the total bytes read in *out_length. */
+char *editor_read_stdin_pipe(size_t *out_length);
 
 /*** Editor Theme ***/
 
@@ -1226,8 +1355,9 @@ void syntax_select_highlight(void)
 				int keyword_count = 0;
 				while (syntax->keywords[keyword_count])
 					keyword_count++;
-				syntax->keyword_lengths = malloc(sizeof(int) * keyword_count);
-				if (syntax->keyword_lengths == NULL)
+				syntax->keyword_lengths = keyword_count
+					? malloc(sizeof(int) * keyword_count) : NULL;
+				if (keyword_count && syntax->keyword_lengths == NULL)
 					terminal_die("malloc");
 				for (int k = 0; k < keyword_count; k++)
 					syntax->keyword_lengths[k] = (int)strlen(syntax->keywords[k]);
@@ -1726,7 +1856,9 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 				previous_separator = 1;
 				continue;
 			} else {
-				if (current_cp == '"' || current_cp == '\'') {
+				if (current_cp == '"' || current_cp == '\'' ||
+			    (editor.syntax->extra_string_delimiter &&
+			     (int)current_cp == editor.syntax->extra_string_delimiter)) {
 					in_string = current_cp;
 					line->cells[i].syntax = HL_STRING;
 					i++;
@@ -3384,6 +3516,35 @@ void editor_help_close(void)
 
 /*** Find ***/
 
+/* Searches for needle in a byte region of the given length, optionally
+ * ignoring ASCII letter case. When case_insensitive is false, delegates
+ * to memmem() directly. When true, performs a brute-force byte-by-byte
+ * comparison with tolower(). Returns a pointer to the first match, or
+ * NULL if not found. */
+char *editor_memmem(const char *haystack, size_t haystack_length, const char *needle, size_t needle_length, int case_insensitive)
+{
+	if (!case_insensitive)
+		return memmem(haystack, haystack_length, needle, needle_length);
+	if (needle_length == 0)
+		return (char *)haystack;
+	if (needle_length > haystack_length)
+		return NULL;
+	size_t limit = haystack_length - needle_length;
+	for (size_t i = 0; i <= limit; i++) {
+		int match = 1;
+		for (size_t j = 0; j < needle_length; j++) {
+			if (tolower((unsigned char)haystack[i + j]) !=
+			    tolower((unsigned char)needle[j])) {
+				match = 0;
+				break;
+			}
+		}
+		if (match)
+			return (char *)&haystack[i];
+	}
+	return NULL;
+}
+
 /* Callback invoked on each keypress during incremental search. Uses
  * editor.search_* fields to track state instead of static locals, enabling
  * proper interaction with the non-blocking mode system. */
@@ -3460,18 +3621,19 @@ void editor_find_callback(char *query, int key)
 			allocated = 1;
 		}
 		char *match = NULL;
+		int case_flag = editor.search_case_insensitive;
 
 		if (editor.search_direction == 1) {
 			/* Forward: search after the previous match offset */
 			int start = (search_offset >= 0) ? search_offset + 1 : 0;
 			if (start < (int)byte_len)
-				match = memmem(render + start, byte_len - start, query, query_len);
+				match = editor_memmem(render + start, byte_len - start, query, query_len, case_flag);
 		} else {
 			/* Backward: find the last match before the offset */
 			int limit = (search_offset >= 0) ? search_offset : (int)byte_len;
 			const char *candidate = render;
 			while (candidate < render + limit) {
-				char *found = memmem(candidate, (size_t)(render + limit - candidate), query, query_len);
+				char *found = editor_memmem(candidate, (size_t)(render + limit - candidate), query, query_len, case_flag);
 				if (!found || found >= render + limit)
 					break;
 				match = found;
@@ -4150,6 +4312,18 @@ void prompt_open(char *format, void (*per_key_callback)(char *, int),
 void prompt_handle_key(struct input_event event)
 {
 	int key = event.key;
+	/* Alt+C during search toggles case sensitivity. Only active when
+	 * the per-key callback is the incremental search handler. */
+	if (key == ALT_KEY('c') && editor.prompt.per_key_callback == editor_find_callback) {
+		editor.search_case_insensitive = !editor.search_case_insensitive;
+		editor_set_status_message("Search: %s [case %s]",
+					 editor.prompt.buffer,
+					 editor.search_case_insensitive ? "off" : "on");
+		/* Re-run the search with the new case setting */
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(editor.prompt.buffer, key);
+		return;
+	}
 	if (key == DEL_KEY || key == CTRL_KEY('h') || key == BACKSPACE) {
 		if (editor.prompt.buffer_length != 0)
 			editor.prompt.buffer[--editor.prompt.buffer_length] = '\0';
