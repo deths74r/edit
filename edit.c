@@ -3534,12 +3534,19 @@ void editor_scroll_rows(int scroll_direction, int scroll_amount)
 	if (editor.row_offset > max_offset)
 		editor.row_offset = max_offset;
 
-	/* Clamp cursor to visible area */
-	if (editor.cursor_y < editor.row_offset)
-		editor.cursor_y = editor.row_offset;
-	int last_visible = editor.row_offset + editor.screen_rows - 1;
-	if (editor.cursor_y > last_visible)
-		editor.cursor_y = last_visible;
+	/* Clamp cursor to visible area, honoring the scroll margin so the
+	 * cursor lands at the margin boundary rather than the absolute edge. */
+	int margin = SCROLL_MARGIN;
+	if (margin > editor.screen_rows / 2)
+		margin = editor.screen_rows / 2;
+	int top_bound = editor.row_offset + margin;
+	int bottom_bound = editor.row_offset + editor.screen_rows - 1 - margin;
+	if (editor.cursor_y < top_bound && editor.cursor_y < editor.row_offset)
+		editor.cursor_y = (top_bound < editor.line_count)
+			? top_bound : editor.row_offset;
+	if (editor.cursor_y > bottom_bound
+	    && editor.cursor_y >= editor.row_offset + editor.screen_rows)
+		editor.cursor_y = bottom_bound;
 
 	/* Clamp cursor to file bounds */
 	if (editor.cursor_y >= editor.line_count)
@@ -4362,13 +4369,11 @@ void editor_process_keypress(struct input_event event)
 	case MOUSE_SCROLL_UP:
 		editor_update_scroll_speed();
 		editor_scroll_rows(ARROW_UP, editor.scroll_speed);
-		editor.suppress_scroll_margin = 1;
 		break;
 
 	case MOUSE_SCROLL_DOWN:
 		editor_update_scroll_speed();
 		editor_scroll_rows(ARROW_DOWN, editor.scroll_speed);
-		editor.suppress_scroll_margin = 1;
 		break;
 
 	case ESC_KEY:
