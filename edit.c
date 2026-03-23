@@ -123,6 +123,52 @@ struct line {
 	int temperature;
 };
 
+/* Types of undoable operations. Each maps to a specific edit action
+ * that can be reversed. */
+enum undo_operation_type {
+	UNDO_INSERT_CHAR,
+	UNDO_DELETE_CHAR,
+	UNDO_INSERT_LINE,
+	UNDO_DELETE_LINE,
+	UNDO_SPLIT_LINE,
+	UNDO_JOIN_LINE,
+};
+
+/* A single undoable edit operation. Stores enough state to reverse
+ * the operation and replay it for redo. */
+struct undo_entry {
+	enum undo_operation_type type;
+	int line_index;
+	int cell_index;
+	struct cell saved_cell;
+	struct cell *saved_cells;
+	uint32_t saved_cell_count;
+	int cursor_x_before;
+	int cursor_y_before;
+};
+
+/* A group of undo entries that are undone/redone as a single unit. */
+struct undo_group {
+	struct undo_entry *entries;
+	int entry_count;
+	int entry_capacity;
+	struct timeval timestamp;
+};
+
+/* Maximum number of undo groups retained. */
+#define UNDO_MAX_GROUPS 256
+/* Time threshold in microseconds for grouping consecutive edits. */
+#define UNDO_GROUP_THRESHOLD_US 500000
+
+/* The undo/redo stack. Groups below current are undoable; groups at
+ * or above current are redoable. */
+struct undo_stack {
+	struct undo_group *groups;
+	int group_count;
+	int current;
+	int group_capacity;
+};
+
 /* Editor mode determines which input handler processes keypresses. */
 enum editor_mode {
 	MODE_NORMAL = 0,
@@ -369,6 +415,8 @@ struct editor_state {
 	int search_saved_highlight_line;
 	uint16_t *search_saved_syntax;
 	uint32_t search_saved_syntax_count;
+	/* Undo/redo history for the current file. */
+	struct undo_stack undo;
 	/* True when displaying a temporary read-only buffer (help text). */
 	int viewing_help;
 	/* Saved state for returning from a temporary view. */
@@ -1568,6 +1616,341 @@ void editor_line_delete(int position)
 	editor.dirty++;
 }
 
+/*** Undo ***/
+
+void undo_entry_free(struct undo_entry *entry)
+{
+	free(entry->saved_cells);
+	entry->saved_cells = NULL;
+}
+
+void undo_group_free(struct undo_group *group)
+{
+	for (int i = 0; i < group->entry_count; i++)
+		undo_entry_free(&group->entries[i]);
+	free(group->entries);
+	group->entries = NULL;
+	group->entry_count = 0;
+	group->entry_capacity = 0;
+}
+
+void undo_stack_init(struct undo_stack *stack)
+{
+	stack->groups = NULL;
+	stack->group_count = 0;
+	stack->current = 0;
+	stack->group_capacity = 0;
+}
+
+void undo_stack_destroy(struct undo_stack *stack)
+{
+	for (int i = 0; i < stack->group_count; i++)
+		undo_group_free(&stack->groups[i]);
+	free(stack->groups);
+	*stack = (struct undo_stack){0};
+}
+
+/* Discards all redo groups (everything from current to group_count). */
+void undo_stack_discard_redo(struct undo_stack *stack)
+{
+	for (int i = stack->current; i < stack->group_count; i++)
+		undo_group_free(&stack->groups[i]);
+	stack->group_count = stack->current;
+}
+
+/* Returns a pointer to the current undo group, creating a new one if
+ * the stack is empty, the time threshold has elapsed, or force_new
+ * is set. Evicts the oldest group when UNDO_MAX_GROUPS is reached. */
+struct undo_group *undo_stack_current_group(struct undo_stack *stack,
+					    int force_new)
+{
+	struct timeval now;
+	gettimeofday(&now, NULL);
+
+	int need_new = force_new || (stack->current == 0);
+
+	if (!need_new && stack->current > 0) {
+		struct undo_group *last = &stack->groups[stack->current - 1];
+		long elapsed = (now.tv_sec - last->timestamp.tv_sec) *
+				       MICROSECONDS_PER_SECOND +
+			       (now.tv_usec - last->timestamp.tv_usec);
+		if (elapsed > UNDO_GROUP_THRESHOLD_US)
+			need_new = 1;
+	}
+
+	if (!need_new)
+		return &stack->groups[stack->current - 1];
+
+	undo_stack_discard_redo(stack);
+
+	/* Evict oldest group if at capacity */
+	if (stack->current >= UNDO_MAX_GROUPS) {
+		undo_group_free(&stack->groups[0]);
+		memmove(&stack->groups[0], &stack->groups[1],
+			sizeof(struct undo_group) * (stack->current - 1));
+		stack->current--;
+		stack->group_count--;
+	}
+
+	if (stack->group_count >= stack->group_capacity) {
+		int new_capacity = stack->group_capacity
+					  ? stack->group_capacity * 2
+					  : 16;
+		stack->groups = realloc(stack->groups,
+				       sizeof(struct undo_group) * new_capacity);
+		if (stack->groups == NULL)
+			terminal_die("realloc");
+		stack->group_capacity = new_capacity;
+	}
+
+	struct undo_group *group = &stack->groups[stack->current];
+	group->entries = NULL;
+	group->entry_count = 0;
+	group->entry_capacity = 0;
+	group->timestamp = now;
+
+	stack->current++;
+	stack->group_count = stack->current;
+
+	return group;
+}
+
+void undo_group_push_entry(struct undo_group *group, struct undo_entry entry)
+{
+	if (group->entry_count >= group->entry_capacity) {
+		int new_capacity = group->entry_capacity
+					  ? group->entry_capacity * 2
+					  : 8;
+		group->entries = realloc(group->entries,
+				       sizeof(struct undo_entry) * new_capacity);
+		if (group->entries == NULL)
+			terminal_die("realloc");
+		group->entry_capacity = new_capacity;
+	}
+	group->entries[group->entry_count++] = entry;
+}
+
+/* Records an undo entry. force_new_group causes a new group boundary
+ * (used for structural operations like Enter and line joins). */
+void undo_push(struct undo_entry entry, int force_new_group)
+{
+	struct undo_group *group =
+		undo_stack_current_group(&editor.undo, force_new_group);
+	undo_group_push_entry(group, entry);
+}
+
+/* Reverses a single undo entry. */
+void undo_entry_apply_reverse(struct undo_entry *entry)
+{
+	switch (entry->type) {
+	case UNDO_INSERT_CHAR:
+		if (entry->line_index < editor.line_count) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_ensure_warm(ln);
+			if ((uint32_t)entry->cell_index < ln->cell_count)
+				line_delete_cell(ln, (uint32_t)entry->cell_index);
+		}
+		break;
+	case UNDO_DELETE_CHAR:
+		if (entry->line_index < editor.line_count) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_insert_cell(ln, (uint32_t)entry->cell_index,
+					 entry->saved_cell);
+		}
+		break;
+	case UNDO_SPLIT_LINE:
+		if (entry->line_index + 1 < editor.line_count) {
+			struct line *upper = &editor.lines[entry->line_index];
+			struct line *lower =
+				&editor.lines[entry->line_index + 1];
+			line_ensure_warm(upper);
+			line_ensure_warm(lower);
+			upper->cell_count = (uint32_t)entry->cell_index;
+			upper->temperature = LINE_HOT;
+			line_append_cells(upper, lower, 0);
+			editor_line_delete(entry->line_index + 1);
+		}
+		break;
+	case UNDO_JOIN_LINE:
+		if (entry->line_index < editor.line_count) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_ensure_warm(ln);
+			uint32_t tail_start = (uint32_t)entry->cell_index;
+			uint32_t tail_count = ln->cell_count - tail_start;
+			editor_line_insert(entry->line_index + 1, "", 0);
+			struct line *new_line =
+				&editor.lines[entry->line_index + 1];
+			line_ensure_capacity(new_line, tail_count);
+			if (tail_count > 0) {
+				ln = &editor.lines[entry->line_index];
+				memcpy(new_line->cells, &ln->cells[tail_start],
+				       sizeof(struct cell) * tail_count);
+				new_line->cell_count = tail_count;
+			}
+			ln = &editor.lines[entry->line_index];
+			ln->cell_count = tail_start;
+			ln->temperature = LINE_HOT;
+		}
+		break;
+	case UNDO_INSERT_LINE:
+		if (entry->line_index < editor.line_count)
+			editor_line_delete(entry->line_index);
+		break;
+	case UNDO_DELETE_LINE:
+		editor_line_insert(entry->line_index, "", 0);
+		if (entry->saved_cells && entry->saved_cell_count > 0) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_ensure_capacity(ln, entry->saved_cell_count);
+			memcpy(ln->cells, entry->saved_cells,
+			       sizeof(struct cell) * entry->saved_cell_count);
+			ln->cell_count = entry->saved_cell_count;
+			ln->temperature = LINE_HOT;
+		}
+		break;
+	}
+}
+
+/* Replays a single undo entry forward (for redo). */
+void undo_entry_apply_forward(struct undo_entry *entry)
+{
+	switch (entry->type) {
+	case UNDO_INSERT_CHAR:
+		if (entry->line_index < editor.line_count) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_insert_cell(ln, (uint32_t)entry->cell_index,
+					 entry->saved_cell);
+		}
+		break;
+	case UNDO_DELETE_CHAR:
+		if (entry->line_index < editor.line_count) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_ensure_warm(ln);
+			if ((uint32_t)entry->cell_index < ln->cell_count)
+				line_delete_cell(ln, (uint32_t)entry->cell_index);
+		}
+		break;
+	case UNDO_SPLIT_LINE:
+		if (entry->line_index < editor.line_count) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_ensure_warm(ln);
+			uint32_t split = (uint32_t)entry->cell_index;
+			uint32_t tail_count = ln->cell_count - split;
+			editor_line_insert(entry->line_index + 1, "", 0);
+			struct line *new_line =
+				&editor.lines[entry->line_index + 1];
+			line_ensure_capacity(new_line, tail_count);
+			if (tail_count > 0) {
+				ln = &editor.lines[entry->line_index];
+				memcpy(new_line->cells, &ln->cells[split],
+				       sizeof(struct cell) * tail_count);
+				new_line->cell_count = tail_count;
+			}
+			ln = &editor.lines[entry->line_index];
+			ln->cell_count = split;
+			ln->temperature = LINE_HOT;
+		}
+		break;
+	case UNDO_JOIN_LINE:
+		if (entry->line_index + 1 < editor.line_count) {
+			struct line *upper = &editor.lines[entry->line_index];
+			struct line *lower =
+				&editor.lines[entry->line_index + 1];
+			line_ensure_warm(upper);
+			line_ensure_warm(lower);
+			line_append_cells(upper, lower, 0);
+			editor_line_delete(entry->line_index + 1);
+		}
+		break;
+	case UNDO_INSERT_LINE:
+		editor_line_insert(entry->line_index, "", 0);
+		if (entry->saved_cells && entry->saved_cell_count > 0) {
+			struct line *ln = &editor.lines[entry->line_index];
+			line_ensure_capacity(ln, entry->saved_cell_count);
+			memcpy(ln->cells, entry->saved_cells,
+			       sizeof(struct cell) * entry->saved_cell_count);
+			ln->cell_count = entry->saved_cell_count;
+			ln->temperature = LINE_HOT;
+		}
+		break;
+	case UNDO_DELETE_LINE:
+		if (entry->line_index < editor.line_count)
+			editor_line_delete(entry->line_index);
+		break;
+	}
+}
+
+/* Undoes the most recent group. */
+void editor_undo(void)
+{
+	if (editor.undo.current == 0) {
+		editor_set_status_message("Nothing to undo");
+		return;
+	}
+
+	editor.undo.current--;
+	struct undo_group *group = &editor.undo.groups[editor.undo.current];
+
+	for (int i = group->entry_count - 1; i >= 0; i--)
+		undo_entry_apply_reverse(&group->entries[i]);
+
+	if (group->entry_count > 0) {
+		editor.cursor_x = group->entries[0].cursor_x_before;
+		editor.cursor_y = group->entries[0].cursor_y_before;
+	}
+
+	editor.dirty++;
+	editor_set_status_message("Undo");
+}
+
+/* Redoes the most recently undone group. */
+void editor_redo(void)
+{
+	if (editor.undo.current >= editor.undo.group_count) {
+		editor_set_status_message("Nothing to redo");
+		return;
+	}
+
+	struct undo_group *group = &editor.undo.groups[editor.undo.current];
+
+	for (int i = 0; i < group->entry_count; i++)
+		undo_entry_apply_forward(&group->entries[i]);
+
+	if (group->entry_count > 0) {
+		struct undo_entry *last =
+			&group->entries[group->entry_count - 1];
+		switch (last->type) {
+		case UNDO_INSERT_CHAR:
+			editor.cursor_x = last->cell_index + 1;
+			editor.cursor_y = last->line_index;
+			break;
+		case UNDO_DELETE_CHAR:
+			editor.cursor_x = last->cell_index;
+			editor.cursor_y = last->line_index;
+			break;
+		case UNDO_SPLIT_LINE:
+			editor.cursor_x = 0;
+			editor.cursor_y = last->line_index + 1;
+			break;
+		case UNDO_JOIN_LINE:
+			editor.cursor_x = last->cell_index;
+			editor.cursor_y = last->line_index;
+			break;
+		case UNDO_INSERT_LINE:
+			editor.cursor_x = 0;
+			editor.cursor_y = last->line_index;
+			break;
+		case UNDO_DELETE_LINE:
+			editor.cursor_x = 0;
+			editor.cursor_y = last->line_index;
+			break;
+		}
+	}
+
+	editor.undo.current++;
+	editor.dirty++;
+	editor_set_status_message("Redo");
+}
+
 /*** Editor operations ***/
 
 /* Inserts a character at the current cursor position. If the cursor is
@@ -1586,6 +1969,16 @@ void editor_insert_char(int character)
 		.flags = 0,
 		.context = 0,
 	};
+
+	undo_push((struct undo_entry){
+		.type = UNDO_INSERT_CHAR,
+		.line_index = editor.cursor_y,
+		.cell_index = editor.cursor_x,
+		.saved_cell = c,
+		.cursor_x_before = editor.cursor_x,
+		.cursor_y_before = editor.cursor_y,
+	}, 0);
+
 	line_insert_cell(ln, (uint32_t)editor.cursor_x, c);
 	syntax_propagate(editor.cursor_y);
 	editor.dirty++;
@@ -1601,6 +1994,14 @@ void editor_insert_char(int character)
  * the text after the cursor moves to a new line below. */
 void editor_insert_newline(void)
 {
+	undo_push((struct undo_entry){
+		.type = UNDO_SPLIT_LINE,
+		.line_index = editor.cursor_y,
+		.cell_index = editor.cursor_x,
+		.cursor_x_before = editor.cursor_x,
+		.cursor_y_before = editor.cursor_y,
+	}, 1);
+
 	if (editor.cursor_x == 0) {
 		editor_line_insert(editor.cursor_y, "", 0);
 	} else {
@@ -1647,6 +2048,18 @@ void editor_delete_char(void)
 	if (editor.cursor_x > 0) {
 		/* Find the start of the grapheme cluster before the cursor */
 		int prev = cursor_prev_grapheme(ln, editor.cursor_x);
+		/* Record each deleted cell for undo (reverse order so undo
+		 * replays them in the correct insertion order). */
+		for (int i = prev; i < editor.cursor_x; i++) {
+			undo_push((struct undo_entry){
+				.type = UNDO_DELETE_CHAR,
+				.line_index = editor.cursor_y,
+				.cell_index = prev,
+				.saved_cell = ln->cells[i],
+				.cursor_x_before = editor.cursor_x,
+				.cursor_y_before = editor.cursor_y,
+			}, 0);
+		}
 		/* Delete all cells in the cluster (from prev to cursor_x) */
 		for (int i = editor.cursor_x - 1; i >= prev; i--) {
 			line_delete_cell(ln, (uint32_t)i);
@@ -1655,8 +2068,20 @@ void editor_delete_char(void)
 		editor.dirty++;
 		editor.cursor_x = prev;
 	} else {
+		/* Line join: record the join point for undo */
 		line_ensure_warm(&editor.lines[editor.cursor_y - 1]);
-		editor.cursor_x = (int)editor.lines[editor.cursor_y - 1].cell_count;
+		int join_point =
+			(int)editor.lines[editor.cursor_y - 1].cell_count;
+
+		undo_push((struct undo_entry){
+			.type = UNDO_JOIN_LINE,
+			.line_index = editor.cursor_y - 1,
+			.cell_index = join_point,
+			.cursor_x_before = editor.cursor_x,
+			.cursor_y_before = editor.cursor_y,
+		}, 1);
+
+		editor.cursor_x = join_point;
 		line_append_cells(&editor.lines[editor.cursor_y - 1], ln, 0);
 		editor_line_delete(editor.cursor_y);
 		editor.cursor_y--;
@@ -2013,6 +2438,9 @@ void editor_quit_confirm(int key)
  * atexit() so it runs automatically on exit. */
 void editor_quit(void)
 {
+	/* Free undo history */
+	undo_stack_destroy(&editor.undo);
+
 	/* Free all line data */
 	for (int i = 0; i < editor.line_count; i++) {
 		line_free(&editor.lines[i]);
@@ -2063,6 +2491,10 @@ static const char *help_text =
 	"  Alt+F / Ctrl+F       Find (incremental)\n"
 	"                         Arrow keys navigate matches\n"
 	"                         Enter to accept, ESC to cancel\n"
+	"\n"
+	"EDITING\n"
+	"  Ctrl+U               Undo\n"
+	"  Ctrl+R               Redo\n"
 	"\n"
 	"DISPLAY\n"
 	"  Alt+T                Cycle color theme\n"
@@ -3137,6 +3569,13 @@ void editor_process_keypress(struct input_event event)
 		editor_help_open();
 		break;
 
+	case CTRL_KEY('u'):
+		editor_undo();
+		break;
+	case CTRL_KEY('r'):
+		editor_redo();
+		break;
+
 	case BACKSPACE:
 	case CTRL_KEY('h'):
 		editor_delete_char();
@@ -3278,6 +3717,7 @@ void editor_init(void)
 	editor.search_saved_syntax = NULL;
 	editor.search_saved_syntax_count = 0;
 
+	undo_stack_init(&editor.undo);
 	editor.viewing_help = 0;
 	editor.snapshot = (struct editor_snapshot){0};
 }
