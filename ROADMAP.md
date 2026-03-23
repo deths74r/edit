@@ -73,12 +73,12 @@
 
 - [x] **Find and replace** — Alt+R, two-prompt flow, y/n/a/ESC confirmation, replace-all with count
 - [x] **Case-insensitive search toggle** — Alt+C during search, editor_memmem with tolower
-- [ ] **All-match highlighting** — show all visible matches, active match in distinct color
-- [ ] **Match count** — `"Match 3 of 15"` in prompt
-- [ ] **Wrap indicator** — `[Wrapped]` when search passes EOF
+- [x] **All-match highlighting** — all visible matches shown with HL_MATCH during search
+- [x] **Match count** — "Match N of M" in status bar during search
+- [x] **Wrap indicator** — [Wrapped] shown when search crosses file boundaries
 - [x] **8+ syntax languages** — Python, JavaScript, Go, Rust, Bash, JSON, YAML, Markdown
-- [ ] **Regex search** — POSIX ERE via `<regex.h>`, no new dependency
-- [ ] **Search history** — up arrow recalls previous searches
+- [x] **Regex search** — Alt+X toggle, POSIX ERE via regcomp/regexec
+- [x] **Search history** — Up/Down arrows browse previous searches, 50-entry buffer
 - [x] **Read from stdin** — `cat file | edit` or `edit -`, reopens /dev/tty
 
 ---
