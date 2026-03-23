@@ -456,6 +456,10 @@ struct editor_state {
 	uint32_t search_saved_syntax_count;
 	/* Desired render column preserved across vertical movement. */
 	int preferred_column;
+	/* When set, editor_scroll() skips the margin and uses simple
+	 * boundary checks. Set by mouse wheel and Page Up/Down to avoid
+	 * fighting with their own viewport positioning. Auto-clears. */
+	int suppress_scroll_margin;
 	/* Current text selection state. */
 	struct selection_state selection;
 	/* Internal clipboard for cut/copy/paste. */
@@ -3431,7 +3435,8 @@ void editor_scroll(void)
 		editor.render_x = line_cell_to_render_column(
 				&editor.lines[editor.cursor_y], editor.cursor_x);
 	}
-	int margin = SCROLL_MARGIN;
+	int margin = editor.suppress_scroll_margin ? 0 : SCROLL_MARGIN;
+	editor.suppress_scroll_margin = 0;
 	if (margin > editor.screen_rows / 2)
 		margin = editor.screen_rows / 2;
 
@@ -4319,6 +4324,7 @@ void editor_process_keypress(struct input_event event)
 		int times = editor.screen_rows;
 		while (times--)
 			editor_move_cursor((struct input_event){.key = key == PAGE_UP ? ARROW_UP : ARROW_DOWN});
+		editor.suppress_scroll_margin = 1;
 	} break;
 
 	case ALT_KEY('h'):
@@ -4346,11 +4352,13 @@ void editor_process_keypress(struct input_event event)
 	case MOUSE_SCROLL_UP:
 		editor_update_scroll_speed();
 		editor_scroll_rows(ARROW_UP, editor.scroll_speed);
+		editor.suppress_scroll_margin = 1;
 		break;
 
 	case MOUSE_SCROLL_DOWN:
 		editor_update_scroll_speed();
 		editor_scroll_rows(ARROW_DOWN, editor.scroll_speed);
+		editor.suppress_scroll_margin = 1;
 		break;
 
 	case ESC_KEY:
@@ -4444,6 +4452,7 @@ void editor_init(void)
 	editor.search_saved_syntax_count = 0;
 
 	editor.preferred_column = -1;
+	editor.suppress_scroll_margin = 0;
 	editor.selection = (struct selection_state){0};
 	editor.clipboard = (struct clipboard){0};
 	undo_stack_init(&editor.undo);
