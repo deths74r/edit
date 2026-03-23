@@ -5062,12 +5062,45 @@ int editor_highlight_search_matches(struct line *line, uint16_t *saved_syntax)
 	return modified;
 }
 
+/* Returns true if the codepoint is an opening or closing bracket character
+ * that participates in bracket pair colorization. */
+static int cell_is_bracket(uint32_t codepoint)
+{
+	return codepoint == '(' || codepoint == ')' ||
+	       codepoint == '[' || codepoint == ']' ||
+	       codepoint == '{' || codepoint == '}';
+}
+
+/* Returns true if the codepoint is an opening bracket. */
+static int cell_is_opening_bracket(uint32_t codepoint)
+{
+	return codepoint == '(' || codepoint == '[' || codepoint == '{';
+}
+
+/* Returns the bracket color from the theme for the given nesting depth.
+ * Cycles through keyword1, keyword2, string, and number colors. */
+static char *bracket_color_for_depth(int depth)
+{
+	switch (depth % BRACKET_COLOR_COUNT) {
+	case 0:  return editor.theme.keyword1;
+	case 1:  return editor.theme.keyword2;
+	case 2:  return editor.theme.string;
+	default: return editor.theme.number;
+	}
+}
+
 /* Renders all visible rows to the append buffer, including line numbers,
  * syntax-highlighted text, and the welcome message for empty files. Applies
- * background colors, bold formatting for keywords, and handles control
- * characters with inverted display. */
+ * trailing whitespace visualization, horizontal scroll indicators, and
+ * bracket pair colorization based on nesting depth. */
 void editor_draw_rows(struct append_buffer *append_buffer)
 {
+	/* Bracket depth starts at 0 at the top of the viewport.
+	 * This is intentionally simple — colors may be wrong if there
+	 * are unmatched brackets above the viewport, but most code files
+	 * have balanced brackets per function. */
+	int bracket_depth = editor.bracket_depth_at_viewport;
+
 	int screen_row;
 	for (screen_row = 0; screen_row < editor.screen_rows; screen_row++) {
 		int file_row = screen_row + editor.row_offset;
@@ -5138,6 +5171,34 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			int text_columns = editor.screen_columns - editor.line_number_width;
 			if (visible_length > text_columns)
 				visible_length = text_columns;
+
+			/* Compute trailing whitespace start index for this line.
+			 * Scan backward from the end to find the first non-whitespace
+			 * cell. Only applies to lines with actual content. */
+			int trailing_start = (int)ln->cell_count;
+			if (ln->cell_count > 0) {
+				int scan = (int)ln->cell_count - 1;
+				while (scan >= 0) {
+					uint32_t scan_cp = ln->cells[scan].codepoint;
+					if (scan_cp != ' ' && scan_cp != '\t')
+						break;
+					scan--;
+				}
+				/* Only mark trailing whitespace if the line has
+				 * non-whitespace content (not a blank line). */
+				if (scan >= 0)
+					trailing_start = scan + 1;
+			}
+
+			/* Determine whether horizontal scroll indicators are needed.
+			 * A left indicator shows when content is scrolled off-screen
+			 * to the left; a right indicator when content extends past
+			 * the visible area to the right. */
+			int has_left_indicator = (editor.column_offset > 0
+						  && ln->cell_count > 0);
+			int has_right_indicator = (render_width >
+						   editor.column_offset + text_columns);
+
 			/* Render cells with tab expansion and UTF-8 encoding.
 			 * Iterates by grapheme cluster to correctly handle
 			 * multi-codepoint sequences (flags, ZWJ emoji, etc). */
@@ -5154,11 +5215,38 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 				    && (int)ci == editor.bracket_match_cell)
 					hl = HL_MATCH;
 
+				/* Check if this cell is trailing whitespace */
+				int in_trailing = ((int)ci >= trailing_start
+						   && (cp == ' ' || cp == '\t'));
+
+				/* Determine bracket color override for this cell.
+				 * Only colorize brackets outside strings, comments,
+				 * and search matches. */
+				char *bracket_override = NULL;
+				if (cell_is_bracket(cp)
+				    && hl != HL_STRING && hl != HL_COMMENT
+				    && hl != HL_MLCOMMENT && hl != HL_MATCH) {
+					if (cell_is_opening_bracket(cp)) {
+						bracket_override = bracket_color_for_depth(bracket_depth);
+						bracket_depth++;
+					} else {
+						if (bracket_depth > 0)
+							bracket_depth--;
+						bracket_override = bracket_color_for_depth(bracket_depth);
+					}
+				}
+
 				if (cp == '\t') {
 					int cw = cell_display_width(&ln->cells[ci], col);
 					/* Expand tab to spaces */
 					for (int t = 0; t < cw && output_col < visible_length; t++) {
 						if (col >= editor.column_offset) {
+							/* Apply trailing whitespace background tint */
+							if (in_trailing) {
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.line_number);
+							}
 							if (hl == HL_NORMAL) {
 								if (current_color != NULL) {
 									append_buffer_write_color(append_buffer, editor.theme.foreground);
@@ -5171,8 +5259,38 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 									append_buffer_write_color(append_buffer, color);
 								}
 							}
-							append_buffer_write(append_buffer, " ", 1);
+							/* Left scroll indicator: override first visible
+							 * character position with '<' */
+							if (has_left_indicator && output_col == 0) {
+								append_buffer_write_color(
+									append_buffer,
+									editor.theme.line_number);
+								append_buffer_write(append_buffer, "<", 1);
+								current_color = NULL;
+							/* Right scroll indicator: override last visible
+							 * character position with '>' */
+							} else if (has_right_indicator
+								   && output_col == text_columns - 1) {
+								append_buffer_write_color(
+									append_buffer,
+									editor.theme.line_number);
+								append_buffer_write(append_buffer, ">", 1);
+								current_color = NULL;
+							} else {
+								append_buffer_write(append_buffer, " ", 1);
+							}
 							output_col++;
+							/* Restore normal background after trailing ws */
+							if (in_trailing) {
+								if (file_row == editor.cursor_y)
+									append_buffer_write_background(
+										append_buffer,
+										editor.theme.highlight_background);
+								else
+									append_buffer_write_background(
+										append_buffer,
+										editor.theme.background);
+							}
 						}
 						col++;
 					}
@@ -5193,11 +5311,25 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 							append_buffer_write_color(append_buffer, current_color);
 						}
 					} else {
+						/* Apply trailing whitespace background tint */
+						if (in_trailing) {
+							append_buffer_write_background(
+								append_buffer,
+								editor.theme.line_number);
+						}
 						/* Selection: use terminal reverse video */
 						int selected = ln->cells[ci].flags & CELL_FLAG_SELECTED;
 						if (selected) {
 							append_buffer_write(append_buffer,
 								INVERT_COLOR, strlen(INVERT_COLOR));
+						} else if (bracket_override != NULL) {
+							/* Bracket pair colorization overrides normal syntax */
+							if (bracket_override != current_color) {
+								current_color = bracket_override;
+								append_buffer_write_color(
+									append_buffer,
+									bracket_override);
+							}
 						} else if (hl == HL_NORMAL) {
 							if (current_color != NULL) {
 								append_buffer_write_color(
@@ -5212,12 +5344,30 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								append_buffer_write_color(append_buffer, color);
 							}
 						}
-						/* Output all codepoints in the cluster */
-						for (int gi = (int)ci; gi < grapheme_end; gi++) {
-							char utf8_buf[UTF8_MAX_BYTES];
-							int utf8_len = utf8_encode(
-									ln->cells[gi].codepoint, utf8_buf);
-							append_buffer_write(append_buffer, utf8_buf, utf8_len);
+						/* Left scroll indicator: show '<' at first visible column */
+						if (has_left_indicator && output_col == 0) {
+							append_buffer_write_color(
+								append_buffer,
+								editor.theme.line_number);
+							append_buffer_write(append_buffer, "<", 1);
+							current_color = NULL;
+						/* Right scroll indicator: show '>' at last visible column */
+						} else if (has_right_indicator
+							   && output_col + cw > text_columns - 1
+							   && output_col <= text_columns - 1) {
+							append_buffer_write_color(
+								append_buffer,
+								editor.theme.line_number);
+							append_buffer_write(append_buffer, ">", 1);
+							current_color = NULL;
+						} else {
+							/* Output all codepoints in the cluster */
+							for (int gi = (int)ci; gi < grapheme_end; gi++) {
+								char utf8_buf[UTF8_MAX_BYTES];
+								int utf8_len = utf8_encode(
+										ln->cells[gi].codepoint, utf8_buf);
+								append_buffer_write(append_buffer, utf8_buf, utf8_len);
+							}
 						}
 						/* End reverse video after selected cells */
 						if (selected) {
@@ -5231,6 +5381,17 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								append_buffer_write_background(append_buffer,
 									editor.theme.background);
 							current_color = NULL;
+						}
+						/* Restore background after trailing whitespace */
+						if (in_trailing && !selected) {
+							if (file_row == editor.cursor_y)
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.highlight_background);
+							else
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.background);
 						}
 					}
 					output_col += cw;
@@ -5255,9 +5416,9 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 	}
 }
 
-/* Renders the status bar showing the filename, line count, modification
- * status, cursor position, and file type. Uses the theme's status bar
- * colors and right-aligns the secondary information. */
+/* Renders the status bar showing the filename, dirty indicator, filetype,
+ * cursor position, and file percentage. Uses proportional filename
+ * truncation and highlights the dirty indicator in the match color. */
 void editor_draw_status_bar(struct append_buffer *append_buffer)
 {
 	append_buffer_write_background(
@@ -5266,26 +5427,95 @@ void editor_draw_status_bar(struct append_buffer *append_buffer)
 	append_buffer_write_color(
 			append_buffer,
 			editor.theme.status_bar_text);
-	char status[STATUS_BUFFER_SIZE], right_status[STATUS_BUFFER_SIZE];
-	int status_length = snprintf(status, sizeof(status), "%.20s%s",
-												editor.filename ? editor.filename : "[No Name]",
-												editor.dirty ? " [+]" : "");
+
+	/* Build the right side first so we know how much space is available
+	 * for the left side. Format: "line:col | N%" */
+	char right_status[STATUS_BUFFER_SIZE];
+	char position_indicator[STATUS_BUFFER_SIZE];
+	if (editor.line_count == 0 || editor.cursor_y == 0) {
+		snprintf(position_indicator, sizeof(position_indicator), "Top");
+	} else if (editor.cursor_y >= editor.line_count - 1) {
+		snprintf(position_indicator, sizeof(position_indicator), "Bot");
+	} else {
+		int percent = ((editor.cursor_y + 1) * 100) / editor.line_count;
+		snprintf(position_indicator, sizeof(position_indicator), "%d%%", percent);
+	}
 	int right_status_length = snprintf(
 			right_status, sizeof(right_status),
-			"%d:%d/%d",
+			"%d:%d | %s",
 			editor.cursor_y + 1, editor.cursor_x + 1,
-			editor.line_count);
-	if (status_length > editor.screen_columns)
-		status_length = editor.screen_columns;
-	append_buffer_write(append_buffer, status, status_length);
-	while (status_length < editor.screen_columns) {
-		if (editor.screen_columns - status_length == right_status_length) {
-			append_buffer_write_color(append_buffer, editor.theme.status_bar_text);
-			append_buffer_write(append_buffer, right_status, right_status_length);
+			position_indicator);
+
+	/* Determine the filetype label for display. */
+	const char *filetype_label = editor.syntax
+		? editor.syntax->filetype : "text";
+
+	/* Compute the dirty indicator and filetype suffix. */
+	const char *dirty_text = editor.dirty ? " [+]" : "";
+	int dirty_length = (int)strlen(dirty_text);
+	char filetype_suffix[STATUS_BUFFER_SIZE];
+	int filetype_suffix_length = snprintf(filetype_suffix,
+		sizeof(filetype_suffix), " %s", filetype_label);
+
+	/* Calculate available width for the filename. Reserve space for
+	 * the dirty indicator, filetype, a gap, and the right side. */
+	int reserved = dirty_length + filetype_suffix_length + 1 + right_status_length;
+	int filename_max = editor.screen_columns - reserved;
+	if (filename_max < 0)
+		filename_max = 0;
+
+	/* Render the filename with proportional truncation. When the name
+	 * is too long, show "...tail" keeping the end of the path. */
+	const char *filename = editor.filename ? editor.filename : "[No Name]";
+	int filename_length = (int)strlen(filename);
+	int output_col = 0;
+
+	if (filename_length <= filename_max) {
+		append_buffer_write(append_buffer, filename, filename_length);
+		output_col += filename_length;
+	} else if (filename_max > 3) {
+		/* Show "..." followed by as much of the tail as fits. */
+		append_buffer_write(append_buffer, "...", 3);
+		int tail_length = filename_max - 3;
+		append_buffer_write(append_buffer,
+			filename + filename_length - tail_length, tail_length);
+		output_col += filename_max;
+	} else {
+		/* Extremely narrow: just show what fits. */
+		append_buffer_write(append_buffer, filename,
+			filename_max > filename_length ? filename_length : filename_max);
+		output_col += (filename_max > filename_length
+			? filename_length : filename_max);
+	}
+
+	/* Render the dirty indicator in the match/number color to stand out. */
+	if (editor.dirty && output_col + dirty_length <= editor.screen_columns) {
+		append_buffer_write_color(append_buffer, editor.theme.number);
+		append_buffer_write(append_buffer, dirty_text, dirty_length);
+		append_buffer_write_color(append_buffer, editor.theme.status_bar_text);
+		output_col += dirty_length;
+	} else if (!editor.dirty) {
+		/* No dirty indicator needed */
+	}
+
+	/* Render the filetype suffix. */
+	if (output_col + filetype_suffix_length <= editor.screen_columns) {
+		append_buffer_write(append_buffer, filetype_suffix,
+			filetype_suffix_length);
+		output_col += filetype_suffix_length;
+	}
+
+	/* Fill the gap and render the right-aligned status. */
+	while (output_col < editor.screen_columns) {
+		if (editor.screen_columns - output_col == right_status_length) {
+			append_buffer_write_color(
+				append_buffer, editor.theme.status_bar_text);
+			append_buffer_write(append_buffer,
+				right_status, right_status_length);
 			break;
 		} else {
 			append_buffer_write(append_buffer, " ", 1);
-			status_length++;
+			output_col++;
 		}
 	}
 	append_buffer_write_color(append_buffer, editor.theme.foreground);
