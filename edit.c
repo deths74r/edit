@@ -283,6 +283,23 @@ struct prompt_state {
 	void (*on_cancel)(void);
 };
 
+/* Snapshot of buffer state for temporary views (help screen, etc).
+ * Allows saving and restoring the full editing context without a
+ * multi-buffer architecture. */
+struct editor_snapshot {
+	struct line *lines;
+	int line_count;
+	int line_capacity;
+	int cursor_x, cursor_y;
+	int row_offset, column_offset;
+	int dirty;
+	char *filename;
+	struct editor_syntax *syntax;
+	int file_descriptor;
+	char *mmap_base;
+	size_t mmap_size;
+};
+
 /* Global editor state containing cursor position, file content, display
  * settings, and terminal configuration. Single instance used throughout. */
 struct editor_state {
@@ -352,6 +369,10 @@ struct editor_state {
 	int search_saved_highlight_line;
 	uint16_t *search_saved_syntax;
 	uint32_t search_saved_syntax_count;
+	/* True when displaying a temporary read-only buffer (help text). */
+	int viewing_help;
+	/* Saved state for returning from a temporary view. */
+	struct editor_snapshot snapshot;
 };
 
 /* Global editor state. */
@@ -2017,6 +2038,138 @@ void editor_quit(void)
 	free(editor.filename);
 }
 
+/*** Help ***/
+
+/* Help text displayed when the user presses F1 or Alt+?. Loaded into
+ * the editor buffer as a temporary read-only view. */
+static const char *help_text =
+	"edit -- Terminal Text Editor (v" EDIT_VERSION ")\n"
+	"\n"
+	"FILE\n"
+	"  Alt+S / Ctrl+S       Save\n"
+	"  Alt+Shift+S          Save as\n"
+	"  Alt+Q / Ctrl+Q       Quit\n"
+	"  Ctrl+Z               Suspend (return to shell)\n"
+	"\n"
+	"NAVIGATION\n"
+	"  Arrows / Alt+HJKL    Move cursor\n"
+	"  Home / End           Start / end of line\n"
+	"  PgUp / PgDn          Scroll by screen\n"
+	"  Alt+G / Ctrl+G       Go to line number\n"
+	"  Mouse click          Position cursor\n"
+	"  Mouse scroll         Scroll (accelerated)\n"
+	"\n"
+	"SEARCH\n"
+	"  Alt+F / Ctrl+F       Find (incremental)\n"
+	"                         Arrow keys navigate matches\n"
+	"                         Enter to accept, ESC to cancel\n"
+	"\n"
+	"DISPLAY\n"
+	"  Alt+T                Cycle color theme\n"
+	"  Alt+N                Toggle line numbers\n"
+	"  F1 / Alt+?           This help screen\n"
+	"\n"
+	"Press ESC or Alt+Q to return to your file.\n";
+
+/* Saves the current buffer state into the snapshot so it can be
+ * restored later. Zeroes the buffer fields in editor so the
+ * new content won't interfere with the saved data. */
+void editor_snapshot_save(void)
+{
+	editor.snapshot.lines = editor.lines;
+	editor.snapshot.line_count = editor.line_count;
+	editor.snapshot.line_capacity = editor.line_capacity;
+	editor.snapshot.cursor_x = editor.cursor_x;
+	editor.snapshot.cursor_y = editor.cursor_y;
+	editor.snapshot.row_offset = editor.row_offset;
+	editor.snapshot.column_offset = editor.column_offset;
+	editor.snapshot.dirty = editor.dirty;
+	editor.snapshot.filename = editor.filename;
+	editor.snapshot.syntax = editor.syntax;
+	editor.snapshot.file_descriptor = editor.file_descriptor;
+	editor.snapshot.mmap_base = editor.mmap_base;
+	editor.snapshot.mmap_size = editor.mmap_size;
+
+	/* Detach buffer from editor so new content is independent */
+	editor.lines = NULL;
+	editor.line_count = 0;
+	editor.line_capacity = 0;
+	editor.filename = NULL;
+	editor.syntax = NULL;
+	editor.file_descriptor = -1;
+	editor.mmap_base = NULL;
+	editor.mmap_size = 0;
+}
+
+/* Frees the current (temporary) buffer and restores the snapshot. */
+void editor_snapshot_restore(void)
+{
+	/* Free the temporary buffer lines */
+	for (int i = 0; i < editor.line_count; i++)
+		line_free(&editor.lines[i]);
+	free(editor.lines);
+
+	/* Restore from snapshot */
+	editor.lines = editor.snapshot.lines;
+	editor.line_count = editor.snapshot.line_count;
+	editor.line_capacity = editor.snapshot.line_capacity;
+	editor.cursor_x = editor.snapshot.cursor_x;
+	editor.cursor_y = editor.snapshot.cursor_y;
+	editor.row_offset = editor.snapshot.row_offset;
+	editor.column_offset = editor.snapshot.column_offset;
+	editor.dirty = editor.snapshot.dirty;
+	editor.filename = editor.snapshot.filename;
+	editor.syntax = editor.snapshot.syntax;
+	editor.file_descriptor = editor.snapshot.file_descriptor;
+	editor.mmap_base = editor.snapshot.mmap_base;
+	editor.mmap_size = editor.snapshot.mmap_size;
+
+	/* Clear snapshot */
+	editor.snapshot = (struct editor_snapshot){0};
+
+	editor_update_gutter_width();
+}
+
+/* Opens the help screen by saving current state and loading help text. */
+void editor_help_open(void)
+{
+	if (editor.viewing_help)
+		return;
+
+	editor_snapshot_save();
+
+	/* Load help text line by line */
+	const char *pos = help_text;
+	while (*pos) {
+		const char *eol = strchr(pos, '\n');
+		if (eol == NULL)
+			eol = pos + strlen(pos);
+		editor_line_insert(editor.line_count, pos, (size_t)(eol - pos));
+		pos = (*eol == '\n') ? eol + 1 : eol;
+	}
+
+	editor.cursor_x = 0;
+	editor.cursor_y = 0;
+	editor.row_offset = 0;
+	editor.column_offset = 0;
+	editor.dirty = 0;
+	editor.viewing_help = 1;
+	editor_update_gutter_width();
+	editor_set_status_message("HELP -- Press ESC or Alt+Q to return");
+}
+
+/* Closes the help screen and restores the previous buffer. */
+void editor_help_close(void)
+{
+	if (!editor.viewing_help)
+		return;
+
+	editor.viewing_help = 0;
+	editor_snapshot_restore();
+	editor_set_status_message(
+		"Alt: S=save Q=quit F=find G=goto N=lines T=theme ?=help");
+}
+
 /*** Find ***/
 
 /* Callback invoked on each keypress during incremental search. Uses
@@ -2883,6 +3036,36 @@ void editor_move_cursor(struct input_event event)
 void editor_process_keypress(struct input_event event)
 {
 	int key = event.key;
+
+	/* When viewing help, only allow navigation and exit keys.
+	 * Everything else is blocked to keep the buffer read-only. */
+	if (editor.viewing_help) {
+		int allowed = 0;
+		switch (key) {
+		/* Navigation */
+		case ARROW_UP: case ARROW_DOWN: case ARROW_LEFT: case ARROW_RIGHT:
+		case ALT_KEY('h'): case ALT_KEY('j'): case ALT_KEY('k'): case ALT_KEY('l'):
+		case PAGE_UP: case PAGE_DOWN: case HOME_KEY: case END_KEY:
+		case MOUSE_LEFT_BUTTON_PRESSED:
+		case MOUSE_SCROLL_UP: case MOUSE_SCROLL_DOWN:
+		/* Exit help */
+		case ESC_KEY: case ALT_KEY('q'): case CTRL_KEY('q'):
+		/* Search (read-only browsing) */
+		case ALT_KEY('f'): case CTRL_KEY('f'):
+		/* Display toggles */
+		case ALT_KEY('t'): case ALT_KEY('n'):
+		/* Goto line */
+		case ALT_KEY('g'): case CTRL_KEY('g'):
+			allowed = 1;
+			break;
+		}
+		if (!allowed) {
+			editor_set_status_message(
+				"Help is read-only -- ESC or Alt+Q to return");
+			return;
+		}
+	}
+
 	switch (key) {
 	case '\r':
 		editor_insert_newline();
@@ -2896,10 +3079,16 @@ void editor_process_keypress(struct input_event event)
 		break;
 
 	case ALT_KEY('g'):
+	case CTRL_KEY('g'):
 		editor_jump_to_line_start();
 		break;
 
 	case ALT_KEY('q'):
+	case CTRL_KEY('q'):
+		if (editor.viewing_help) {
+			editor_help_close();
+			break;
+		}
 		if (editor.dirty) {
 			confirm_open("Unsaved changes. Save before quitting? (y/n/ESC)",
 				     editor_quit_confirm);
@@ -2911,10 +3100,22 @@ void editor_process_keypress(struct input_event event)
 		break;
 
 	case ALT_KEY('s'):
+	case CTRL_KEY('s'):
 		editor_save_start();
 		break;
 	case ALT_KEY('S'):
 		editor_save_as_start();
+		break;
+
+	case CTRL_KEY('z'):
+		/* Suspend: restore terminal, stop the process, re-enable
+		 * raw mode when resumed. */
+		terminal_disable_mouse_reporting();
+		terminal_disable_raw_mode();
+		kill(getpid(), SIGTSTP);
+		/* Execution resumes here after SIGCONT */
+		terminal_enable_raw_mode();
+		terminal_enable_mouse_reporting();
 		break;
 
 	case HOME_KEY:
@@ -2927,7 +3128,13 @@ void editor_process_keypress(struct input_event event)
 		break;
 
 	case ALT_KEY('f'):
+	case CTRL_KEY('f'):
 		editor_find_start();
+		break;
+
+	case ALT_KEY('?'):
+	case F11_KEY:
+		editor_help_open();
 		break;
 
 	case BACKSPACE:
@@ -2984,11 +3191,11 @@ void editor_process_keypress(struct input_event event)
 		editor_scroll_rows(ARROW_DOWN, editor.scroll_speed);
 		break;
 
-	case F11_KEY:
-		editor_set_status_message("Edit %s", EDIT_VERSION);
-		break;
-
 	case ESC_KEY:
+		if (editor.viewing_help) {
+			editor_help_close();
+			break;
+		}
 		break;
 
 	default:
@@ -3070,6 +3277,9 @@ void editor_init(void)
 	editor.search_saved_highlight_line = 0;
 	editor.search_saved_syntax = NULL;
 	editor.search_saved_syntax_count = 0;
+
+	editor.viewing_help = 0;
+	editor.snapshot = (struct editor_snapshot){0};
 }
 
 /* Entry point. Sets up the terminal (mouse reporting, raw mode), initializes
@@ -3094,7 +3304,7 @@ int main(int argc, char *argv[])
 	}
 
 	editor_set_status_message(
-			"Alt: S=save Q=quit F=find G=goto N=lines T=theme HJKL=move");
+			"Alt: S=save Q=quit F=find G=goto N=lines T=theme ?=help");
 
 	/* Switch to fully non-blocking reads now that startup terminal
 	 * queries (which need VTIME=1) are complete. */
