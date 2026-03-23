@@ -3515,123 +3515,44 @@ void editor_scroll(void)
 }
 
 /* Scrolls the editor view by the given number of rows in the specified
- * direction (ARROW_UP or ARROW_DOWN). Keeps the cursor centered on screen
- * when possible, and handles boundary conditions at the top and bottom
- * of the file. Used by mouse scroll wheel with acceleration. */
+ * direction (ARROW_UP or ARROW_DOWN). Moves the viewport and clamps
+ * the cursor to remain visible. Used by mouse scroll wheel with
+ * acceleration. */
 void editor_scroll_rows(int scroll_direction, int scroll_amount)
 {
-	int screen_middle = editor.screen_rows / 2;
+	if (scroll_direction == ARROW_UP)
+		editor.row_offset -= scroll_amount;
+	else
+		editor.row_offset += scroll_amount;
 
-	if (scroll_direction == ARROW_UP) {
+	/* Clamp viewport to valid range */
+	int max_offset = editor.line_count - editor.screen_rows;
+	if (max_offset < 0)
+		max_offset = 0;
+	if (editor.row_offset < 0)
+		editor.row_offset = 0;
+	if (editor.row_offset > max_offset)
+		editor.row_offset = max_offset;
 
-		/* Clamp the scroll amount so the cursor stays within file bounds. */
-		if (editor.cursor_y - scroll_amount < 0) {
-			scroll_amount = editor.cursor_y;
-		}
+	/* Clamp cursor to visible area */
+	if (editor.cursor_y < editor.row_offset)
+		editor.cursor_y = editor.row_offset;
+	int last_visible = editor.row_offset + editor.screen_rows - 1;
+	if (editor.cursor_y > last_visible)
+		editor.cursor_y = last_visible;
 
-		/* Move the cursor up if it is below the screen center. */
-		if (editor.cursor_y > editor.row_offset + screen_middle) {
-			editor.cursor_y -= scroll_amount;
-		}
+	/* Clamp cursor to file bounds */
+	if (editor.cursor_y >= editor.line_count)
+		editor.cursor_y = editor.line_count > 0
+			? editor.line_count - 1 : 0;
 
-		/* If scrolling up would move the cursor past (above) center,
-		 * stop moving the cursor and start scrolling the viewport down
-		 * instead. This gradually pulls the cursor's screen position
-		 * toward center, mirroring the scroll-down behavior. */
-		if (editor.cursor_y - scroll_amount < editor.row_offset + screen_middle) {
-
-			/* Don't adjust the viewport if we're already at the top of
-			 * the file — there's nowhere to scroll down to. */
-			if (editor.row_offset != 0) {
-
-				/* Cursor is already above center (clicked in top half).
-				 * Keep the cursor on its file line and slide the viewport
-				 * down toward it. Clamp the viewport shift to the
-				 * distance between center and cursor so we don't
-				 * overshoot past the cursor. */
-				if (editor.cursor_y < editor.row_offset + screen_middle) {
-					int middle_offset = (editor.row_offset + screen_middle) - editor.cursor_y;
-					if (middle_offset < scroll_amount) {
-						scroll_amount = middle_offset;
-					}
-					editor.row_offset -= scroll_amount;
-
-				/* Cursor is at or below center but would cross it.
-				 * Snap the cursor to center so the next scroll tick
-				 * enters the pinned-at-center state below. */
-				} else {
-					editor.cursor_y = editor.row_offset + screen_middle;
-				}
-			}
-		}
-
-		/* When the cursor is exactly at center, scroll both the viewport and
-		 * cursor together to keep the cursor pinned to center. */
-		if (editor.cursor_y == editor.row_offset + screen_middle) {
-			if (editor.row_offset - scroll_amount >= 0) {
-				editor.cursor_y = editor.row_offset + screen_middle - scroll_amount;
-				editor.row_offset -= scroll_amount;
-			}
-		}
-
-		/* At top of file, let the cursor move past center toward the first row. */
-		if (editor.row_offset == 0) {
-			editor.cursor_y -= scroll_amount;
-		}
-
-	} else if (scroll_direction == ARROW_DOWN) {
-
-		/* Clamp the scroll amount so the cursor stays within file bounds. */
-		if (editor.cursor_y + scroll_amount > editor.line_count) {
-			scroll_amount = editor.line_count - editor.cursor_y;
-		}
-
-		/* Move the cursor down if it is above the screen center. */
-		if (editor.cursor_y < editor.row_offset + screen_middle) {
-			editor.cursor_y += scroll_amount;
-		}
-
-		/* When the cursor would scroll past the center, lock it to center
-		 * and scroll the viewport instead. Clamp scroll_amount to the
-		 * distance between the cursor and center to prevent jumping. */
-		if (editor.cursor_y + scroll_amount > editor.row_offset + screen_middle) {
-
-			/* Only scroll the viewport if we haven't reached the end of file. */
-			if (editor.row_offset + editor.screen_rows != editor.line_count + 1) {
-
-				if (editor.cursor_y > editor.row_offset + screen_middle) {
-					int middle_offset = editor.cursor_y - (editor.row_offset + screen_middle);
-					if (middle_offset < scroll_amount) {
-						scroll_amount = middle_offset;
-					}
-					editor.row_offset += scroll_amount;
-				} else {
-					editor.cursor_y = editor.row_offset + screen_middle;
-				}
-			}
-		}
-
-		/* When the cursor is exactly at center, scroll both the viewport and
-		 * cursor together to keep the cursor pinned to center. */
-
-		if (editor.cursor_y == editor.row_offset + screen_middle) {
-			if (editor.row_offset + editor.screen_rows + scroll_amount <=
-					editor.line_count + 1) {
-				editor.cursor_y = editor.row_offset + screen_middle + scroll_amount;
-				editor.row_offset += scroll_amount;
-			}
-		}
-
-		/* At end of file, let the cursor move past center toward the last row. */
-		if (editor.row_offset + editor.screen_rows == editor.line_count + 1) {
-			editor.cursor_y += scroll_amount;
-		}
+	/* Clamp cursor_x to the new line's length */
+	if (editor.cursor_y < editor.line_count) {
+		line_ensure_warm(&editor.lines[editor.cursor_y]);
+		int row_length = (int)editor.lines[editor.cursor_y].cell_count;
+		if (editor.cursor_x > row_length)
+			editor.cursor_x = row_length;
 	}
-	/* Final bounds clamp */
-	if (editor.cursor_y < 0)
-		editor.cursor_y = 0;
-	if (editor.cursor_y > editor.line_count)
-		editor.cursor_y = editor.line_count;
 }
 
 /* Updates the scroll speed based on the time between consecutive scroll
