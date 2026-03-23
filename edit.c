@@ -234,6 +234,9 @@ enum editor_mode {
 /* Maximum scroll speed multiplier for accelerated scrolling. */
 #define SCROLL_SPEED_MAX 10
 
+/* Number of lines to keep visible above and below the cursor. */
+#define SCROLL_MARGIN 5
+
 /* Highest ASCII value for Ctrl+letter key combinations (A through Z). */
 #define CONTROL_CHAR_MAX 26
 /* Upper bound of the standard ASCII character range. */
@@ -415,6 +418,9 @@ struct editor_state {
 	int search_saved_highlight_line;
 	uint16_t *search_saved_syntax;
 	uint32_t search_saved_syntax_count;
+	/* Desired render column preserved across vertical movement through
+	 * shorter lines. -1 means no preference (use actual position). */
+	int preferred_column;
 	/* Undo/redo history for the current file. */
 	struct undo_stack undo;
 	/* True when displaying a temporary read-only buffer (help text). */
@@ -1958,6 +1964,7 @@ void editor_redo(void)
  * cursor one position to the right. */
 void editor_insert_char(int character)
 {
+	editor.preferred_column = -1;
 	if (editor.cursor_y == editor.line_count) {
 		editor_line_insert(editor.line_count, "", 0);
 	}
@@ -1994,6 +2001,7 @@ void editor_insert_char(int character)
  * the text after the cursor moves to a new line below. */
 void editor_insert_newline(void)
 {
+	editor.preferred_column = -1;
 	undo_push((struct undo_entry){
 		.type = UNDO_SPLIT_LINE,
 		.line_index = editor.cursor_y,
@@ -2001,6 +2009,22 @@ void editor_insert_newline(void)
 		.cursor_x_before = editor.cursor_x,
 		.cursor_y_before = editor.cursor_y,
 	}, 1);
+
+	/* Capture leading whitespace for auto-indent before any realloc
+	 * that might invalidate the line pointer. */
+	struct cell indent_cells[128];
+	int indent_count = 0;
+	if (editor.cursor_y < editor.line_count && editor.cursor_x > 0) {
+		struct line *ln = &editor.lines[editor.cursor_y];
+		line_ensure_warm(ln);
+		for (uint32_t i = 0; i < ln->cell_count && indent_count < 128; i++) {
+			uint32_t cp = ln->cells[i].codepoint;
+			if (cp == ' ' || cp == '\t')
+				indent_cells[indent_count++] = ln->cells[i];
+			else
+				break;
+		}
+	}
 
 	if (editor.cursor_x == 0) {
 		editor_line_insert(editor.cursor_y, "", 0);
@@ -2032,7 +2056,18 @@ void editor_insert_newline(void)
 		editor.dirty++;
 	}
 	editor.cursor_y++;
-	editor.cursor_x = 0;
+
+	/* Auto-indent: prepend captured whitespace to the new line */
+	if (indent_count > 0) {
+		struct line *new_ln = &editor.lines[editor.cursor_y];
+		line_ensure_warm(new_ln);
+		for (int i = indent_count - 1; i >= 0; i--) {
+			indent_cells[i].syntax = HL_NORMAL;
+			indent_cells[i].flags = 0;
+			line_insert_cell(new_ln, 0, indent_cells[i]);
+		}
+	}
+	editor.cursor_x = indent_count;
 }
 
 /* Deletes the grapheme cluster to the left of the cursor (backspace behavior).
@@ -2040,6 +2075,7 @@ void editor_insert_newline(void)
  * by appending its content and deleting the current line. */
 void editor_delete_char(void)
 {
+	editor.preferred_column = -1;
 	if (editor.cursor_y == editor.line_count)
 		return;
 	if (editor.cursor_x == 0 && editor.cursor_y == 0)
@@ -2888,11 +2924,17 @@ void editor_scroll(void)
 		editor.render_x = line_cell_to_render_column(
 				&editor.lines[editor.cursor_y], editor.cursor_x);
 	}
-	if (editor.cursor_y < editor.row_offset) {
-		editor.row_offset = editor.cursor_y;
+	int margin = SCROLL_MARGIN;
+	if (margin > editor.screen_rows / 2)
+		margin = editor.screen_rows / 2;
+
+	if (editor.cursor_y < editor.row_offset + margin) {
+		editor.row_offset = editor.cursor_y - margin;
+		if (editor.row_offset < 0)
+			editor.row_offset = 0;
 	}
-	if (editor.cursor_y >= editor.row_offset + editor.screen_rows) {
-		editor.row_offset = editor.cursor_y - editor.screen_rows + 1;
+	if (editor.cursor_y >= editor.row_offset + editor.screen_rows - margin) {
+		editor.row_offset = editor.cursor_y - editor.screen_rows + margin + 1;
 	}
 	if (editor.render_x < editor.column_offset) {
 		editor.column_offset = editor.render_x;
@@ -3389,6 +3431,16 @@ void editor_move_cursor(struct input_event event)
 												? NULL
 												: &editor.lines[editor.cursor_y];
 
+	/* Reset preferred column on any horizontal movement */
+	int is_vertical = (event.key == ARROW_UP || event.key == ARROW_DOWN
+			   || event.key == ALT_KEY('j')
+			   || event.key == ALT_KEY('k')
+			   || event.key == PAGE_UP || event.key == PAGE_DOWN
+			   || event.key == MOUSE_SCROLL_UP
+			   || event.key == MOUSE_SCROLL_DOWN);
+	if (!is_vertical)
+		editor.preferred_column = -1;
+
 	switch (event.key) {
 
 	case MOUSE_LEFT_BUTTON_PRESSED:
@@ -3401,7 +3453,6 @@ void editor_move_cursor(struct input_event event)
 				editor.cursor_x = line_render_column_to_cell(click_line, render_col);
 			}
 		}
-
 		break;
 
 	case ALT_KEY('h'):
@@ -3431,6 +3482,10 @@ void editor_move_cursor(struct input_event event)
 	case ALT_KEY('k'):
 	case ARROW_UP:
 		if (editor.cursor_y != 0) {
+			if (editor.preferred_column == -1 && current_line)
+				editor.preferred_column =
+					line_cell_to_render_column(
+						current_line, editor.cursor_x);
 			editor.cursor_y--;
 		}
 		break;
@@ -3438,6 +3493,10 @@ void editor_move_cursor(struct input_event event)
 	case ALT_KEY('j'):
 	case ARROW_DOWN:
 		if (editor.cursor_y < editor.line_count) {
+			if (editor.preferred_column == -1 && current_line)
+				editor.preferred_column =
+					line_cell_to_render_column(
+						current_line, editor.cursor_x);
 			editor.cursor_y++;
 		}
 		break;
@@ -3446,9 +3505,16 @@ void editor_move_cursor(struct input_event event)
 	current_line = (editor.cursor_y >= editor.line_count) ? NULL
 																: &editor.lines[editor.cursor_y];
 	int row_length = current_line ? (int)current_line->cell_count : 0;
-	if (editor.cursor_x > row_length) {
+
+	if (editor.preferred_column >= 0 && current_line) {
+		editor.cursor_x = line_render_column_to_cell(
+			current_line, editor.preferred_column);
+		if (editor.cursor_x > row_length)
+			editor.cursor_x = row_length;
+	} else if (editor.cursor_x > row_length) {
 		editor.cursor_x = row_length;
 	}
+
 	/* Snap cursor to grapheme cluster boundary after vertical movement.
 	 * If cursor_x lands in the middle of a multi-codepoint grapheme
 	 * (e.g., a flag emoji spanning cells 2-3), snap to the cluster start. */
@@ -3717,6 +3783,7 @@ void editor_init(void)
 	editor.search_saved_syntax = NULL;
 	editor.search_saved_syntax_count = 0;
 
+	editor.preferred_column = -1;
 	undo_stack_init(&editor.undo);
 	editor.viewing_help = 0;
 	editor.snapshot = (struct editor_snapshot){0};
