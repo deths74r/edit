@@ -34,14 +34,14 @@
 
 *Theme: Select, move, and manipulate text like a real editor.*
 
-- [ ] **Text selection** — Shift+Arrow keyboard selection using the cell `flags` field for selection state
-- [ ] **Mouse drag selection** — extend existing SGR mouse decoding (motion events already parsed but discarded)
-- [ ] **Cut/copy/paste** — internal clipboard + OSC 52 for system clipboard (zero external dependencies)
-- [ ] **Cut line / duplicate line** — high-frequency operations (Alt+K, Alt+D)
-- [ ] **Auto-indent** — copy leading whitespace from current line on Enter
-- [ ] **Word movement** — Ctrl+Left/Right using existing `syntax_is_separator()`
-- [ ] **Scroll margin** ("scrolloff") — maintain 5 lines of context above/below cursor
-- [ ] **Virtual column preservation** — remember column across vertical movement through short lines
+- [x] **Text selection** — Shift+Arrow/Home/End, cell flags rendering with inverted colors
+- [x] **Mouse drag selection** — SGR button-event tracking (?1002h), click-and-drag
+- [x] **Cut/copy/paste** — Alt+C/X/V, internal clipboard + OSC 52 system clipboard
+- [x] **Cut line / duplicate line** — Alt+Shift+K cut line, Alt+D duplicate line
+- [x] **Auto-indent** — copies leading whitespace (tabs/spaces) from current line on Enter
+- [x] **Word movement** — Ctrl+Left/Right with Shift variants for word selection
+- [x] **Scroll margin** — SCROLL_MARGIN=5, adapts to small terminals
+- [x] **Virtual column preservation** — remembers render column across vertical movement
 
 ---
 
