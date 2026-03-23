@@ -18,6 +18,7 @@
 #include <time.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <regex.h>
 #include <unistd.h>
 #include "gstr.h"
 
@@ -276,6 +277,9 @@ enum editor_mode {
 /* Number of lines to keep visible above and below the cursor. */
 #define SCROLL_MARGIN 5
 
+/* Maximum number of search queries retained in the history ring. */
+#define SEARCH_HISTORY_MAX 50
+
 /* Highest ASCII value for Ctrl+letter key combinations (A through Z). */
 #define CONTROL_CHAR_MAX 26
 /* Upper bound of the standard ASCII character range. */
@@ -466,6 +470,30 @@ struct editor_state {
 	/* When set, search and replace ignore letter case. Toggled
 	 * with Alt+C during an active search prompt. */
 	int search_case_insensitive;
+	/* Copy of the active search query, used by editor_draw_rows() to
+	 * highlight all visible matches. Set during search, cleared on
+	 * accept or cancel. */
+	char *search_highlight_query;
+	/* Total number of matches for the current query across all lines. */
+	int search_total_matches;
+	/* One-based index of the current match among all matches. */
+	int search_current_match_index;
+	/* When set, regex search mode is active. Toggled with Alt+X
+	 * during a search prompt. */
+	int search_regex_enabled;
+	/* Compiled POSIX extended regular expression for regex search. */
+	regex_t search_regex_compiled;
+	/* True when search_regex_compiled holds a valid compiled regex. */
+	int search_regex_valid;
+	/* Previously searched queries, newest at the end. */
+	char *search_history[SEARCH_HISTORY_MAX];
+	/* Number of entries currently stored in search_history. */
+	int search_history_count;
+	/* Current browse position in the history, or -1 when not browsing. */
+	int search_history_browse_index;
+	/* Typed text saved when the user starts browsing history, so
+	 * pressing down past the end restores the original input. */
+	char *search_history_stash;
 	/* Search string for find-and-replace, or NULL when inactive. */
 	char *replace_query;
 	/* Replacement string for find-and-replace, or NULL when inactive. */
@@ -484,12 +512,6 @@ struct editor_state {
 	struct clipboard clipboard;
 	/* Undo/redo history for the current file. */
 	struct undo_stack undo;
-	/* Search string for find-and-replace, or NULL when inactive. */
-	char *replace_query;
-	/* Replacement string for find-and-replace, or NULL when inactive. */
-	char *replace_with;
-	/* Number of replacements performed in the current replace-all pass. */
-	int replace_count;
 	/* True when displaying a temporary read-only buffer (help text). */
 	int viewing_help;
 	/* Saved state for returning from a temporary view. */
@@ -701,6 +723,8 @@ void prompt_open(char *format, void (*per_key_callback)(char *, int),
 		 void (*on_accept)(char *), void (*on_cancel)(void));
 /* Handles a keypress while in MODE_PROMPT. */
 void prompt_handle_key(struct input_event event);
+/* Replaces the prompt buffer contents with a new string. */
+void prompt_set_buffer(const char *text);
 /* Closes the current prompt and returns to MODE_NORMAL. */
 void prompt_close(void);
 /* Opens a single-key confirmation dialog. */
@@ -713,6 +737,14 @@ int editor_save_write(void);
 void editor_save_start(void);
 /* Starts incremental search. */
 void editor_find_start(void);
+/* Counts total search matches and determines the current match index. */
+void editor_count_search_matches(const char *query, int match_line, int match_byte_offset);
+/* Searches for a match on a single line using regex or literal search. */
+char *editor_find_on_line(const char *render, size_t byte_length, const char *query, size_t query_length, int direction, int start_or_limit_byte, int case_flag, size_t *match_length_out);
+/* Highlights all occurrences of the search query in a line's cells. */
+int editor_highlight_search_matches(struct line *line, uint16_t *saved_syntax);
+/* Adds a query to the search history ring. */
+void editor_search_history_add(const char *query);
 /* Starts the find-and-replace flow. */
 void editor_replace_start(void);
 /* Reads all data from stdin when piped, returning a malloc'd buffer.
@@ -3368,6 +3400,20 @@ void editor_quit(void)
 	/* Free any in-progress replace state */
 	free(editor.replace_query);
 	free(editor.replace_with);
+
+	/* Free search highlight query */
+	free(editor.search_highlight_query);
+
+	/* Free compiled regex if valid */
+	if (editor.search_regex_valid) {
+		regfree(&editor.search_regex_compiled);
+		editor.search_regex_valid = 0;
+	}
+
+	/* Free search history entries */
+	for (int i = 0; i < editor.search_history_count; i++)
+		free(editor.search_history[i]);
+	free(editor.search_history_stash);
 }
 
 /*** Help ***/
@@ -3395,8 +3441,10 @@ static const char *help_text =
 	"\n"
 	"SEARCH\n"
 	"  Alt+F / Ctrl+F       Find (incremental)\n"
-	"                         Arrow keys navigate matches\n"
+	"                         Left/Right navigate matches\n"
+	"                         Up/Down browse search history\n"
 	"                         Alt+C toggles case sensitivity\n"
+	"                         Alt+X toggles regex mode\n"
 	"                         Enter to accept, ESC to cancel\n"
 	"  Alt+R                Find and replace\n"
 	"\n"
@@ -3557,9 +3605,182 @@ char *editor_memmem(const char *haystack, size_t haystack_length, const char *ne
 	return NULL;
 }
 
-/* Callback invoked on each keypress during incremental search. Uses
- * editor.search_* fields to track state instead of static locals, enabling
- * proper interaction with the non-blocking mode system. */
+/* Counts all occurrences of the search query across the entire file.
+ * When regex mode is enabled, uses regexec() on each line's byte string.
+ * Also tracks which occurrence the current match is (by line and byte
+ * offset) and stores results in editor.search_total_matches and
+ * editor.search_current_match_index. */
+void editor_count_search_matches(const char *query, int match_line, int match_byte_offset)
+{
+	size_t query_length = strlen(query);
+	int total = 0;
+	int current_index = 0;
+	int case_flag = editor.search_case_insensitive;
+
+	for (int i = 0; i < editor.line_count; i++) {
+		struct line *ln = &editor.lines[i];
+		size_t byte_length;
+		const char *bytes;
+		int allocated = 0;
+
+		if (ln->temperature == LINE_COLD && editor.mmap_base) {
+			bytes = editor.mmap_base + ln->mmap_offset;
+			byte_length = ln->mmap_length;
+		} else {
+			line_ensure_warm(ln);
+			bytes = line_to_bytes(ln, &byte_length);
+			allocated = 1;
+		}
+
+		if (editor.search_regex_enabled && editor.search_regex_valid) {
+			/* Regex counting needs a null-terminated string */
+			char *null_terminated = NULL;
+			if (!allocated) {
+				null_terminated = malloc(byte_length + 1);
+				if (null_terminated) {
+					memcpy(null_terminated, bytes, byte_length);
+					null_terminated[byte_length] = '\0';
+					bytes = null_terminated;
+				}
+			}
+			regmatch_t match_info;
+			size_t offset = 0;
+			while (offset < byte_length) {
+				int result = regexec(&editor.search_regex_compiled,
+						     bytes + offset, 1, &match_info, 0);
+				if (result != 0 || match_info.rm_so < 0)
+					break;
+				size_t abs_offset = offset + (size_t)match_info.rm_so;
+				if ((size_t)match_info.rm_eo == (size_t)match_info.rm_so) {
+					offset = abs_offset + 1;
+					continue;
+				}
+				if (i < match_line || (i == match_line && (int)abs_offset < match_byte_offset))
+					current_index++;
+				else if (i == match_line && (int)abs_offset == match_byte_offset)
+					current_index = total;
+				total++;
+				offset += (size_t)match_info.rm_eo;
+			}
+			free(null_terminated);
+		} else {
+			const char *search_pos = bytes;
+			size_t remaining = byte_length;
+			while (remaining >= query_length) {
+				char *found = editor_memmem(search_pos, remaining,
+							    query, query_length, case_flag);
+				if (!found)
+					break;
+				int found_offset = (int)(found - bytes);
+				if (i < match_line || (i == match_line && found_offset < match_byte_offset))
+					current_index++;
+				else if (i == match_line && found_offset == match_byte_offset)
+					current_index = total;
+				total++;
+				search_pos = found + 1;
+				remaining = byte_length - (size_t)(search_pos - bytes);
+			}
+		}
+
+		if (allocated)
+			free((char *)bytes);
+	}
+
+	editor.search_total_matches = total;
+	editor.search_current_match_index = current_index + 1;
+}
+
+/* Searches for a match on a single line using either regex or literal
+ * search depending on the current mode. For the forward direction,
+ * finds the first match after start_byte. For backward, finds the
+ * last match before limit_byte. Returns a pointer into render on
+ * success, NULL on failure. For regex matches, stores the match
+ * length in *match_length_out (literal matches use query_length). */
+char *editor_find_on_line(const char *render, size_t byte_length, const char *query, size_t query_length, int direction, int start_or_limit_byte, int case_flag, size_t *match_length_out)
+{
+	*match_length_out = query_length;
+
+	if (editor.search_regex_enabled && editor.search_regex_valid) {
+		/* Regex needs a null-terminated string. If the render
+		 * buffer isn't null-terminated (COLD mmap lines), copy it. */
+		char *null_terminated = NULL;
+		const char *search_buf = render;
+		if (byte_length > 0 && render[byte_length] != '\0') {
+			null_terminated = malloc(byte_length + 1);
+			if (!null_terminated)
+				return NULL;
+			memcpy(null_terminated, render, byte_length);
+			null_terminated[byte_length] = '\0';
+			search_buf = null_terminated;
+		}
+
+		regmatch_t match_info;
+		char *result = NULL;
+
+		if (direction == 1) {
+			int start = (start_or_limit_byte >= 0) ? start_or_limit_byte + 1 : 0;
+			if (start < (int)byte_length) {
+				int rc = regexec(&editor.search_regex_compiled,
+						 search_buf + start, 1, &match_info, 0);
+				if (rc == 0 && match_info.rm_so >= 0) {
+					int match_len = match_info.rm_eo - match_info.rm_so;
+					if (match_len > 0) {
+						result = (char *)(render + start + match_info.rm_so);
+						*match_length_out = (size_t)match_len;
+					}
+				}
+			}
+		} else {
+			int limit = (start_or_limit_byte >= 0) ? start_or_limit_byte : (int)byte_length;
+			size_t offset = 0;
+			while (offset < (size_t)limit) {
+				int rc = regexec(&editor.search_regex_compiled,
+						 search_buf + offset, 1, &match_info, 0);
+				if (rc != 0 || match_info.rm_so < 0)
+					break;
+				size_t abs_pos = offset + (size_t)match_info.rm_so;
+				if (abs_pos >= (size_t)limit)
+					break;
+				int match_len = match_info.rm_eo - match_info.rm_so;
+				if (match_len <= 0) {
+					offset = abs_pos + 1;
+					continue;
+				}
+				result = (char *)(render + abs_pos);
+				*match_length_out = (size_t)match_len;
+				offset += (size_t)match_info.rm_eo;
+			}
+		}
+
+		free(null_terminated);
+		return result;
+	}
+
+	/* Literal search path */
+	if (direction == 1) {
+		int start = (start_or_limit_byte >= 0) ? start_or_limit_byte + 1 : 0;
+		if (start < (int)byte_length)
+			return editor_memmem(render + start, byte_length - start, query, query_length, case_flag);
+		return NULL;
+	}
+
+	/* Backward literal search: find the last match before the limit */
+	int limit = (start_or_limit_byte >= 0) ? start_or_limit_byte : (int)byte_length;
+	const char *candidate = render;
+	char *result = NULL;
+	while (candidate < render + limit) {
+		char *found = editor_memmem(candidate, (size_t)(render + limit - candidate), query, query_length, case_flag);
+		if (!found || found >= render + limit)
+			break;
+		result = found;
+		candidate = found + 1;
+	}
+	return result;
+}
+
+/* Callback invoked on each keypress during incremental search. Updates
+ * the search highlight query, compiles regex when needed, searches for
+ * the next/previous match, counts total matches, and shows wrap status. */
 void editor_find_callback(char *query, int key)
 {
 	editor.force_full_redraw = 1;
@@ -3578,14 +3799,41 @@ void editor_find_callback(char *query, int key)
 		editor.search_last_match_offset = -1;
 		editor.search_direction = 1;
 		return;
-	} else if (key == ARROW_RIGHT || key == ARROW_DOWN) {
+	} else if (key == ARROW_RIGHT) {
 		editor.search_direction = 1;
-	} else if (key == ARROW_LEFT || key == ARROW_UP) {
+	} else if (key == ARROW_LEFT) {
 		editor.search_direction = -1;
 	} else {
 		editor.search_last_match = -1;
 		editor.search_last_match_offset = -1;
 		editor.search_direction = 1;
+	}
+
+	/* Update the all-match highlight query so editor_draw_rows()
+	 * can mark every visible occurrence during rendering. */
+	free(editor.search_highlight_query);
+	editor.search_highlight_query = (query[0] != '\0') ? strdup(query) : NULL;
+
+	/* Compile the regex when regex mode is enabled. Recompile on
+	 * every callback because the query changes incrementally. */
+	if (editor.search_regex_enabled) {
+		if (editor.search_regex_valid) {
+			regfree(&editor.search_regex_compiled);
+			editor.search_regex_valid = 0;
+		}
+		if (query[0] != '\0') {
+			int regex_flags = REG_EXTENDED;
+			if (editor.search_case_insensitive)
+				regex_flags |= REG_ICASE;
+			int rc = regcomp(&editor.search_regex_compiled, query, regex_flags);
+			if (rc != 0) {
+				char regex_error[STATUS_MESSAGE_SIZE];
+				regerror(rc, &editor.search_regex_compiled, regex_error, sizeof(regex_error));
+				editor_set_status_message("[regex error] %s", regex_error);
+				return;
+			}
+			editor.search_regex_valid = 1;
+		}
 	}
 
 	int current;
@@ -3601,6 +3849,11 @@ void editor_find_callback(char *query, int key)
 	int screen_middle = editor.screen_rows / 2;
 	size_t query_len = strlen(query);
 
+	/* Track whether the search wrapped past the end or start of
+	 * the file so we can show a [Wrapped] indicator. */
+	int wrapped = 0;
+	int start_line = current;
+
 	for (int i = 0; i < editor.line_count; i++) {
 		if (i == 0 && current != -1) {
 			/* First iteration: try to find another match on the
@@ -3609,10 +3862,21 @@ void editor_find_callback(char *query, int key)
 			current += editor.search_direction;
 			search_offset = -1;
 		}
-		if (current == -1)
+		if (current == -1) {
 			current = editor.line_count - 1;
-		else if (current == editor.line_count)
+			wrapped = 1;
+		} else if (current == editor.line_count) {
 			current = 0;
+			wrapped = 1;
+		}
+
+		/* Detect wrap when we cross the starting line */
+		if (i > 0 && !wrapped) {
+			if (editor.search_direction == 1 && current < start_line)
+				wrapped = 1;
+			else if (editor.search_direction == -1 && current > start_line)
+				wrapped = 1;
+		}
 
 		struct line *ln = &editor.lines[current];
 
@@ -3624,7 +3888,11 @@ void editor_find_callback(char *query, int key)
 		size_t byte_len;
 		const char *render;
 		int allocated = 0;
-		if (ln->temperature == LINE_COLD && editor.mmap_base) {
+
+		/* Regex search always needs a null-terminated string, so
+		 * skip the mmap fast path when regex is enabled. */
+		if (ln->temperature == LINE_COLD && editor.mmap_base
+		    && !editor.search_regex_enabled) {
 			render = editor.mmap_base + ln->mmap_offset;
 			byte_len = ln->mmap_length;
 		} else {
@@ -3632,26 +3900,11 @@ void editor_find_callback(char *query, int key)
 			render = line_to_bytes(ln, &byte_len);
 			allocated = 1;
 		}
-		char *match = NULL;
 		int case_flag = editor.search_case_insensitive;
-
-		if (editor.search_direction == 1) {
-			/* Forward: search after the previous match offset */
-			int start = (search_offset >= 0) ? search_offset + 1 : 0;
-			if (start < (int)byte_len)
-				match = editor_memmem(render + start, byte_len - start, query, query_len, case_flag);
-		} else {
-			/* Backward: find the last match before the offset */
-			int limit = (search_offset >= 0) ? search_offset : (int)byte_len;
-			const char *candidate = render;
-			while (candidate < render + limit) {
-				char *found = editor_memmem(candidate, (size_t)(render + limit - candidate), query, query_len, case_flag);
-				if (!found || found >= render + limit)
-					break;
-				match = found;
-				candidate = found + 1;
-			}
-		}
+		size_t match_length = query_len;
+		char *match = editor_find_on_line(render, byte_len, query, query_len,
+						  editor.search_direction, search_offset,
+						  case_flag, &match_length);
 
 		if (match) {
 			int match_byte_offset = (int)(match - render);
@@ -3680,15 +3933,15 @@ void editor_find_callback(char *query, int key)
 			}
 			editor.cursor_x = cell_index;
 
-			/* Count codepoints in query for highlight range */
-			int query_cell_count = 0;
+			/* Count codepoints in match for highlight range */
+			int match_cell_count = 0;
 			size_t qpos = 0;
-			while (qpos < query_len) {
+			while (qpos < match_length) {
 				uint32_t cp;
-				int consumed = utf8_decode(&query[qpos], (int)(query_len - qpos), &cp);
+				int consumed = utf8_decode(&match[qpos], (int)(match_length - qpos), &cp);
 				if (consumed <= 0) consumed = 1;
 				qpos += consumed;
-				query_cell_count++;
+				match_cell_count++;
 			}
 
 			/* Center the match on the screen */
@@ -3711,8 +3964,29 @@ void editor_find_callback(char *query, int key)
 			}
 			for (uint32_t k = 0; k < ln->cell_count; k++)
 				editor.search_saved_syntax[k] = ln->cells[k].syntax;
-			for (int k = 0; k < query_cell_count && cell_index + k < (int)ln->cell_count; k++)
+			for (int k = 0; k < match_cell_count && cell_index + k < (int)ln->cell_count; k++)
 				ln->cells[cell_index + k].syntax = HL_MATCH;
+
+			/* Count total matches and determine current index */
+			editor_count_search_matches(query, current, match_byte_offset);
+
+			/* Build the status message with match count and
+			 * optional wrap indicator. */
+			char match_status[STATUS_MESSAGE_SIZE];
+			if (wrapped)
+				snprintf(match_status, sizeof(match_status),
+					 "[Wrapped] Match %d of %d",
+					 editor.search_current_match_index,
+					 editor.search_total_matches);
+			else
+				snprintf(match_status, sizeof(match_status),
+					 "Match %d of %d",
+					 editor.search_current_match_index,
+					 editor.search_total_matches);
+			if (editor.search_regex_enabled)
+				editor_set_status_message("[regex] %s", match_status);
+			else
+				editor_set_status_message("%s", match_status);
 
 			free(warm_render);
 			break;
@@ -3722,15 +3996,53 @@ void editor_find_callback(char *query, int key)
 	}
 }
 
-/* Called when the user accepts a search result (Enter). Frees the query
- * string and leaves the cursor at the match position. */
+/* Adds a query to the search history ring, skipping if it duplicates
+ * the most recent entry. Shifts older entries out when the ring is full. */
+void editor_search_history_add(const char *query)
+{
+	if (!query || query[0] == '\0')
+		return;
+
+	/* Skip duplicates of the most recent entry */
+	if (editor.search_history_count > 0) {
+		char *last = editor.search_history[editor.search_history_count - 1];
+		if (last && strcmp(last, query) == 0)
+			return;
+	}
+
+	if (editor.search_history_count >= SEARCH_HISTORY_MAX) {
+		free(editor.search_history[0]);
+		memmove(&editor.search_history[0], &editor.search_history[1],
+			sizeof(char *) * (SEARCH_HISTORY_MAX - 1));
+		editor.search_history_count--;
+	}
+
+	editor.search_history[editor.search_history_count] = strdup(query);
+	if (editor.search_history[editor.search_history_count] == NULL)
+		return;
+	editor.search_history_count++;
+}
+
+/* Called when the user accepts a search result (Enter). Saves the query
+ * to the history, clears the highlight query, frees regex state, and
+ * leaves the cursor at the match position. */
 void editor_find_accept(char *query)
 {
+	editor_search_history_add(query);
+	free(editor.search_highlight_query);
+	editor.search_highlight_query = NULL;
+	if (editor.search_regex_valid) {
+		regfree(&editor.search_regex_compiled);
+		editor.search_regex_valid = 0;
+	}
+	free(editor.search_history_stash);
+	editor.search_history_stash = NULL;
 	free(query);
 }
 
 /* Called when the user cancels a search (ESC). Restores the cursor and
- * viewport to the position saved before the search started. */
+ * viewport to the position saved before the search started. Clears
+ * the highlight query and frees regex state. */
 void editor_find_cancel(void)
 {
 	editor.force_full_redraw = 1;
@@ -3738,10 +4050,19 @@ void editor_find_cancel(void)
 	editor.cursor_y = editor.saved_cursor_y;
 	editor.column_offset = editor.saved_column_offset;
 	editor.row_offset = editor.saved_row_offset;
+	free(editor.search_highlight_query);
+	editor.search_highlight_query = NULL;
+	if (editor.search_regex_valid) {
+		regfree(&editor.search_regex_compiled);
+		editor.search_regex_valid = 0;
+	}
+	free(editor.search_history_stash);
+	editor.search_history_stash = NULL;
 }
 
 /* Starts an incremental search. Saves cursor/viewport state and opens
- * the search prompt. */
+ * the search prompt. Resets the history browse index so up/down arrows
+ * cycle through previous queries. */
 void editor_find_start(void)
 {
 	editor.saved_cursor_x = editor.cursor_x;
@@ -3751,7 +4072,10 @@ void editor_find_start(void)
 	editor.search_last_match = -1;
 	editor.search_last_match_offset = -1;
 	editor.search_direction = 1;
-	prompt_open("Search: %s (ESC/Arrows/Enter, Alt+C=case)",
+	editor.search_history_browse_index = -1;
+	free(editor.search_history_stash);
+	editor.search_history_stash = NULL;
+	prompt_open("Search: %s (ESC/Enter, Alt+C=case, Alt+X=regex)",
 		    editor_find_callback, editor_find_accept, editor_find_cancel);
 }
 
@@ -4221,6 +4545,106 @@ void editor_update_scroll_speed(void)
 	editor.last_scroll_time = current_time;
 }
 
+/* Highlights all occurrences of the search query in a line by setting
+ * matching cells to HL_MATCH. When regex mode is active, uses regexec()
+ * on the byte string; otherwise scans with editor_memmem(). Stores
+ * original syntax values into saved_syntax (must be pre-allocated with
+ * at least line->cell_count entries). Returns the number of cells
+ * whose syntax was modified so the caller can restore them later. */
+int editor_highlight_search_matches(struct line *line, uint16_t *saved_syntax)
+{
+	if (!editor.search_highlight_query || editor.search_highlight_query[0] == '\0')
+		return 0;
+
+	line_ensure_warm(line);
+	int modified = 0;
+
+	/* Save original syntax values */
+	for (uint32_t i = 0; i < line->cell_count; i++)
+		saved_syntax[i] = line->cells[i].syntax;
+
+	size_t byte_length;
+	char *bytes = line_to_bytes(line, &byte_length);
+
+	/* Build byte-to-cell mapping */
+	int *byte_to_cell = malloc(sizeof(int) * (byte_length + 1));
+	if (byte_to_cell == NULL) {
+		free(bytes);
+		return 0;
+	}
+	size_t byte_position = 0;
+	int cell_index = 0;
+	while (byte_position < byte_length && (uint32_t)cell_index < line->cell_count) {
+		byte_to_cell[byte_position] = cell_index;
+		uint32_t codepoint;
+		int consumed = utf8_decode(&bytes[byte_position], (int)(byte_length - byte_position), &codepoint);
+		if (consumed <= 0)
+			consumed = 1;
+		for (int k = 1; k < consumed && byte_position + k < byte_length; k++)
+			byte_to_cell[byte_position + k] = cell_index;
+		byte_position += consumed;
+		cell_index++;
+	}
+	byte_to_cell[byte_length] = cell_index;
+
+	size_t query_length = strlen(editor.search_highlight_query);
+	int case_flag = editor.search_case_insensitive;
+
+	if (editor.search_regex_enabled && editor.search_regex_valid) {
+		/* Regex search path */
+		regmatch_t match_info;
+		size_t offset = 0;
+		while (offset < byte_length) {
+			int result = regexec(&editor.search_regex_compiled,
+					     bytes + offset, 1, &match_info, 0);
+			if (result != 0 || match_info.rm_so < 0)
+				break;
+			size_t match_start = offset + (size_t)match_info.rm_so;
+			size_t match_end = offset + (size_t)match_info.rm_eo;
+			if (match_start >= byte_length)
+				break;
+			/* Zero-length match: advance by one byte to avoid infinite loop */
+			if (match_end == match_start) {
+				offset = match_start + 1;
+				continue;
+			}
+			int start_cell = (match_start < byte_length) ? byte_to_cell[match_start] : cell_index;
+			int end_cell = (match_end <= byte_length) ? byte_to_cell[match_end] : cell_index;
+			for (int k = start_cell; k < end_cell && (uint32_t)k < line->cell_count; k++) {
+				line->cells[k].syntax = HL_MATCH;
+				modified = 1;
+			}
+			offset = match_end;
+		}
+	} else {
+		/* Literal search path */
+		const char *search_position = bytes;
+		size_t remaining = byte_length;
+		while (remaining >= query_length) {
+			char *found = editor_memmem(search_position, remaining,
+						    editor.search_highlight_query,
+						    query_length, case_flag);
+			if (!found)
+				break;
+			size_t match_byte_offset = (size_t)(found - bytes);
+			size_t match_end_offset = match_byte_offset + query_length;
+			int start_cell = byte_to_cell[match_byte_offset];
+			int end_cell = (match_end_offset <= byte_length)
+				? byte_to_cell[match_end_offset] : cell_index;
+			for (int k = start_cell; k < end_cell && (uint32_t)k < line->cell_count; k++) {
+				line->cells[k].syntax = HL_MATCH;
+				modified = 1;
+			}
+			search_position = found + 1;
+			remaining = byte_length - (size_t)(search_position - bytes);
+		}
+	}
+
+	free(byte_to_cell);
+	free(bytes);
+	return modified;
+}
+
 /* Renders all visible rows to the append buffer, including line numbers,
  * syntax-highlighted text, and the welcome message for empty files. Applies
  * background colors, bold formatting for keywords, and handles control
@@ -4265,6 +4689,18 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 
 			struct line *ln = &editor.lines[file_row];
 			line_ensure_warm(ln);
+
+			/* When a search is active, highlight all matching
+			 * cells on this line. Save their original syntax so
+			 * we can restore it after rendering. */
+			uint16_t *search_saved = NULL;
+			int search_modified = 0;
+			if (editor.search_highlight_query) {
+				search_saved = malloc(sizeof(uint16_t) * (ln->cell_count + 1));
+				if (search_saved)
+					search_modified = editor_highlight_search_matches(ln, search_saved);
+			}
+
 			int render_width = line_render_width(ln);
 			int visible_length = render_width - editor.column_offset;
 			if (visible_length < 0)
@@ -4366,6 +4802,15 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 				col += cw;
 				ci = (uint32_t)grapheme_end;
 			}
+
+			/* Restore original syntax values after rendering if
+			 * search highlighting was applied to this line. */
+			if (search_modified && search_saved) {
+				for (uint32_t k = 0; k < ln->cell_count; k++)
+					ln->cells[k].syntax = search_saved[k];
+			}
+			free(search_saved);
+
 			append_buffer_write_color(
 					append_buffer, editor.theme.foreground);
 		}
@@ -4562,12 +5007,32 @@ void prompt_open(char *format, void (*per_key_callback)(char *, int),
 /* Handles a keypress while in MODE_PROMPT. Processes backspace, ESC,
  * Enter, and printable characters. Calls per_key_callback after each
  * keypress, and on_accept/on_cancel on Enter/ESC. */
+/* Replaces the prompt buffer contents with the given string, updating
+ * the buffer length and capacity as needed. Used by search history
+ * browsing to swap in a previous query. */
+void prompt_set_buffer(const char *text)
+{
+	size_t length = strlen(text);
+	while (length >= editor.prompt.buffer_capacity - 1) {
+		editor.prompt.buffer_capacity *= 2;
+		editor.prompt.buffer = realloc(editor.prompt.buffer,
+					       editor.prompt.buffer_capacity);
+		if (editor.prompt.buffer == NULL)
+			terminal_die("realloc");
+	}
+	memcpy(editor.prompt.buffer, text, length);
+	editor.prompt.buffer[length] = '\0';
+	editor.prompt.buffer_length = length;
+}
+
 void prompt_handle_key(struct input_event event)
 {
 	int key = event.key;
+	int is_search = (editor.prompt.per_key_callback == editor_find_callback);
+
 	/* Alt+C during search toggles case sensitivity. Only active when
 	 * the per-key callback is the incremental search handler. */
-	if (key == ALT_KEY('c') && editor.prompt.per_key_callback == editor_find_callback) {
+	if (key == ALT_KEY('c') && is_search) {
 		editor.search_case_insensitive = !editor.search_case_insensitive;
 		editor_set_status_message("Search: %s [case %s]",
 					 editor.prompt.buffer,
@@ -4575,6 +5040,56 @@ void prompt_handle_key(struct input_event event)
 		/* Re-run the search with the new case setting */
 		if (editor.prompt.per_key_callback)
 			editor.prompt.per_key_callback(editor.prompt.buffer, key);
+		return;
+	}
+	/* Alt+X during search toggles regex mode. */
+	if (key == ALT_KEY('x') && is_search) {
+		editor.search_regex_enabled = !editor.search_regex_enabled;
+		editor_set_status_message("Search: %s [regex %s]",
+					 editor.prompt.buffer,
+					 editor.search_regex_enabled ? "on" : "off");
+		/* Re-run the search with the new regex setting */
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(editor.prompt.buffer, key);
+		return;
+	}
+	/* Up/Down arrows during search browse through search history.
+	 * The current typed text is stashed so the user can return to
+	 * it by pressing down past the end of the history. */
+	if ((key == ARROW_UP || key == ARROW_DOWN) && is_search) {
+		if (editor.search_history_count > 0) {
+			if (key == ARROW_UP) {
+				if (editor.search_history_browse_index == -1) {
+					/* Stash the current typed text before
+					 * entering history browsing. */
+					free(editor.search_history_stash);
+					editor.search_history_stash = strdup(editor.prompt.buffer);
+					editor.search_history_browse_index = editor.search_history_count - 1;
+				} else if (editor.search_history_browse_index > 0) {
+					editor.search_history_browse_index--;
+				}
+				prompt_set_buffer(editor.search_history[editor.search_history_browse_index]);
+			} else {
+				if (editor.search_history_browse_index >= 0 &&
+				    editor.search_history_browse_index < editor.search_history_count - 1) {
+					editor.search_history_browse_index++;
+					prompt_set_buffer(editor.search_history[editor.search_history_browse_index]);
+				} else if (editor.search_history_browse_index == editor.search_history_count - 1) {
+					/* Past the end: restore the stashed text */
+					editor.search_history_browse_index = -1;
+					if (editor.search_history_stash)
+						prompt_set_buffer(editor.search_history_stash);
+					else
+						prompt_set_buffer("");
+				}
+			}
+		}
+		/* Re-run the search with the new buffer contents */
+		editor.search_last_match = -1;
+		editor.search_last_match_offset = -1;
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(editor.prompt.buffer, key);
+		editor_set_status_message(editor.prompt.format, editor.prompt.buffer);
 		return;
 	}
 	if (key == DEL_KEY || key == CTRL_KEY('h') || key == BACKSPACE) {
@@ -5195,6 +5710,16 @@ void editor_init(void)
 	editor.search_saved_syntax = NULL;
 	editor.search_saved_syntax_count = 0;
 	editor.search_case_insensitive = 0;
+	editor.search_highlight_query = NULL;
+	editor.search_total_matches = 0;
+	editor.search_current_match_index = 0;
+	editor.search_regex_enabled = 0;
+	editor.search_regex_valid = 0;
+	editor.search_history_count = 0;
+	editor.search_history_browse_index = -1;
+	editor.search_history_stash = NULL;
+	for (int i = 0; i < SEARCH_HISTORY_MAX; i++)
+		editor.search_history[i] = NULL;
 
 	editor.replace_query = NULL;
 	editor.replace_with = NULL;
