@@ -134,6 +134,9 @@ struct line {
 	uint32_t mmap_length;
 	/* Temperature level for lazy loading (line_temperature enum). */
 	int temperature;
+	/* When set, syntax highlighting must be recomputed before rendering.
+	 * Avoids warming all lines just to highlight them at file open. */
+	int syntax_stale;
 };
 
 /* Bit flags stored in struct cell.flags for rendering state. */
@@ -1212,10 +1215,11 @@ void syntax_select_highlight(void)
 				for (int k = 0; k < keyword_count; k++)
 					syntax->keyword_lengths[k] = (int)strlen(syntax->keywords[k]);
 
-				for (int file_row = 0; file_row < editor.line_count; file_row++) {
-					int prev_open = (file_row > 0) ? editor.lines[file_row - 1].open_comment : 0;
-					line_update_syntax(&editor.lines[file_row], prev_open);
-				}
+				/* Mark all lines as needing syntax recomputation.
+				 * Actual highlighting is deferred to line_ensure_warm()
+				 * so only visible lines pay the cost. */
+				for (int file_row = 0; file_row < editor.line_count; file_row++)
+					editor.lines[file_row].syntax_stale = 1;
 
 				return;
 			}
@@ -1238,6 +1242,7 @@ void line_init(struct line *line, int index)
 	line->mmap_offset = 0;
 	line->mmap_length = 0;
 	line->temperature = LINE_HOT;
+	line->syntax_stale = 1;
 }
 /* Frees the cell array and zeroes all fields. */
 void line_free(struct line *line)
@@ -1248,6 +1253,7 @@ void line_free(struct line *line)
 	line->cell_count = 0;
 	line->cell_capacity = 0;
 	line->temperature = LINE_COLD;
+	line->syntax_stale = 1;
 }
 void line_ensure_warm(struct line *line);
 /* Ensures the cell array has room for at least 'needed' cells.
@@ -1294,20 +1300,43 @@ void line_populate_from_bytes(struct line *line, const char *bytes, size_t lengt
 	line->cell_count = count;
 }
 
-/* Warms a COLD line by decoding its mmap bytes into cells.
- * Must be called before any cell access on a potentially cold line. */
+/* Warms a COLD line by decoding its mmap bytes into cells. Also applies
+ * deferred syntax highlighting if the line is marked stale. For correct
+ * multi-line comment state, ensures the previous line's open_comment is
+ * available by warming it first if needed (bounded by comment regions). */
 void line_ensure_warm(struct line *line)
 {
-	if (line->temperature != LINE_COLD)
-		return;
-	line->cells = malloc(sizeof(struct cell) * LINE_INITIAL_CAPACITY);
-	if (line->cells == NULL)
-		terminal_die("malloc");
-	line->cell_capacity = LINE_INITIAL_CAPACITY;
-	line->cell_count = 0;
-	line->temperature = LINE_WARM;
-	line_populate_from_bytes(line, editor.mmap_base + line->mmap_offset,
-							line->mmap_length);
+	if (line->temperature == LINE_COLD) {
+		line->cells = malloc(sizeof(struct cell) * LINE_INITIAL_CAPACITY);
+		if (line->cells == NULL)
+			terminal_die("malloc");
+		line->cell_capacity = LINE_INITIAL_CAPACITY;
+		line->cell_count = 0;
+		line->temperature = LINE_WARM;
+		line_populate_from_bytes(line, editor.mmap_base + line->mmap_offset,
+					line->mmap_length);
+	}
+
+	/* Apply deferred syntax highlighting on first access. Resolves the
+	 * previous line's open_comment state so multi-line comments render
+	 * correctly even when lines are warmed out of order. Clear the flag
+	 * before calling line_update_syntax() to prevent re-entry: that
+	 * function calls line_ensure_warm() on this same line. */
+	if (line->syntax_stale && editor.syntax) {
+		line->syntax_stale = 0;
+		int index = line->line_index;
+		int prev_open = 0;
+		if (index > 0) {
+			struct line *prev = &editor.lines[index - 1];
+			/* Warming the previous line recursively resolves its
+			 * own syntax and open_comment state. In practice the
+			 * recursion is bounded by multi-line comment length. */
+			if (prev->syntax_stale)
+				line_ensure_warm(prev);
+			prev_open = prev->open_comment;
+		}
+		line_update_syntax(line, prev_open);
+	}
 }
 
 /* Converts a line's cells to a UTF-8 byte string. Caller frees. */
@@ -1706,13 +1735,33 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 	return changed;
 }
 /* Propagates syntax highlighting forward from the given line until
- * the open_comment state stabilizes. */
+ * the open_comment state stabilizes. For WARM/HOT lines, runs the
+ * full syntax update. For COLD lines, updates open_comment directly
+ * and marks them stale so highlighting happens when they are warmed.
+ * Stops at COLD lines whose open_comment already matches because
+ * the input comment state hasn't changed so no further propagation
+ * is needed -- the line will be re-highlighted when it warms. */
 void syntax_propagate(int from_line)
 {
 	for (int i = from_line; i < editor.line_count; i++) {
 		int prev_open = (i > 0) ? editor.lines[i - 1].open_comment : 0;
-		if (!line_update_syntax(&editor.lines[i], prev_open))
+		struct line *ln = &editor.lines[i];
+
+		if (ln->temperature == LINE_COLD) {
+			/* If the incoming comment state already matches what
+			 * this COLD line expects, the propagation has reached
+			 * a stable point. The line will compute its own syntax
+			 * correctly when eventually warmed. */
+			if (ln->open_comment == prev_open)
+				break;
+			ln->open_comment = prev_open;
+			ln->syntax_stale = 1;
+			continue;
+		}
+
+		if (!line_update_syntax(ln, prev_open))
 			break;
+		ln->syntax_stale = 0;
 	}
 }
 /* Recalculates the number of columns reserved for the line number gutter
@@ -2824,6 +2873,7 @@ int editor_open_mmap(char *filename)
 		ln->mmap_offset = (size_t)(line_start - base);
 		ln->mmap_length = (uint32_t)line_len;
 		ln->temperature = LINE_COLD;
+		ln->syntax_stale = 1;
 		editor.line_count++;
 
 		pos = newline + 1;
@@ -2846,6 +2896,7 @@ int editor_open_mmap(char *filename)
 		ln->mmap_offset = (size_t)(line_start - base);
 		ln->mmap_length = (uint32_t)line_len;
 		ln->temperature = LINE_COLD;
+		ln->syntax_stale = 1;
 		editor.line_count++;
 	}
 
@@ -3335,23 +3386,36 @@ void editor_find_callback(char *query, int key)
 			current = 0;
 
 		struct line *ln = &editor.lines[current];
-		line_ensure_warm(ln);
-		/* Convert line to bytes for strstr matching */
+
+		/* For COLD lines with a valid mmap, search directly in the
+		 * mapped bytes to avoid allocating and freeing a buffer per
+		 * line. This makes search on large unedited files essentially
+		 * zero-allocation. Uses memmem() instead of strstr() because
+		 * the mmap region is not null-terminated per line. */
 		size_t byte_len;
-		char *render = line_to_bytes(ln, &byte_len);
+		const char *render;
+		int allocated = 0;
+		if (ln->temperature == LINE_COLD && editor.mmap_base) {
+			render = editor.mmap_base + ln->mmap_offset;
+			byte_len = ln->mmap_length;
+		} else {
+			line_ensure_warm(ln);
+			render = line_to_bytes(ln, &byte_len);
+			allocated = 1;
+		}
 		char *match = NULL;
 
 		if (editor.search_direction == 1) {
 			/* Forward: search after the previous match offset */
 			int start = (search_offset >= 0) ? search_offset + 1 : 0;
 			if (start < (int)byte_len)
-				match = strstr(render + start, query);
+				match = memmem(render + start, byte_len - start, query, query_len);
 		} else {
 			/* Backward: find the last match before the offset */
 			int limit = (search_offset >= 0) ? search_offset : (int)byte_len;
-			char *candidate = render;
+			const char *candidate = render;
 			while (candidate < render + limit) {
-				char *found = strstr(candidate, query);
+				char *found = memmem(candidate, (size_t)(render + limit - candidate), query, query_len);
 				if (!found || found >= render + limit)
 					break;
 				match = found;
@@ -3365,13 +3429,21 @@ void editor_find_callback(char *query, int key)
 			editor.search_last_match_offset = match_byte_offset;
 			editor.cursor_y = current;
 
+			/* Warm the line now that we need cell-level access
+			 * for cursor positioning and highlight painting. */
+			if (allocated)
+				free((char *)render);
+			allocated = 0;
+			line_ensure_warm(ln);
+			char *warm_render = line_to_bytes(ln, &byte_len);
+
 			/* Convert byte offset to cell index by counting
 			 * codepoints in the bytes before the match. */
 			int cell_index = 0;
 			size_t byte_pos = 0;
 			while ((int)byte_pos < match_byte_offset && (uint32_t)cell_index < ln->cell_count) {
 				uint32_t cp;
-				int consumed = utf8_decode(&render[byte_pos], (int)(byte_len - byte_pos), &cp);
+				int consumed = utf8_decode(&warm_render[byte_pos], (int)(byte_len - byte_pos), &cp);
 				if (consumed <= 0) consumed = 1;
 				byte_pos += consumed;
 				cell_index++;
@@ -3404,7 +3476,7 @@ void editor_find_callback(char *query, int key)
 			editor.search_saved_syntax_count = ln->cell_count;
 			editor.search_saved_syntax = malloc(sizeof(uint16_t) * ln->cell_count);
 			if (editor.search_saved_syntax == NULL) {
-				free(render);
+				free(warm_render);
 				break;
 			}
 			for (uint32_t k = 0; k < ln->cell_count; k++)
@@ -3412,10 +3484,11 @@ void editor_find_callback(char *query, int key)
 			for (int k = 0; k < query_cell_count && cell_index + k < (int)ln->cell_count; k++)
 				ln->cells[cell_index + k].syntax = HL_MATCH;
 
-			free(render);
+			free(warm_render);
 			break;
 		}
-		free(render);
+		if (allocated)
+			free((char *)render);
 	}
 }
 
