@@ -330,6 +330,9 @@ struct editor_syntax {
 	char **filematch;
 	/* NULL-terminated array of keywords. Type keywords end with '|'. */
 	char **keywords;
+	/* Pre-computed lengths of each keyword string, populated when syntax
+	 * is selected. Avoids calling strlen() on every word boundary. */
+	int *keyword_lengths;
 	/* Characters that begin a single-line comment (e.g., "//"). */
 	char *singleline_comment_start;
 	/* Characters that begin a multi-line comment. */
@@ -470,6 +473,16 @@ struct editor_state {
 	int viewing_help;
 	/* Saved state for returning from a temporary view. */
 	struct editor_snapshot snapshot;
+	/* Reusable scratch buffer for building byte strings during syntax
+	 * highlighting. Grows as needed, never freed during normal operation. */
+	char *scratch_buffer;
+	/* Allocated size of the scratch buffer in bytes. */
+	size_t scratch_capacity;
+	/* Reusable scratch array mapping cell indices to byte offsets during
+	 * syntax highlighting. Grows as needed, never freed during normal operation. */
+	int *scratch_offsets;
+	/* Allocated capacity of the scratch offsets array (number of int slots). */
+	size_t scratch_offsets_capacity;
 };
 
 /* Global editor state. */
@@ -515,7 +528,7 @@ char *c_highlight_keywords[] = {
 
 /* Registry of all supported file types and their highlighting rules. */
 struct editor_syntax syntax_highlight_database[] = {
-	{"c", c_highlight_extensions, c_highlight_keywords, "//", "/*", "*/",
+	{"c", c_highlight_extensions, c_highlight_keywords, NULL, "//", "/*", "*/",
 		HL_HIGHLIGHT_NUMBERS | HL_HIGHLIGHT_STRINGS},
 };
 
@@ -1187,6 +1200,18 @@ void syntax_select_highlight(void)
 					(!is_extension && strstr(editor.filename, syntax->filematch[i]))) {
 				editor.syntax = syntax;
 
+				/* Pre-compute keyword lengths so line_update_syntax()
+				 * can skip strlen() on every word boundary. */
+				free(syntax->keyword_lengths);
+				int keyword_count = 0;
+				while (syntax->keywords[keyword_count])
+					keyword_count++;
+				syntax->keyword_lengths = malloc(sizeof(int) * keyword_count);
+				if (syntax->keyword_lengths == NULL)
+					terminal_die("malloc");
+				for (int k = 0; k < keyword_count; k++)
+					syntax->keyword_lengths[k] = (int)strlen(syntax->keywords[k]);
+
 				for (int file_row = 0; file_row < editor.line_count; file_row++) {
 					int prev_open = (file_row > 0) ? editor.lines[file_row - 1].open_comment : 0;
 					line_update_syntax(&editor.lines[file_row], prev_open);
@@ -1540,18 +1565,38 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 	int in_string = 0;
 	int in_comment = prev_open_comment;
 
-	/* Build a temporary byte string for keyword/comment matching */
-	size_t byte_len;
-	char *render = line_to_bytes(line, &byte_len);
+	/* Build a byte string for keyword/comment matching, reusing the
+	 * editor's scratch buffer to avoid malloc/free on every line. */
+	size_t max_byte_size = (size_t)line->cell_count * UTF8_MAX_BYTES + 1;
+	if (max_byte_size > editor.scratch_capacity) {
+		editor.scratch_capacity = max_byte_size * 2;
+		editor.scratch_buffer = realloc(editor.scratch_buffer,
+						editor.scratch_capacity);
+		if (editor.scratch_buffer == NULL)
+			terminal_die("realloc");
+	}
+	char *render = editor.scratch_buffer;
+	size_t byte_len = 0;
+	for (uint32_t k = 0; k < line->cell_count; k++) {
+		int written = utf8_encode(line->cells[k].codepoint,
+					  &render[byte_len]);
+		byte_len += written;
+	}
+	render[byte_len] = '\0';
 
 	/* Build cell-to-byte offset map so cell index i maps to render position.
+	 * Reuses the editor's scratch offsets array to avoid per-line allocation.
 	 * Needed because multi-byte UTF-8 characters make cell indices diverge
 	 * from byte offsets. */
-	int *byte_offsets = malloc(sizeof(int) * (line->cell_count + 1));
-	if (byte_offsets == NULL) {
-		free(render);
-		terminal_die("malloc");
+	size_t offsets_needed = (size_t)line->cell_count + 1;
+	if (offsets_needed > editor.scratch_offsets_capacity) {
+		editor.scratch_offsets_capacity = offsets_needed * 2;
+		editor.scratch_offsets = realloc(editor.scratch_offsets,
+						 sizeof(int) * editor.scratch_offsets_capacity);
+		if (editor.scratch_offsets == NULL)
+			terminal_die("realloc");
 	}
+	int *byte_offsets = editor.scratch_offsets;
 	int bpos = 0;
 	for (uint32_t k = 0; k < line->cell_count; k++) {
 		byte_offsets[k] = bpos;
@@ -1631,8 +1676,9 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 
 		if (previous_separator) {
 			int j;
+			int *keyword_lengths = editor.syntax->keyword_lengths;
 			for (j = 0; keywords[j]; j++) {
-				int keyword_length = strlen(keywords[j]);
+				int keyword_length = keyword_lengths[j];
 				int is_type_keyword = keywords[j][keyword_length - 1] == '|';
 				if (is_type_keyword)
 					keyword_length--;
@@ -1654,9 +1700,6 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 		previous_separator = syntax_is_separator(current_cp);
 		i++;
 	}
-
-	free(byte_offsets);
-	free(render);
 
 	int changed = (line->open_comment != in_comment);
 	line->open_comment = in_comment;
@@ -2742,35 +2785,18 @@ int editor_open_mmap(char *filename)
 	editor.mmap_size = (size_t)file_size;
 	fd = -1;
 
-	/* Scan for newlines to build line index */
-	size_t line_start = 0;
-	for (size_t i = 0; i < (size_t)file_size; i++) {
-		if (base[i] == '\n') {
-			size_t line_len = i - line_start;
-			/* Strip trailing \r */
-			if (line_len > 0 && base[line_start + line_len - 1] == '\r')
-				line_len--;
+	/* Hint the kernel to read ahead sequentially during the line scan. */
+	madvise(base, (size_t)file_size, MADV_SEQUENTIAL);
 
-			editor_lines_ensure_capacity(editor.line_count + 1);
-			struct line *ln = &editor.lines[editor.line_count];
-			ln->cells = NULL;
-			ln->cell_count = 0;
-			ln->cell_capacity = 0;
-			ln->line_index = editor.line_count;
-			ln->open_comment = 0;
-			ln->mmap_offset = line_start;
-			ln->mmap_length = (uint32_t)line_len;
-			ln->temperature = LINE_COLD;
-			editor.line_count++;
-
-			line_start = i + 1;
-		}
-	}
-
-	/* Handle last line without trailing newline */
-	if (line_start < (size_t)file_size) {
-		size_t line_len = (size_t)file_size - line_start;
-		if (line_len > 0 && base[line_start + line_len - 1] == '\r')
+	/* Scan for newlines using memchr for SIMD-accelerated searching. */
+	const char *pos = base;
+	const char *end = base + file_size;
+	const char *line_start = base;
+	const char *newline;
+	while ((newline = memchr(pos, '\n', (size_t)(end - pos))) != NULL) {
+		size_t line_len = (size_t)(newline - line_start);
+		/* Strip trailing \r */
+		if (line_len > 0 && line_start[line_len - 1] == '\r')
 			line_len--;
 
 		editor_lines_ensure_capacity(editor.line_count + 1);
@@ -2780,11 +2806,36 @@ int editor_open_mmap(char *filename)
 		ln->cell_capacity = 0;
 		ln->line_index = editor.line_count;
 		ln->open_comment = 0;
-		ln->mmap_offset = line_start;
+		ln->mmap_offset = (size_t)(line_start - base);
+		ln->mmap_length = (uint32_t)line_len;
+		ln->temperature = LINE_COLD;
+		editor.line_count++;
+
+		pos = newline + 1;
+		line_start = pos;
+	}
+
+	/* Handle last line without trailing newline */
+	if (line_start < end) {
+		size_t line_len = (size_t)(end - line_start);
+		if (line_len > 0 && line_start[line_len - 1] == '\r')
+			line_len--;
+
+		editor_lines_ensure_capacity(editor.line_count + 1);
+		struct line *ln = &editor.lines[editor.line_count];
+		ln->cells = NULL;
+		ln->cell_count = 0;
+		ln->cell_capacity = 0;
+		ln->line_index = editor.line_count;
+		ln->open_comment = 0;
+		ln->mmap_offset = (size_t)(line_start - base);
 		ln->mmap_length = (uint32_t)line_len;
 		ln->temperature = LINE_COLD;
 		editor.line_count++;
 	}
+
+	/* Switch to random-access hint now that line scanning is complete. */
+	madvise(editor.mmap_base, editor.mmap_size, MADV_RANDOM);
 
 out:
 	if (fd != -1)
@@ -3052,6 +3103,10 @@ void editor_quit(void)
 
 	/* Free the filename */
 	free(editor.filename);
+
+	/* Free syntax highlighting scratch buffers */
+	free(editor.scratch_buffer);
+	free(editor.scratch_offsets);
 }
 
 /*** Help ***/
@@ -3457,26 +3512,50 @@ void append_buffer_free(struct append_buffer *append_buffer)
 	free(append_buffer->buffer);
 }
 
-/* Writes a 24-bit foreground color escape sequence to the append buffer.
- * Parses the hex color string (e.g., "FF0000") into RGB components and
- * formats the ANSI escape sequence. */
-void append_buffer_write_color(struct append_buffer *append_buffer, const char *hex_color)
+/* Pre-parsed RGB color value. Avoids repeated sscanf() during rendering. */
+struct rgb {
+	uint8_t r, g, b;
+};
+
+/* Parses a hex color string like "FF00FF" into an rgb struct. */
+struct rgb rgb_parse(const char *hex)
 {
 	unsigned int red, green, blue;
-	sscanf(hex_color, "%02x%02x%02x", &red, &green, &blue);
+	sscanf(hex, "%02x%02x%02x", &red, &green, &blue);
+	return (struct rgb){ .r = (uint8_t)red, .g = (uint8_t)green, .b = (uint8_t)blue };
+}
+
+/* Writes a 24-bit foreground color escape sequence to the append buffer.
+ * Caches the last parsed hex color to avoid redundant sscanf() calls
+ * when the same color pointer is used consecutively. */
+void append_buffer_write_color(struct append_buffer *append_buffer, const char *hex_color)
+{
+	static const char *last_hex = NULL;
+	static struct rgb last_rgb;
+	if (hex_color != last_hex) {
+		last_rgb = rgb_parse(hex_color);
+		last_hex = hex_color;
+	}
 	char color_sequence[COLOR_SEQUENCE_SIZE];
-	snprintf(color_sequence, sizeof(color_sequence), COLOR_FG_FORMAT, red, green, blue);
+	snprintf(color_sequence, sizeof(color_sequence), COLOR_FG_FORMAT,
+		 last_rgb.r, last_rgb.g, last_rgb.b);
 	append_buffer_write(append_buffer, color_sequence, strlen(color_sequence));
 }
 
 /* Writes a 24-bit background color escape sequence to the append buffer.
- * Works like append_buffer_write_color() but sets the background instead. */
+ * Caches the last parsed hex color to skip sscanf() on repeated calls
+ * with the same color pointer. */
 void append_buffer_write_background(struct append_buffer *append_buffer, const char *hex_color)
 {
-	unsigned int red, green, blue;
-	sscanf(hex_color, "%02x%02x%02x", &red, &green, &blue);
+	static const char *last_hex = NULL;
+	static struct rgb last_rgb;
+	if (hex_color != last_hex) {
+		last_rgb = rgb_parse(hex_color);
+		last_hex = hex_color;
+	}
 	char color_sequence[COLOR_SEQUENCE_SIZE];
-	snprintf(color_sequence, sizeof(color_sequence), COLOR_BG_FORMAT, red, green, blue);
+	snprintf(color_sequence, sizeof(color_sequence), COLOR_BG_FORMAT,
+		 last_rgb.r, last_rgb.g, last_rgb.b);
 	append_buffer_write(append_buffer, color_sequence, strlen(color_sequence));
 }
 
@@ -4475,6 +4554,10 @@ void editor_init(void)
 	undo_stack_init(&editor.undo);
 	editor.viewing_help = 0;
 	editor.snapshot = (struct editor_snapshot){0};
+	editor.scratch_buffer = NULL;
+	editor.scratch_capacity = 0;
+	editor.scratch_offsets = NULL;
+	editor.scratch_offsets_capacity = 0;
 }
 
 /* Entry point. Sets up the terminal (mouse reporting, raw mode), initializes
