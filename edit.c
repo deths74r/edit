@@ -2732,8 +2732,23 @@ char *editor_rows_to_string(size_t *buffer_length)
 	char *buffer = NULL;
 
 	for (int j = 0; j < editor.line_count; j++) {
+		struct line *line = &editor.lines[j];
 		size_t byte_len;
-		char *bytes = line_to_bytes(&editor.lines[j], &byte_len);
+		const char *bytes;
+		char *allocated_bytes = NULL;
+
+		/* COLD lines still have their original mmap content, so copy
+		 * directly from the mmap region without warming the line. This
+		 * avoids a massive memory spike when saving large files where
+		 * only a few lines were edited. */
+		if (line->temperature == LINE_COLD && editor.mmap_base) {
+			bytes = editor.mmap_base + line->mmap_offset;
+			byte_len = line->mmap_length;
+		} else {
+			allocated_bytes = line_to_bytes(line, &byte_len);
+			bytes = allocated_bytes;
+		}
+
 		size_t needed = total_length + byte_len + 1;
 		if (needed > capacity) {
 			capacity = needed * 2;
@@ -2742,7 +2757,7 @@ char *editor_rows_to_string(size_t *buffer_length)
 		}
 		memcpy(buffer + total_length, bytes, byte_len);
 		total_length += byte_len;
-		free(bytes);
+		free(allocated_bytes);
 		buffer[total_length] = '\n';
 		total_length++;
 	}
