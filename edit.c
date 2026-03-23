@@ -897,13 +897,27 @@ struct input_event terminal_decode_key(void)
 						return (struct input_event){.key = END_KEY};
 					}
 				} else if (sequence[2] == ';') {
-					/* CSI 1;modifierX — Shift/Ctrl+Arrow etc */
+					/* CSI N;modifierX — Shift/Ctrl modified keys.
+					 * N is in sequence[1], modifier follows ';',
+					 * final byte is letter (arrows/home/end) or
+					 * '~' (rxvt-style function keys). */
 					unsigned char modifier_byte, final_byte;
 					if (!input_buffer_read_byte(&modifier_byte))
 						return (struct input_event){.key = ESC_KEY};
 					if (!input_buffer_read_byte(&final_byte))
 						return (struct input_event){.key = ESC_KEY};
 					int modifier = modifier_byte - '0';
+					/* Handle ~-terminated sequences: \x1b[N;M~
+					 * Map N to the base key, then apply modifier. */
+					if (final_byte == '~' && modifier == 2) {
+						switch (sequence[1]) {
+						case '1': case '7':
+							return (struct input_event){.key = SHIFT_HOME_KEY};
+						case '4': case '8':
+							return (struct input_event){.key = SHIFT_END_KEY};
+						}
+					}
+					/* Handle letter-terminated sequences: \x1b[1;MX */
 					if (modifier == 2) {
 						switch (final_byte) {
 						case 'A': return (struct input_event){.key = SHIFT_ARROW_UP};
