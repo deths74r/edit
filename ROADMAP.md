@@ -51,18 +51,19 @@
 
 ### Performance
 
-- [ ] **Lazy syntax highlighting** — only highlight viewport + margin, not all lines on open. `syntax_select_highlight()` currently warms every line, negating the COLD/WARM/HOT design.
+- [x] **Lazy syntax highlighting** — deferred to line_ensure_warm(), syntax_stale flag, COLD lines stay COLD
 - [ ] **Dirty region tracking** — cursor-only movement emits ~12 bytes instead of full screen redraw
-- [ ] **Zero-copy search on COLD lines** — `memmem()` directly on mmap bytes, zero allocation for unedited files
-- [ ] **`memchr()`-based newline scan** — replace byte-at-a-time loop with glibc's SIMD-accelerated `memchr()`
-- [ ] **Pre-parsed theme colors** — eliminate `sscanf()` from the render hot path
-- [ ] **ASCII fast path for syntax** — skip `line_to_bytes()` allocation when all codepoints < 128
-- [ ] **Scratch buffers** — reusable buffers for syntax highlighting instead of per-line malloc/free
-- [ ] **`madvise()` hints** — `MADV_SEQUENTIAL` during newline scan, `MADV_RANDOM` after
+- [x] **Zero-copy search on COLD lines** — memmem() directly on mmap bytes, zero allocation
+- [x] **`memchr()`-based newline scan** — glibc SIMD-accelerated memchr() for file open
+- [x] **Pre-parsed theme colors** — cached RGB parse, sscanf skipped on same-pointer calls
+- [ ] **ASCII fast path for syntax** — skip line_to_bytes() allocation when all codepoints < 128
+- [x] **Scratch buffers** — reusable buffers in editor_state, no per-line malloc/free
+- [x] **`madvise()` hints** — MADV_SEQUENTIAL during scan, MADV_RANDOM after
+- [x] **Pre-computed keyword lengths** — strlen() called once at syntax selection
 
 ### Architecture
 
-- [ ] **Temperature-aware save** — write COLD lines directly from mmap bytes, only convert HOT lines
+- [x] **Temperature-aware save** — COLD lines copied from mmap, only WARM/HOT use line_to_bytes()
 
 ---
 
