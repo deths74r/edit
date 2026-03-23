@@ -486,6 +486,20 @@ struct editor_state {
 	int *scratch_offsets;
 	/* Allocated capacity of the scratch offsets array (number of int slots). */
 	size_t scratch_offsets_capacity;
+	/* Previous frame's cursor and viewport state, used to detect when
+	 * only the cursor moved so the full redraw can be skipped. */
+	int prev_cursor_x, prev_cursor_y;
+	int prev_render_x;
+	int prev_row_offset, prev_column_offset;
+	/* Previous frame's line count, used to detect structural changes. */
+	int prev_line_count;
+	/* Previous frame's status message, used to detect message changes. */
+	char prev_status_message[STATUS_MESSAGE_SIZE];
+	/* Previous frame's file-modified flag, for status bar change detection. */
+	int prev_dirty;
+	/* When set, forces a full screen redraw on the next refresh
+	 * regardless of cursor/viewport state. Cleared after each refresh. */
+	int force_full_redraw;
 };
 
 /* Global editor state. */
@@ -629,6 +643,7 @@ void editor_set_theme(int index)
 /* Cycles to the next theme in editor_themes[] and displays its name. */
 void editor_switch_theme(void)
 {
+	editor.force_full_redraw = 1;
 	current_theme_index = (current_theme_index + 1) %
 		(int)(sizeof(editor_themes) / sizeof(editor_themes[0]));
 	editor_set_theme(current_theme_index);
@@ -637,6 +652,7 @@ void editor_switch_theme(void)
 /* Toggles line number gutter visibility and updates the gutter width. */
 void editor_toggle_line_numbers(void)
 {
+	editor.force_full_redraw = 1;
 	editor.show_line_numbers = !editor.show_line_numbers;
 	editor_update_gutter_width();
 	editor_set_status_message(
@@ -802,6 +818,7 @@ void terminal_handle_terminate(int signal_number)
  * Called from the main loop when resize_pending is set. */
 void terminal_process_resize(void)
 {
+	editor.force_full_redraw = 1;
 	resize_pending = 0;
 	int new_rows, new_columns;
 	if (terminal_get_window_size(&new_rows, &new_columns) == -1)
@@ -1594,9 +1611,21 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 	int in_string = 0;
 	int in_comment = prev_open_comment;
 
+	/* Check if every codepoint on this line is ASCII. When true, each
+	 * cell maps 1:1 to a byte and we can skip utf8_encode entirely. */
+	int all_ascii = 1;
+	for (uint32_t k = 0; k < line->cell_count; k++) {
+		if (line->cells[k].codepoint >= ASCII_MAX) {
+			all_ascii = 0;
+			break;
+		}
+	}
+
 	/* Build a byte string for keyword/comment matching, reusing the
 	 * editor's scratch buffer to avoid malloc/free on every line. */
-	size_t max_byte_size = (size_t)line->cell_count * UTF8_MAX_BYTES + 1;
+	size_t max_byte_size = all_ascii
+		? (size_t)line->cell_count + 1
+		: (size_t)line->cell_count * UTF8_MAX_BYTES + 1;
 	if (max_byte_size > editor.scratch_capacity) {
 		editor.scratch_capacity = max_byte_size * 2;
 		editor.scratch_buffer = realloc(editor.scratch_buffer,
@@ -1605,18 +1634,8 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 			terminal_die("realloc");
 	}
 	char *render = editor.scratch_buffer;
-	size_t byte_len = 0;
-	for (uint32_t k = 0; k < line->cell_count; k++) {
-		int written = utf8_encode(line->cells[k].codepoint,
-					  &render[byte_len]);
-		byte_len += written;
-	}
-	render[byte_len] = '\0';
 
-	/* Build cell-to-byte offset map so cell index i maps to render position.
-	 * Reuses the editor's scratch offsets array to avoid per-line allocation.
-	 * Needed because multi-byte UTF-8 characters make cell indices diverge
-	 * from byte offsets. */
+	/* Ensure the byte_offsets scratch array has room for cell_count + 1. */
 	size_t offsets_needed = (size_t)line->cell_count + 1;
 	if (offsets_needed > editor.scratch_offsets_capacity) {
 		editor.scratch_offsets_capacity = offsets_needed * 2;
@@ -1626,13 +1645,36 @@ int line_update_syntax(struct line *line, int prev_open_comment)
 			terminal_die("realloc");
 	}
 	int *byte_offsets = editor.scratch_offsets;
-	int bpos = 0;
-	for (uint32_t k = 0; k < line->cell_count; k++) {
-		byte_offsets[k] = bpos;
-		char tmp[UTF8_MAX_BYTES];
-		bpos += utf8_encode(line->cells[k].codepoint, tmp);
+
+	if (all_ascii) {
+		/* ASCII fast path: cast each codepoint directly to a byte.
+		 * The byte_offsets array is a trivial 1:1 identity mapping. */
+		for (uint32_t k = 0; k < line->cell_count; k++) {
+			render[k] = (char)line->cells[k].codepoint;
+			byte_offsets[k] = (int)k;
+		}
+		render[line->cell_count] = '\0';
+		byte_offsets[line->cell_count] = (int)line->cell_count;
+	} else {
+		/* General UTF-8 path: encode each codepoint and build the
+		 * cell-to-byte offset map. Multi-byte characters make cell
+		 * indices diverge from byte offsets. */
+		size_t byte_len = 0;
+		for (uint32_t k = 0; k < line->cell_count; k++) {
+			int written = utf8_encode(line->cells[k].codepoint,
+						  &render[byte_len]);
+			byte_len += written;
+		}
+		render[byte_len] = '\0';
+
+		int bpos = 0;
+		for (uint32_t k = 0; k < line->cell_count; k++) {
+			byte_offsets[k] = bpos;
+			char tmp[UTF8_MAX_BYTES];
+			bpos += utf8_encode(line->cells[k].codepoint, tmp);
+		}
+		byte_offsets[line->cell_count] = bpos;
 	}
-	byte_offsets[line->cell_count] = bpos;
 
 	int i = 0;
 	while (i < (int)line->cell_count) {
@@ -2119,6 +2161,7 @@ void undo_entry_apply_forward(struct undo_entry *entry)
 /* Undoes the most recent group. */
 void editor_undo(void)
 {
+	editor.force_full_redraw = 1;
 	if (editor.undo.current == 0) {
 		editor_set_status_message("Nothing to undo");
 		return;
@@ -2142,6 +2185,7 @@ void editor_undo(void)
 /* Redoes the most recently undone group. */
 void editor_redo(void)
 {
+	editor.force_full_redraw = 1;
 	if (editor.undo.current >= editor.undo.group_count) {
 		editor_set_status_message("Nothing to redo");
 		return;
@@ -2195,6 +2239,7 @@ void selection_clear(void)
 {
 	if (!editor.selection.active)
 		return;
+	editor.force_full_redraw = 1;
 	int start_y, start_x, end_y, end_x;
 	if (editor.selection.anchor_y < editor.cursor_y ||
 	    (editor.selection.anchor_y == editor.cursor_y &&
@@ -2259,6 +2304,7 @@ void selection_update(void)
 {
 	if (!editor.selection.active)
 		return;
+	editor.force_full_redraw = 1;
 	int start_y, start_x, end_y, end_x;
 	selection_get_range(&start_y, &start_x, &end_y, &end_x);
 
@@ -2328,6 +2374,7 @@ char *selection_to_string(size_t *out_length)
 /* Deletes all text in the current selection. */
 void selection_delete(void)
 {
+	editor.force_full_redraw = 1;
 	int start_y, start_x, end_y, end_x;
 	if (!selection_get_range(&start_y, &start_x, &end_y, &end_x))
 		return;
@@ -2514,6 +2561,7 @@ void editor_paste(void)
 
 void editor_cut_line(void)
 {
+	editor.force_full_redraw = 1;
 	if (editor.cursor_y >= editor.line_count)
 		return;
 	size_t length;
@@ -2536,6 +2584,7 @@ void editor_cut_line(void)
 
 void editor_duplicate_line(void)
 {
+	editor.force_full_redraw = 1;
 	if (editor.cursor_y >= editor.line_count)
 		return;
 	size_t length;
@@ -2607,6 +2656,7 @@ int cursor_next_word(struct line *line, int cell_index)
  * cursor one position to the right. */
 void editor_insert_char(int character)
 {
+	editor.force_full_redraw = 1;
 	editor.preferred_column = -1;
 	if (editor.cursor_y == editor.line_count) {
 		editor_line_insert(editor.line_count, "", 0);
@@ -2644,6 +2694,7 @@ void editor_insert_char(int character)
  * the text after the cursor moves to a new line below. */
 void editor_insert_newline(void)
 {
+	editor.force_full_redraw = 1;
 	editor.preferred_column = -1;
 	undo_push((struct undo_entry){
 		.type = UNDO_SPLIT_LINE,
@@ -2718,6 +2769,7 @@ void editor_insert_newline(void)
  * by appending its content and deleting the current line. */
 void editor_delete_char(void)
 {
+	editor.force_full_redraw = 1;
 	editor.preferred_column = -1;
 	if (editor.cursor_y == editor.line_count)
 		return;
@@ -2916,6 +2968,7 @@ out:
  * Returns 0 on success, negative errno on failure. */
 int editor_open(char *filename)
 {
+	editor.force_full_redraw = 1;
 	free(editor.filename);
 	editor.filename = strdup(filename);
 	if (editor.filename == NULL) {
@@ -3290,6 +3343,7 @@ void editor_snapshot_restore(void)
 /* Opens the help screen by saving current state and loading help text. */
 void editor_help_open(void)
 {
+	editor.force_full_redraw = 1;
 	if (editor.viewing_help)
 		return;
 
@@ -3318,6 +3372,7 @@ void editor_help_open(void)
 /* Closes the help screen and restores the previous buffer. */
 void editor_help_close(void)
 {
+	editor.force_full_redraw = 1;
 	if (!editor.viewing_help)
 		return;
 
@@ -3334,6 +3389,7 @@ void editor_help_close(void)
  * proper interaction with the non-blocking mode system. */
 void editor_find_callback(char *query, int key)
 {
+	editor.force_full_redraw = 1;
 	if (editor.search_saved_syntax) {
 		struct line *restore_ln = &editor.lines[editor.search_saved_highlight_line];
 		line_ensure_warm(restore_ln);
@@ -3503,6 +3559,7 @@ void editor_find_accept(char *query)
  * viewport to the position saved before the search started. */
 void editor_find_cancel(void)
 {
+	editor.force_full_redraw = 1;
 	editor.cursor_x = editor.saved_cursor_x;
 	editor.cursor_y = editor.saved_cursor_y;
 	editor.column_offset = editor.saved_column_offset;
@@ -3956,13 +4013,64 @@ void editor_draw_message_bar(struct append_buffer *append_buffer)
 	}
 }
 
-/* Redraws the entire screen by building output in an append buffer and
- * writing it to stdout in a single call. Hides the cursor during drawing
- * to avoid flicker, then repositions it at the correct location. */
+/* Redraws the screen. When only the cursor moved since the last frame,
+ * emits just a cursor reposition escape (~12 bytes) instead of redrawing
+ * every visible line (~20KB). Falls through to a full redraw when content,
+ * viewport, status bar, or selection state changed. */
 void editor_refresh_screen(void)
 {
 	editor_scroll();
 
+	/* Detect whether a full redraw is needed by comparing the current
+	 * frame state against the previous frame's snapshot. Pure cursor
+	 * movement (the most common operation) skips the expensive draw. */
+	int message_visible = (editor.status_message[0] != '\0'
+		&& time(NULL) - editor.status_message_time < STATUS_MESSAGE_TIMEOUT_SECONDS);
+	int prev_message_visible = (editor.prev_status_message[0] != '\0');
+	int needs_full_redraw = editor.force_full_redraw
+		|| editor.cursor_y != editor.prev_cursor_y
+		|| editor.row_offset != editor.prev_row_offset
+		|| editor.column_offset != editor.prev_column_offset
+		|| editor.line_count != editor.prev_line_count
+		|| editor.dirty != editor.prev_dirty
+		|| editor.selection.active
+		|| strcmp(editor.status_message, editor.prev_status_message) != 0
+		|| message_visible != prev_message_visible;
+
+	if (!needs_full_redraw) {
+		/* Cursor-only fast path: skip the expensive row drawing but
+		 * still update the status bar (it shows cursor position)
+		 * and reposition the cursor. */
+		struct append_buffer output_buffer = APPEND_BUFFER_INIT;
+		append_buffer_write(&output_buffer, HIDE_CURSOR, strlen(HIDE_CURSOR));
+
+		/* Move to the status bar row and redraw it */
+		char move_buffer[CURSOR_BUFFER_SIZE];
+		snprintf(move_buffer, sizeof(move_buffer), CURSOR_MOVE,
+			 editor.screen_rows + 1, 1);
+		append_buffer_write(&output_buffer, move_buffer, strlen(move_buffer));
+		editor_draw_status_bar(&output_buffer);
+		editor_draw_message_bar(&output_buffer);
+
+		/* Position the cursor at the correct editing location */
+		char cursor_buffer[CURSOR_BUFFER_SIZE];
+		snprintf(cursor_buffer, sizeof(cursor_buffer), CURSOR_MOVE,
+			 (editor.cursor_y - editor.row_offset) + 1,
+			 (editor.render_x - editor.column_offset) + editor.line_number_width + 1);
+		append_buffer_write(&output_buffer, cursor_buffer, strlen(cursor_buffer));
+		append_buffer_write(&output_buffer, SHOW_CURSOR, strlen(SHOW_CURSOR));
+
+		write(STDOUT_FILENO, output_buffer.buffer, output_buffer.length);
+		append_buffer_free(&output_buffer);
+
+		/* Update previous-frame cursor state */
+		editor.prev_cursor_x = editor.cursor_x;
+		editor.prev_cursor_y = editor.cursor_y;
+		editor.prev_render_x = editor.render_x;
+		return;
+	}
+
+	/* Full redraw path */
 	struct append_buffer output_buffer = APPEND_BUFFER_INIT;
 
 	append_buffer_write(&output_buffer, HIDE_CURSOR, strlen(HIDE_CURSOR));
@@ -3982,6 +4090,26 @@ void editor_refresh_screen(void)
 
 	write(STDOUT_FILENO, output_buffer.buffer, output_buffer.length);
 	append_buffer_free(&output_buffer);
+
+	/* Snapshot the current frame state for next-frame comparison.
+	 * For the status message, store what was actually drawn: if the
+	 * message timed out, record an empty string so the next frame
+	 * comparison reflects the visible state, not the stale text. */
+	editor.prev_cursor_x = editor.cursor_x;
+	editor.prev_cursor_y = editor.cursor_y;
+	editor.prev_render_x = editor.render_x;
+	editor.prev_row_offset = editor.row_offset;
+	editor.prev_column_offset = editor.column_offset;
+	editor.prev_line_count = editor.line_count;
+	editor.prev_dirty = editor.dirty;
+	if (message_visible) {
+		strncpy(editor.prev_status_message, editor.status_message,
+			STATUS_MESSAGE_SIZE);
+		editor.prev_status_message[STATUS_MESSAGE_SIZE - 1] = '\0';
+	} else {
+		editor.prev_status_message[0] = '\0';
+	}
+	editor.force_full_redraw = 0;
 }
 
 /* Sets the status bar message using printf-style formatting. Records the
@@ -4299,6 +4427,7 @@ void editor_process_keypress(struct input_event event)
 		/* Execution resumes here after SIGCONT */
 		terminal_enable_raw_mode();
 		terminal_enable_mouse_reporting();
+		editor.force_full_redraw = 1;
 		break;
 
 	case HOME_KEY:
@@ -4646,6 +4775,15 @@ void editor_init(void)
 	editor.scratch_capacity = 0;
 	editor.scratch_offsets = NULL;
 	editor.scratch_offsets_capacity = 0;
+	editor.prev_cursor_x = -1;
+	editor.prev_cursor_y = -1;
+	editor.prev_render_x = -1;
+	editor.prev_row_offset = -1;
+	editor.prev_column_offset = -1;
+	editor.prev_line_count = -1;
+	editor.prev_status_message[0] = '\0';
+	editor.prev_dirty = 0;
+	editor.force_full_redraw = 1;
 }
 
 /* Entry point. Sets up the terminal (mouse reporting, raw mode), initializes
