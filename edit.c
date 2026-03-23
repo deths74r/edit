@@ -63,7 +63,20 @@ enum editor_key {
 	MOUSE_RIGHT_BUTTON_PRESSED,
 	MOUSE_SCROLL_UP,
 	MOUSE_SCROLL_DOWN,
-	F11_KEY
+	F11_KEY,
+	SHIFT_ARROW_LEFT,
+	SHIFT_ARROW_RIGHT,
+	SHIFT_ARROW_UP,
+	SHIFT_ARROW_DOWN,
+	SHIFT_HOME_KEY,
+	SHIFT_END_KEY,
+	CTRL_ARROW_LEFT,
+	CTRL_ARROW_RIGHT,
+	SHIFT_CTRL_ARROW_LEFT,
+	SHIFT_CTRL_ARROW_RIGHT,
+	MOUSE_LEFT_BUTTON_DRAG,
+	MOUSE_BUTTON_RELEASED,
+	SHIFT_TAB
 };
 
 /* Syntax highlight categories assigned to each rendered character.
@@ -122,6 +135,29 @@ struct line {
 	/* Temperature level for lazy loading (line_temperature enum). */
 	int temperature;
 };
+
+/* Bit flags stored in struct cell.flags for rendering state. */
+enum cell_flag {
+	CELL_FLAG_SELECTED = (1 << 0)
+};
+
+/* Tracks the current text selection region. */
+struct selection_state {
+	int active;
+	int anchor_y;
+	int anchor_x;
+};
+
+/* Internal clipboard storage for cut/copy/paste. */
+struct clipboard {
+	char **lines;
+	size_t *line_lengths;
+	int line_count;
+	int is_line_mode;
+};
+
+/* Maximum size in bytes for OSC 52 clipboard payloads. */
+#define OSC52_MAX_PAYLOAD_BYTES 74994
 
 /* Types of undoable operations. Each maps to a specific edit action
  * that can be reversed. */
@@ -184,9 +220,9 @@ enum editor_mode {
 /* ANSI escape sequence to move the cursor to the top-left corner. */
 #define CURSOR_HOME "\x1b[H"
 /* Enables SGR mouse reporting and basic mouse tracking in the terminal. */
-#define ENABLE_MOUSE_REPORTING "\x1b[?1006h\x1b[?1000h"
-/* Disables SGR mouse reporting and basic mouse tracking. */
-#define DISABLE_MOUSE_REPORTING "\x1b[?1006l\x1b[?1000l"
+#define ENABLE_MOUSE_REPORTING "\x1b[?1006h\x1b[?1002h"
+/* Disables SGR mouse reporting and button-event tracking. */
+#define DISABLE_MOUSE_REPORTING "\x1b[?1006l\x1b[?1002l"
 /* ANSI escape sequence to hide the terminal cursor. */
 #define HIDE_CURSOR "\x1b[?25l"
 /* ANSI escape sequence to show the terminal cursor. */
@@ -418,9 +454,12 @@ struct editor_state {
 	int search_saved_highlight_line;
 	uint16_t *search_saved_syntax;
 	uint32_t search_saved_syntax_count;
-	/* Desired render column preserved across vertical movement through
-	 * shorter lines. -1 means no preference (use actual position). */
+	/* Desired render column preserved across vertical movement. */
 	int preferred_column;
+	/* Current text selection state. */
+	struct selection_state selection;
+	/* Internal clipboard for cut/copy/paste. */
+	struct clipboard clipboard;
 	/* Undo/redo history for the current file. */
 	struct undo_stack undo;
 	/* True when displaying a temporary read-only buffer (help text). */
@@ -431,6 +470,30 @@ struct editor_state {
 
 /* Global editor state. */
 struct editor_state editor;
+
+/* Forward declarations for functions used before their definitions. */
+void editor_insert_char(int character);
+void editor_insert_newline(void);
+void editor_line_delete(int position);
+void editor_line_insert(int position, const char *string, size_t length);
+void syntax_propagate(int start_line);
+void line_ensure_warm(struct line *line);
+void line_ensure_capacity(struct line *line, uint32_t needed);
+void line_insert_cell(struct line *line, uint32_t position, struct cell c);
+void line_delete_cell(struct line *line, uint32_t position);
+void line_append_cells(struct line *dest, struct line *src, uint32_t from);
+char *line_to_bytes(struct line *line, size_t *out_length);
+int line_render_column_to_cell(struct line *line, int render_column);
+int line_cell_to_render_column(struct line *line, int cell_index);
+int line_render_width(struct line *line);
+int cursor_prev_grapheme(struct line *line, int cell_index);
+int cursor_next_grapheme(struct line *line, int cell_index);
+int cell_display_width(struct cell *c, int current_column);
+int syntax_is_separator(int character);
+void editor_update_gutter_width(void);
+void line_free(struct line *line);
+void line_init(struct line *line, int index);
+void terminal_die(const char *message);
 
 /*** Filetypes ***/
 
@@ -829,6 +892,34 @@ struct input_event terminal_decode_key(void)
 					case '8':
 						return (struct input_event){.key = END_KEY};
 					}
+				} else if (sequence[2] == ';') {
+					/* CSI 1;modifierX — Shift/Ctrl+Arrow etc */
+					unsigned char modifier_byte, final_byte;
+					if (!input_buffer_read_byte(&modifier_byte))
+						return (struct input_event){.key = ESC_KEY};
+					if (!input_buffer_read_byte(&final_byte))
+						return (struct input_event){.key = ESC_KEY};
+					int modifier = modifier_byte - '0';
+					if (modifier == 2) {
+						switch (final_byte) {
+						case 'A': return (struct input_event){.key = SHIFT_ARROW_UP};
+						case 'B': return (struct input_event){.key = SHIFT_ARROW_DOWN};
+						case 'C': return (struct input_event){.key = SHIFT_ARROW_RIGHT};
+						case 'D': return (struct input_event){.key = SHIFT_ARROW_LEFT};
+						case 'H': return (struct input_event){.key = SHIFT_HOME_KEY};
+						case 'F': return (struct input_event){.key = SHIFT_END_KEY};
+						}
+					} else if (modifier == 5) {
+						switch (final_byte) {
+						case 'C': return (struct input_event){.key = CTRL_ARROW_RIGHT};
+						case 'D': return (struct input_event){.key = CTRL_ARROW_LEFT};
+						}
+					} else if (modifier == 6) {
+						switch (final_byte) {
+						case 'C': return (struct input_event){.key = SHIFT_CTRL_ARROW_RIGHT};
+						case 'D': return (struct input_event){.key = SHIFT_CTRL_ARROW_LEFT};
+						}
+					}
 				} else if (sequence[2] >= '0' && sequence[2] <= '9') {
 					unsigned char terminator;
 					if (!input_buffer_read_byte(&terminator))
@@ -862,16 +953,22 @@ struct input_event terminal_decode_key(void)
 				char pressed;
 				if (sscanf(mouse_sequence, "%d;%d;%d%c", &button, &column,
 									 &row, &pressed) == 4) {
+					column = column - editor.line_number_width - 1;
+					if (column < 0)
+						column = 0;
+					row = row - 1;
 
 					switch (button) {
 					case 0:
 						if (pressed == 'M') {
-							column = column - editor.line_number_width - 1;
-							if (column < 0)
-								column = 0;
-							row = row - 1;
 							return (struct input_event){
 								.key = MOUSE_LEFT_BUTTON_PRESSED,
+								.mouse_x = column,
+								.mouse_y = row
+							};
+						} else if (pressed == 'm') {
+							return (struct input_event){
+								.key = MOUSE_BUTTON_RELEASED,
 								.mouse_x = column,
 								.mouse_y = row
 							};
@@ -880,6 +977,15 @@ struct input_event terminal_decode_key(void)
 					case 1:
 						break;
 					case 2:
+						break;
+					case 32:
+						if (pressed == 'M') {
+							return (struct input_event){
+								.key = MOUSE_LEFT_BUTTON_DRAG,
+								.mouse_x = column,
+								.mouse_y = row
+							};
+						}
 						break;
 					case 35:
 						break;
@@ -906,6 +1012,8 @@ struct input_event terminal_decode_key(void)
 					return (struct input_event){.key = HOME_KEY};
 				case 'F':
 					return (struct input_event){.key = END_KEY};
+				case 'Z':
+					return (struct input_event){.key = SHIFT_TAB};
 				}
 			}
 		} else if (sequence[0] == 'O') {
@@ -1957,6 +2065,404 @@ void editor_redo(void)
 	editor_set_status_message("Redo");
 }
 
+/*** Selection ***/
+
+/* Clears the active selection. */
+void selection_clear(void)
+{
+	if (!editor.selection.active)
+		return;
+	int start_y, start_x, end_y, end_x;
+	if (editor.selection.anchor_y < editor.cursor_y ||
+	    (editor.selection.anchor_y == editor.cursor_y &&
+	     editor.selection.anchor_x <= editor.cursor_x)) {
+		start_y = editor.selection.anchor_y;
+		start_x = editor.selection.anchor_x;
+		end_y = editor.cursor_y;
+		end_x = editor.cursor_x;
+	} else {
+		start_y = editor.cursor_y;
+		start_x = editor.cursor_x;
+		end_y = editor.selection.anchor_y;
+		end_x = editor.selection.anchor_x;
+	}
+	for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		if (ln->temperature == LINE_COLD)
+			continue;
+		int from = (y == start_y) ? start_x : 0;
+		int to = (y == end_y) ? end_x : (int)ln->cell_count;
+		if (to > (int)ln->cell_count)
+			to = (int)ln->cell_count;
+		for (int i = from; i < to; i++)
+			ln->cells[i].flags &= ~CELL_FLAG_SELECTED;
+	}
+	editor.selection.active = 0;
+}
+
+/* Begins a new selection at the current cursor position. */
+void selection_start(void)
+{
+	if (editor.selection.active)
+		return;
+	editor.selection.active = 1;
+	editor.selection.anchor_y = editor.cursor_y;
+	editor.selection.anchor_x = editor.cursor_x;
+}
+
+/* Returns the ordered start/end of the current selection. */
+int selection_get_range(int *start_y, int *start_x, int *end_y, int *end_x)
+{
+	if (!editor.selection.active)
+		return 0;
+	if (editor.selection.anchor_y < editor.cursor_y ||
+	    (editor.selection.anchor_y == editor.cursor_y &&
+	     editor.selection.anchor_x <= editor.cursor_x)) {
+		*start_y = editor.selection.anchor_y;
+		*start_x = editor.selection.anchor_x;
+		*end_y = editor.cursor_y;
+		*end_x = editor.cursor_x;
+	} else {
+		*start_y = editor.cursor_y;
+		*start_x = editor.cursor_x;
+		*end_y = editor.selection.anchor_y;
+		*end_x = editor.selection.anchor_x;
+	}
+	return 1;
+}
+
+/* Updates CELL_FLAG_SELECTED on cells in the selection range. */
+void selection_update(void)
+{
+	if (!editor.selection.active)
+		return;
+	int start_y, start_x, end_y, end_x;
+	selection_get_range(&start_y, &start_x, &end_y, &end_x);
+
+	for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+		int from = (y == start_y) ? start_x : 0;
+		int to = (y == end_y) ? end_x : (int)ln->cell_count;
+		if (to > (int)ln->cell_count)
+			to = (int)ln->cell_count;
+		for (uint32_t i = 0; i < ln->cell_count; i++) {
+			if ((int)i >= from && (int)i < to)
+				ln->cells[i].flags |= CELL_FLAG_SELECTED;
+			else
+				ln->cells[i].flags &= ~CELL_FLAG_SELECTED;
+		}
+	}
+}
+
+/* Extracts the selected text as a UTF-8 string. Caller frees. */
+char *selection_to_string(size_t *out_length)
+{
+	int start_y, start_x, end_y, end_x;
+	if (!selection_get_range(&start_y, &start_x, &end_y, &end_x))
+		return NULL;
+
+	size_t capacity = 256;
+	size_t length = 0;
+	char *buffer = malloc(capacity);
+	if (!buffer)
+		return NULL;
+
+	for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+		int from = (y == start_y) ? start_x : 0;
+		int to = (y == end_y) ? end_x : (int)ln->cell_count;
+		if (to > (int)ln->cell_count)
+			to = (int)ln->cell_count;
+		for (int i = from; i < to; i++) {
+			char utf8_buf[UTF8_MAX_BYTES];
+			int bytes = utf8_encode(ln->cells[i].codepoint, utf8_buf);
+			if (length + bytes + 2 > capacity) {
+				capacity *= 2;
+				buffer = realloc(buffer, capacity);
+				if (!buffer)
+					return NULL;
+			}
+			memcpy(buffer + length, utf8_buf, bytes);
+			length += bytes;
+		}
+		if (y < end_y) {
+			if (length + 2 > capacity) {
+				capacity *= 2;
+				buffer = realloc(buffer, capacity);
+				if (!buffer)
+					return NULL;
+			}
+			buffer[length++] = '\n';
+		}
+	}
+	buffer[length] = '\0';
+	*out_length = length;
+	return buffer;
+}
+
+/* Deletes all text in the current selection. */
+void selection_delete(void)
+{
+	int start_y, start_x, end_y, end_x;
+	if (!selection_get_range(&start_y, &start_x, &end_y, &end_x))
+		return;
+
+	if (start_y == end_y) {
+		struct line *ln = &editor.lines[start_y];
+		line_ensure_warm(ln);
+		for (int i = end_x - 1; i >= start_x; i--)
+			line_delete_cell(ln, (uint32_t)i);
+	} else {
+		/* Truncate first line at start_x */
+		struct line *first = &editor.lines[start_y];
+		line_ensure_warm(first);
+		first->cell_count = (uint32_t)start_x;
+		first->temperature = LINE_HOT;
+
+		/* Append remaining cells from last line */
+		struct line *last = &editor.lines[end_y];
+		line_ensure_warm(last);
+		if (end_x < (int)last->cell_count)
+			line_append_cells(first, last, (uint32_t)end_x);
+
+		/* Delete middle and last lines (in reverse) */
+		for (int y = end_y; y > start_y; y--)
+			editor_line_delete(y);
+	}
+
+	editor.cursor_y = start_y;
+	editor.cursor_x = start_x;
+	selection_clear();
+	editor.selection.active = 0;
+	syntax_propagate(start_y);
+	editor.dirty++;
+}
+
+/*** Clipboard ***/
+
+void clipboard_clear(void)
+{
+	for (int i = 0; i < editor.clipboard.line_count; i++)
+		free(editor.clipboard.lines[i]);
+	free(editor.clipboard.lines);
+	free(editor.clipboard.line_lengths);
+	editor.clipboard = (struct clipboard){0};
+}
+
+void clipboard_store(const char *text, size_t length, int is_line_mode)
+{
+	clipboard_clear();
+
+	/* Count lines */
+	int count = 1;
+	for (size_t i = 0; i < length; i++)
+		if (text[i] == '\n')
+			count++;
+
+	editor.clipboard.lines = malloc(sizeof(char *) * count);
+	editor.clipboard.line_lengths = malloc(sizeof(size_t) * count);
+	editor.clipboard.line_count = 0;
+	editor.clipboard.is_line_mode = is_line_mode;
+
+	size_t start = 0;
+	for (size_t i = 0; i <= length; i++) {
+		if (i == length || text[i] == '\n') {
+			size_t line_len = i - start;
+			char *line = malloc(line_len + 1);
+			memcpy(line, text + start, line_len);
+			line[line_len] = '\0';
+			editor.clipboard.lines[editor.clipboard.line_count] = line;
+			editor.clipboard.line_lengths[editor.clipboard.line_count] = line_len;
+			editor.clipboard.line_count++;
+			start = i + 1;
+		}
+	}
+}
+
+/* Sends text to the system clipboard via OSC 52. */
+void clipboard_set_system(const char *text, size_t length)
+{
+	if (length > OSC52_MAX_PAYLOAD_BYTES)
+		return;
+	/* Base64 encode */
+	static const char b64[] =
+		"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	size_t encoded_len = 4 * ((length + 2) / 3);
+	char *encoded = malloc(encoded_len + 1);
+	if (!encoded)
+		return;
+	size_t ei = 0;
+	for (size_t i = 0; i < length; i += 3) {
+		uint32_t n = (uint32_t)((unsigned char)text[i]) << 16;
+		if (i + 1 < length) n |= (uint32_t)((unsigned char)text[i + 1]) << 8;
+		if (i + 2 < length) n |= (uint32_t)((unsigned char)text[i + 2]);
+		encoded[ei++] = b64[(n >> 18) & 0x3F];
+		encoded[ei++] = b64[(n >> 12) & 0x3F];
+		encoded[ei++] = (i + 1 < length) ? b64[(n >> 6) & 0x3F] : '=';
+		encoded[ei++] = (i + 2 < length) ? b64[n & 0x3F] : '=';
+	}
+	encoded[ei] = '\0';
+
+	write(STDOUT_FILENO, "\x1b]52;c;", 7);
+	write(STDOUT_FILENO, encoded, ei);
+	write(STDOUT_FILENO, "\x1b\\", 2);
+	free(encoded);
+}
+
+void editor_copy(void)
+{
+	if (!editor.selection.active) {
+		editor_set_status_message("Nothing selected");
+		return;
+	}
+	size_t length;
+	char *text = selection_to_string(&length);
+	if (!text)
+		return;
+	clipboard_store(text, length, 0);
+	clipboard_set_system(text, length);
+	editor_set_status_message("Copied %zu bytes", length);
+	free(text);
+}
+
+void editor_cut(void)
+{
+	if (!editor.selection.active) {
+		editor_set_status_message("Nothing selected");
+		return;
+	}
+	editor_copy();
+	selection_delete();
+}
+
+void editor_paste(void)
+{
+	if (editor.clipboard.line_count == 0) {
+		editor_set_status_message("Nothing to paste");
+		return;
+	}
+
+	if (editor.selection.active)
+		selection_delete();
+
+	if (editor.clipboard.is_line_mode) {
+		/* Line-mode paste: insert whole lines below cursor */
+		for (int i = 0; i < editor.clipboard.line_count; i++) {
+			editor_line_insert(editor.cursor_y + 1 + i,
+					   editor.clipboard.lines[i],
+					   editor.clipboard.line_lengths[i]);
+		}
+		editor.cursor_y++;
+		editor.cursor_x = 0;
+	} else if (editor.clipboard.line_count == 1) {
+		/* Single-line paste: insert characters at cursor */
+		const char *text = editor.clipboard.lines[0];
+		size_t len = editor.clipboard.line_lengths[0];
+		size_t pos = 0;
+		while (pos < len) {
+			uint32_t cp;
+			int consumed = utf8_decode(&text[pos], (int)(len - pos), &cp);
+			if (consumed <= 0) { consumed = 1; cp = '?'; }
+			editor_insert_char((int)cp);
+			pos += consumed;
+		}
+	} else {
+		/* Multi-line paste */
+		for (int i = 0; i < editor.clipboard.line_count; i++) {
+			if (i > 0)
+				editor_insert_newline();
+			const char *text = editor.clipboard.lines[i];
+			size_t len = editor.clipboard.line_lengths[i];
+			size_t pos = 0;
+			while (pos < len) {
+				uint32_t cp;
+				int consumed = utf8_decode(&text[pos],
+							   (int)(len - pos), &cp);
+				if (consumed <= 0) { consumed = 1; cp = '?'; }
+				editor_insert_char((int)cp);
+				pos += consumed;
+			}
+		}
+	}
+	editor_set_status_message("Pasted");
+}
+
+void editor_cut_line(void)
+{
+	if (editor.cursor_y >= editor.line_count)
+		return;
+	size_t length;
+	char *bytes = line_to_bytes(&editor.lines[editor.cursor_y], &length);
+	if (!bytes)
+		return;
+	clipboard_store(bytes, length, 1);
+	clipboard_set_system(bytes, length);
+	free(bytes);
+	editor_line_delete(editor.cursor_y);
+	if (editor.cursor_y >= editor.line_count && editor.line_count > 0)
+		editor.cursor_y = editor.line_count - 1;
+	int row_length = (editor.cursor_y < editor.line_count)
+				 ? (int)editor.lines[editor.cursor_y].cell_count
+				 : 0;
+	if (editor.cursor_x > row_length)
+		editor.cursor_x = row_length;
+	editor_set_status_message("Line cut");
+}
+
+void editor_duplicate_line(void)
+{
+	if (editor.cursor_y >= editor.line_count)
+		return;
+	size_t length;
+	char *bytes = line_to_bytes(&editor.lines[editor.cursor_y], &length);
+	if (!bytes)
+		return;
+	editor_line_insert(editor.cursor_y + 1, bytes, length);
+	free(bytes);
+	editor.cursor_y++;
+	editor_set_status_message("Line duplicated");
+}
+
+/*** Word Movement ***/
+
+/* Returns the cell index of the start of the previous word. */
+int cursor_prev_word(struct line *line, int cell_index)
+{
+	if (cell_index <= 0)
+		return 0;
+	line_ensure_warm(line);
+	int pos = cell_index - 1;
+	/* Skip separators */
+	while (pos > 0 && syntax_is_separator((int)line->cells[pos].codepoint))
+		pos--;
+	/* Skip word body */
+	while (pos > 0 &&
+	       !syntax_is_separator((int)line->cells[pos - 1].codepoint))
+		pos--;
+	return pos;
+}
+
+/* Returns the cell index of the start of the next word. */
+int cursor_next_word(struct line *line, int cell_index)
+{
+	line_ensure_warm(line);
+	int count = (int)line->cell_count;
+	if (cell_index >= count)
+		return count;
+	int pos = cell_index;
+	/* Skip current word body */
+	while (pos < count &&
+	       !syntax_is_separator((int)line->cells[pos].codepoint))
+		pos++;
+	/* Skip separators */
+	while (pos < count &&
+	       syntax_is_separator((int)line->cells[pos].codepoint))
+		pos++;
+	return pos;
+}
+
 /*** Editor operations ***/
 
 /* Inserts a character at the current cursor position. If the cursor is
@@ -2474,7 +2980,8 @@ void editor_quit_confirm(int key)
  * atexit() so it runs automatically on exit. */
 void editor_quit(void)
 {
-	/* Free undo history */
+	/* Free clipboard and undo history */
+	clipboard_clear();
 	undo_stack_destroy(&editor.undo);
 
 	/* Free all line data */
@@ -3185,9 +3692,15 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 							append_buffer_write_color(append_buffer, current_color);
 						}
 					} else {
-						/* Normal or highlighted: set color and encode all
-						 * codepoints in the grapheme cluster as UTF-8 */
-						if (hl == HL_NORMAL) {
+						/* Selection: invert colors for selected cells */
+						int selected = ln->cells[ci].flags & CELL_FLAG_SELECTED;
+						if (selected) {
+							append_buffer_write_background(append_buffer,
+								editor.theme.highlight_foreground);
+							append_buffer_write_color(append_buffer,
+								editor.theme.background);
+							current_color = editor.theme.background;
+						} else if (hl == HL_NORMAL) {
 							if (current_color != NULL) {
 								append_buffer_write_color(
 										append_buffer,
@@ -3207,6 +3720,14 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 							int utf8_len = utf8_encode(
 									ln->cells[gi].codepoint, utf8_buf);
 							append_buffer_write(append_buffer, utf8_buf, utf8_len);
+						}
+						/* Reset background after selected cells */
+						if (selected) {
+							char *bg = (file_row == editor.cursor_y)
+								? editor.theme.highlight_background
+								: editor.theme.background;
+							append_buffer_write_background(append_buffer, bg);
+							current_color = NULL;
 						}
 					}
 					output_col += cw;
@@ -3544,6 +4065,7 @@ void editor_process_keypress(struct input_event event)
 		case ARROW_UP: case ARROW_DOWN: case ARROW_LEFT: case ARROW_RIGHT:
 		case ALT_KEY('h'): case ALT_KEY('j'): case ALT_KEY('k'): case ALT_KEY('l'):
 		case PAGE_UP: case PAGE_DOWN: case HOME_KEY: case END_KEY:
+		case CTRL_ARROW_LEFT: case CTRL_ARROW_RIGHT:
 		case MOUSE_LEFT_BUTTON_PRESSED:
 		case MOUSE_SCROLL_UP: case MOUSE_SCROLL_DOWN:
 		/* Exit help */
@@ -3566,6 +4088,8 @@ void editor_process_keypress(struct input_event event)
 
 	switch (key) {
 	case '\r':
+		if (editor.selection.active)
+			selection_delete();
 		editor_insert_newline();
 		break;
 
@@ -3642,11 +4166,137 @@ void editor_process_keypress(struct input_event event)
 		editor_redo();
 		break;
 
+	/* Clipboard operations */
+	case ALT_KEY('c'):
+		editor_copy();
+		break;
+	case ALT_KEY('x'):
+		editor_cut();
+		break;
+	case ALT_KEY('v'):
+		editor_paste();
+		break;
+	case ALT_KEY('K'):
+		editor_cut_line();
+		break;
+	case ALT_KEY('d'):
+		editor_duplicate_line();
+		break;
+
+	/* Word movement */
+	case CTRL_ARROW_LEFT: {
+		if (editor.selection.active)
+			selection_clear();
+		struct line *wl = (editor.cursor_y < editor.line_count)
+					  ? &editor.lines[editor.cursor_y]
+					  : NULL;
+		if (wl && editor.cursor_x > 0) {
+			editor.cursor_x = cursor_prev_word(wl, editor.cursor_x);
+		} else if (editor.cursor_y > 0) {
+			editor.cursor_y--;
+			editor.cursor_x = (int)editor.lines[editor.cursor_y].cell_count;
+		}
+		editor.preferred_column = -1;
+		break;
+	}
+	case CTRL_ARROW_RIGHT: {
+		if (editor.selection.active)
+			selection_clear();
+		struct line *wl = (editor.cursor_y < editor.line_count)
+					  ? &editor.lines[editor.cursor_y]
+					  : NULL;
+		if (wl && editor.cursor_x < (int)wl->cell_count) {
+			editor.cursor_x = cursor_next_word(wl, editor.cursor_x);
+		} else if (editor.cursor_y < editor.line_count - 1) {
+			editor.cursor_y++;
+			editor.cursor_x = 0;
+		}
+		editor.preferred_column = -1;
+		break;
+	}
+
+	/* Shift+Arrow selection */
+	case SHIFT_ARROW_LEFT:
+	case SHIFT_ARROW_RIGHT:
+	case SHIFT_ARROW_UP:
+	case SHIFT_ARROW_DOWN:
+	case SHIFT_HOME_KEY:
+	case SHIFT_END_KEY: {
+		if (!editor.selection.active)
+			selection_start();
+		struct input_event dir = event;
+		switch (key) {
+		case SHIFT_ARROW_LEFT: dir.key = ARROW_LEFT; break;
+		case SHIFT_ARROW_RIGHT: dir.key = ARROW_RIGHT; break;
+		case SHIFT_ARROW_UP: dir.key = ARROW_UP; break;
+		case SHIFT_ARROW_DOWN: dir.key = ARROW_DOWN; break;
+		case SHIFT_HOME_KEY: dir.key = HOME_KEY; break;
+		case SHIFT_END_KEY: dir.key = END_KEY; break;
+		}
+		editor_move_cursor(dir);
+		selection_update();
+		break;
+	}
+
+	/* Shift+Ctrl+Arrow word selection */
+	case SHIFT_CTRL_ARROW_LEFT:
+	case SHIFT_CTRL_ARROW_RIGHT: {
+		if (!editor.selection.active)
+			selection_start();
+		struct line *wl = (editor.cursor_y < editor.line_count)
+					  ? &editor.lines[editor.cursor_y]
+					  : NULL;
+		if (key == SHIFT_CTRL_ARROW_LEFT) {
+			if (wl && editor.cursor_x > 0)
+				editor.cursor_x = cursor_prev_word(wl, editor.cursor_x);
+			else if (editor.cursor_y > 0) {
+				editor.cursor_y--;
+				editor.cursor_x = (int)editor.lines[editor.cursor_y].cell_count;
+			}
+		} else {
+			if (wl && editor.cursor_x < (int)wl->cell_count)
+				editor.cursor_x = cursor_next_word(wl, editor.cursor_x);
+			else if (editor.cursor_y < editor.line_count - 1) {
+				editor.cursor_y++;
+				editor.cursor_x = 0;
+			}
+		}
+		editor.preferred_column = -1;
+		selection_update();
+		break;
+	}
+
+	/* Mouse drag selection */
+	case MOUSE_LEFT_BUTTON_DRAG: {
+		int file_row = event.mouse_y + editor.row_offset;
+		if (file_row < 0) file_row = 0;
+		if (file_row >= editor.line_count)
+			file_row = editor.line_count > 0 ? editor.line_count - 1 : 0;
+		editor.cursor_y = file_row;
+		if (editor.cursor_y < editor.line_count) {
+			struct line *dl = &editor.lines[editor.cursor_y];
+			int render_col = event.mouse_x + editor.column_offset;
+			editor.cursor_x = line_render_column_to_cell(dl, render_col);
+		}
+		selection_update();
+		break;
+	}
+	case MOUSE_BUTTON_RELEASED:
+		break;
+
 	case BACKSPACE:
 	case CTRL_KEY('h'):
+		if (editor.selection.active) {
+			selection_delete();
+			break;
+		}
 		editor_delete_char();
 		break;
 	case DEL_KEY: {
+		if (editor.selection.active) {
+			selection_delete();
+			break;
+		}
 		int saved_y = editor.cursor_y;
 		int saved_x = editor.cursor_x;
 		editor_move_cursor((struct input_event){.key = ARROW_RIGHT});
@@ -3679,11 +4329,18 @@ void editor_process_keypress(struct input_event event)
 	case ARROW_DOWN:
 	case ARROW_LEFT:
 	case ARROW_RIGHT:
+		if (editor.selection.active)
+			selection_clear();
 		editor_move_cursor(event);
 		break;
 
 	case MOUSE_LEFT_BUTTON_PRESSED:
+		if (editor.selection.active)
+			selection_clear();
+		selection_start();
 		editor_move_cursor(event);
+		editor.selection.anchor_y = editor.cursor_y;
+		editor.selection.anchor_x = editor.cursor_x;
 		break;
 
 	case MOUSE_SCROLL_UP:
@@ -3707,8 +4364,11 @@ void editor_process_keypress(struct input_event event)
 		/* Only insert printable characters: Unicode codepoints above
 		 * the control range, or tab. Filter out negative values,
 		 * control characters, and unrecognized escape sequences. */
-		if (key == '\t' || (key >= 32 && key != BACKSPACE))
+		if (key == '\t' || (key >= 32 && key != BACKSPACE)) {
+			if (editor.selection.active)
+				selection_delete();
 			editor_insert_char(key);
+		}
 		break;
 	}
 
@@ -3784,6 +4444,8 @@ void editor_init(void)
 	editor.search_saved_syntax_count = 0;
 
 	editor.preferred_column = -1;
+	editor.selection = (struct selection_state){0};
+	editor.clipboard = (struct clipboard){0};
 	undo_stack_init(&editor.undo);
 	editor.viewing_help = 0;
 	editor.snapshot = (struct editor_snapshot){0};
