@@ -117,6 +117,13 @@ struct cell {
 	/* Pair matching ID (reserved, zeroed). */
 	uint32_t context;
 };
+/* Git gutter marker states for tracking changes since last save. */
+enum gutter_marker {
+	GUTTER_NONE = 0,
+	GUTTER_ADDED = 1,
+	GUTTER_MODIFIED = 2
+};
+
 /* A single line of text represented as an array of cells. */
 struct line {
 	/* Dynamic array of cells for this line. */
@@ -138,6 +145,8 @@ struct line {
 	/* When set, syntax highlighting must be recomputed before rendering.
 	 * Avoids warming all lines just to highlight them at file open. */
 	int syntax_stale;
+	/* Git-style gutter marker: none, added, or modified since last save. */
+	int gutter_marker;
 };
 
 /* Bit flags stored in struct cell.flags for rendering state. */
@@ -276,6 +285,12 @@ enum editor_mode {
 
 /* Number of lines to keep visible above and below the cursor. */
 #define SCROLL_MARGIN 5
+
+/* Maximum lines to scan when searching for a matching bracket. */
+#define BRACKET_SCAN_MAX_LINES 5000
+
+/* Number of cycling colors used for bracket pair colorization. */
+#define BRACKET_COLOR_COUNT 4
 
 /* Maximum number of search queries retained in the history ring. */
 #define SEARCH_HISTORY_MAX 50
@@ -526,6 +541,9 @@ struct editor_state {
 	int *scratch_offsets;
 	/* Allocated capacity of the scratch offsets array (number of int slots). */
 	size_t scratch_offsets_capacity;
+	/* Running bracket nesting depth at the top of the viewport, used for
+	 * bracket pair colorization. Starts at 0 for simplicity (no scan). */
+	int bracket_depth_at_viewport;
 	/* Previous frame's cursor and viewport state, used to detect when
 	 * only the cursor moved so the full redraw can be skipped. */
 	int prev_cursor_x, prev_cursor_y;
@@ -540,6 +558,10 @@ struct editor_state {
 	/* When set, forces a full screen redraw on the next refresh
 	 * regardless of cursor/viewport state. Cleared after each refresh. */
 	int force_full_redraw;
+	/* Line index of the matching bracket, or -1 when no match. */
+	int bracket_match_line;
+	/* Cell index of the matching bracket, or -1 when no match. */
+	int bracket_match_cell;
 };
 
 /* Global editor state. */
@@ -1428,6 +1450,7 @@ void line_init(struct line *line, int index)
 	line->mmap_length = 0;
 	line->temperature = LINE_HOT;
 	line->syntax_stale = 1;
+	line->gutter_marker = GUTTER_NONE;
 }
 /* Frees the cell array and zeroes all fields. */
 void line_free(struct line *line)
@@ -1542,11 +1565,14 @@ char *line_to_bytes(struct line *line, size_t *out_length)
 	*out_length = pos;
 	return bytes;
 }
-/* Inserts a cell at the given position, shifting cells to the right. */
+/* Inserts a cell at the given position, shifting cells to the right.
+ * Marks the line as modified for the git gutter. */
 void line_insert_cell(struct line *line, uint32_t pos, struct cell c)
 {
 	line_ensure_warm(line);
 	line->temperature = LINE_HOT;
+	if (line->gutter_marker == GUTTER_NONE)
+		line->gutter_marker = GUTTER_MODIFIED;
 	if (pos > line->cell_count)
 		pos = line->cell_count;
 	line_ensure_capacity(line, line->cell_count + 1);
@@ -1555,11 +1581,14 @@ void line_insert_cell(struct line *line, uint32_t pos, struct cell c)
 	line->cells[pos] = c;
 	line->cell_count++;
 }
-/* Deletes the cell at the given position, shifting cells to the left. */
+/* Deletes the cell at the given position, shifting cells to the left.
+ * Marks the line as modified for the git gutter. */
 void line_delete_cell(struct line *line, uint32_t pos)
 {
 	line_ensure_warm(line);
 	line->temperature = LINE_HOT;
+	if (line->gutter_marker == GUTTER_NONE)
+		line->gutter_marker = GUTTER_MODIFIED;
 	if (pos >= line->cell_count)
 		return;
 	memmove(&line->cells[pos], &line->cells[pos + 1],
@@ -2027,6 +2056,7 @@ void editor_line_insert(int position, const char *string, size_t length)
 
 	line_init(&editor.lines[position], position);
 	line_populate_from_bytes(&editor.lines[position], string, length);
+	editor.lines[position].gutter_marker = GUTTER_ADDED;
 
 	editor.line_count++;
 	editor_update_gutter_width();
@@ -3096,6 +3126,7 @@ int editor_open_mmap(char *filename)
 		ln->mmap_length = (uint32_t)line_len;
 		ln->temperature = LINE_COLD;
 		ln->syntax_stale = 1;
+		ln->gutter_marker = GUTTER_NONE;
 		editor.line_count++;
 
 		pos = newline + 1;
@@ -3119,6 +3150,7 @@ int editor_open_mmap(char *filename)
 		ln->mmap_length = (uint32_t)line_len;
 		ln->temperature = LINE_COLD;
 		ln->syntax_stale = 1;
+		ln->gutter_marker = GUTTER_NONE;
 		editor.line_count++;
 	}
 
@@ -3253,6 +3285,11 @@ int editor_save_write(void)
 	tmp_path = NULL;
 
 	editor.dirty = 0;
+
+	/* Reset all gutter markers since the file is now saved. */
+	for (int i = 0; i < editor.line_count; i++)
+		editor.lines[i].gutter_marker = GUTTER_NONE;
+
 	editor_set_status_message("%zu bytes written to disk", file_length);
 
 out:
@@ -3465,6 +3502,10 @@ static const char *help_text =
 	"EDITING\n"
 	"  Ctrl+U               Undo\n"
 	"  Ctrl+R               Redo\n"
+	"  Tab (with selection)  Indent block\n"
+	"  Shift+Tab (w/ sel)   Dedent block\n"
+	"  Alt+/                Toggle line comment\n"
+	"  Alt+]                Jump to matching bracket\n"
 	"\n"
 	"DISPLAY\n"
 	"  Alt+T                Cycle color theme\n"
@@ -4443,6 +4484,382 @@ void append_buffer_write_background(struct append_buffer *append_buffer, const c
 	append_buffer_write(append_buffer, color_sequence, strlen(color_sequence));
 }
 
+/*** Bracket matching ***/
+
+/* Returns the matching bracket character for the given opener or closer.
+ * Returns 0 if the character is not a bracket. */
+uint32_t bracket_get_match(uint32_t codepoint)
+{
+	switch (codepoint) {
+	case '(': return ')';
+	case ')': return '(';
+	case '[': return ']';
+	case ']': return '[';
+	case '{': return '}';
+	case '}': return '{';
+	default: return 0;
+	}
+}
+
+/* Returns 1 if the codepoint is an opening bracket. */
+int bracket_is_opener(uint32_t codepoint)
+{
+	return codepoint == '(' || codepoint == '[' || codepoint == '{';
+}
+
+/* Scans for the bracket matching the one at the cursor position. Skips
+ * brackets inside strings and comments by checking cell.syntax. Uses a
+ * depth counter and scans forward for openers, backward for closers.
+ * Caps the scan at BRACKET_SCAN_MAX_LINES to avoid lag. Stores the
+ * result in editor.bracket_match_line and editor.bracket_match_cell. */
+void bracket_update_cursor_match(void)
+{
+	editor.bracket_match_line = -1;
+	editor.bracket_match_cell = -1;
+
+	if (editor.cursor_y >= editor.line_count)
+		return;
+
+	struct line *cursor_line = &editor.lines[editor.cursor_y];
+	line_ensure_warm(cursor_line);
+
+	if (editor.cursor_x >= (int)cursor_line->cell_count)
+		return;
+
+	struct cell *cursor_cell = &cursor_line->cells[editor.cursor_x];
+	uint32_t bracket = cursor_cell->codepoint;
+	uint32_t target = bracket_get_match(bracket);
+	if (target == 0)
+		return;
+
+	/* Skip brackets that are inside strings or comments. */
+	if (cursor_cell->syntax == HL_STRING
+	    || cursor_cell->syntax == HL_COMMENT
+	    || cursor_cell->syntax == HL_MLCOMMENT)
+		return;
+
+	int forward = bracket_is_opener(bracket);
+	int depth = 1;
+	int scan_line = editor.cursor_y;
+	int scan_cell = editor.cursor_x;
+
+	int lines_scanned = 0;
+
+	while (lines_scanned < BRACKET_SCAN_MAX_LINES) {
+		if (forward) {
+			scan_cell++;
+		} else {
+			scan_cell--;
+		}
+
+		/* Move to next/previous line when off the edge. */
+		while (scan_line >= 0 && scan_line < editor.line_count) {
+			struct line *ln = &editor.lines[scan_line];
+			line_ensure_warm(ln);
+			if (scan_cell >= 0 && scan_cell < (int)ln->cell_count)
+				break;
+
+			if (forward) {
+				scan_line++;
+				scan_cell = 0;
+			} else {
+				scan_line--;
+				if (scan_line >= 0) {
+					line_ensure_warm(&editor.lines[scan_line]);
+					scan_cell = (int)editor.lines[scan_line].cell_count - 1;
+				}
+			}
+			lines_scanned++;
+			if (lines_scanned >= BRACKET_SCAN_MAX_LINES)
+				return;
+		}
+
+		if (scan_line < 0 || scan_line >= editor.line_count)
+			return;
+
+		struct line *ln = &editor.lines[scan_line];
+		struct cell *c = &ln->cells[scan_cell];
+
+		/* Skip brackets inside strings and comments. */
+		if (c->syntax == HL_STRING || c->syntax == HL_COMMENT
+		    || c->syntax == HL_MLCOMMENT) {
+			continue;
+		}
+
+		if (c->codepoint == bracket) {
+			depth++;
+		} else if (c->codepoint == target) {
+			depth--;
+			if (depth == 0) {
+				editor.bracket_match_line = scan_line;
+				editor.bracket_match_cell = scan_cell;
+				return;
+			}
+		}
+	}
+}
+
+/* Jumps the cursor to the matching bracket position. Shows a message
+ * if the cursor is not on a bracket or no match was found. */
+void editor_jump_to_matching_bracket(void)
+{
+	bracket_update_cursor_match();
+	if (editor.bracket_match_line < 0) {
+		editor_set_status_message("No matching bracket");
+		return;
+	}
+	editor.cursor_y = editor.bracket_match_line;
+	editor.cursor_x = editor.bracket_match_cell;
+	editor.preferred_column = -1;
+}
+
+/*** Block indent/dedent ***/
+
+/* Indents all lines in the current selection by inserting one tab at the
+ * start of each non-empty line. Adjusts cursor and selection bounds. */
+void editor_indent_selection(void)
+{
+	editor.force_full_redraw = 1;
+	int start_y, start_x, end_y, end_x;
+	if (!selection_get_range(&start_y, &start_x, &end_y, &end_x))
+		return;
+
+	struct cell tab_cell = {
+		.codepoint = '\t',
+		.syntax = HL_NORMAL,
+		.neighbor = 0,
+		.flags = 0,
+		.context = 0,
+	};
+
+	for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+
+		/* Skip empty lines. */
+		if (ln->cell_count == 0)
+			continue;
+
+		line_insert_cell(ln, 0, tab_cell);
+		syntax_propagate(y);
+	}
+
+	/* Adjust cursor and selection bounds for the inserted tab. */
+	if (editor.cursor_x > 0 || editor.cursor_y > start_y
+	    || editor.cursor_y == start_y)
+		editor.cursor_x++;
+	if (editor.selection.anchor_x > 0
+	    || editor.selection.anchor_y > start_y
+	    || editor.selection.anchor_y == start_y)
+		editor.selection.anchor_x++;
+
+	selection_update();
+	editor.dirty++;
+}
+
+/* Removes one level of indentation from all lines in the current selection.
+ * Removes a leading tab, or up to EDIT_TAB_STOP leading spaces. */
+void editor_dedent_selection(void)
+{
+	editor.force_full_redraw = 1;
+	int start_y, start_x, end_y, end_x;
+	if (!selection_get_range(&start_y, &start_x, &end_y, &end_x))
+		return;
+
+	for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+
+		if (ln->cell_count == 0)
+			continue;
+
+		int removed = 0;
+		if (ln->cells[0].codepoint == '\t') {
+			line_delete_cell(ln, 0);
+			removed = 1;
+		} else {
+			/* Remove up to EDIT_TAB_STOP leading spaces. */
+			int spaces = 0;
+			while (spaces < EDIT_TAB_STOP
+			       && spaces < (int)ln->cell_count
+			       && ln->cells[spaces].codepoint == ' ')
+				spaces++;
+			for (int i = 0; i < spaces; i++)
+				line_delete_cell(ln, 0);
+			removed = spaces;
+		}
+
+		if (removed > 0) {
+			syntax_propagate(y);
+
+			/* Adjust cursor position on this line. */
+			if (y == editor.cursor_y) {
+				editor.cursor_x -= removed;
+				if (editor.cursor_x < 0)
+					editor.cursor_x = 0;
+			}
+			/* Adjust anchor position on this line. */
+			if (y == editor.selection.anchor_y) {
+				editor.selection.anchor_x -= removed;
+				if (editor.selection.anchor_x < 0)
+					editor.selection.anchor_x = 0;
+			}
+		}
+	}
+
+	selection_update();
+	editor.dirty++;
+}
+
+/*** Comment toggle ***/
+
+/* Toggles line comments on the current line or all selected lines.
+ * Uses the filetype's singleline_comment_start prefix to add or remove
+ * comments. If all affected lines are commented, removes the prefix;
+ * otherwise adds it. */
+void editor_toggle_comment(void)
+{
+	editor.force_full_redraw = 1;
+
+	if (!editor.syntax || !editor.syntax->singleline_comment_start) {
+		editor_set_status_message("No comment style for this file type");
+		return;
+	}
+
+	char *prefix = editor.syntax->singleline_comment_start;
+	int prefix_length = (int)strlen(prefix);
+
+	/* Determine affected line range. */
+	int start_y = editor.cursor_y;
+	int end_y = editor.cursor_y;
+	if (editor.selection.active) {
+		int sx, sy, ex, ey;
+		selection_get_range(&sy, &sx, &ey, &ex);
+		start_y = sy;
+		end_y = ey;
+	}
+
+	/* Check if ALL affected non-empty lines start with the prefix. */
+	int all_commented = 1;
+	int has_nonempty = 0;
+	for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+
+		if (ln->cell_count == 0)
+			continue;
+		has_nonempty = 1;
+
+		/* Find the first non-whitespace cell. */
+		int first_nonws = 0;
+		while (first_nonws < (int)ln->cell_count
+		       && (ln->cells[first_nonws].codepoint == ' '
+		           || ln->cells[first_nonws].codepoint == '\t'))
+			first_nonws++;
+
+		/* Check if the prefix matches starting at first_nonws. */
+		int match = 1;
+		for (int i = 0; i < prefix_length; i++) {
+			if (first_nonws + i >= (int)ln->cell_count
+			    || ln->cells[first_nonws + i].codepoint != (uint32_t)prefix[i]) {
+				match = 0;
+				break;
+			}
+		}
+		if (!match) {
+			all_commented = 0;
+			break;
+		}
+	}
+
+	if (!has_nonempty)
+		return;
+
+	if (all_commented) {
+		/* Remove the prefix (and one trailing space) from each line. */
+		for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+			struct line *ln = &editor.lines[y];
+			line_ensure_warm(ln);
+
+			if (ln->cell_count == 0)
+				continue;
+
+			int first_nonws = 0;
+			while (first_nonws < (int)ln->cell_count
+			       && (ln->cells[first_nonws].codepoint == ' '
+			           || ln->cells[first_nonws].codepoint == '\t'))
+				first_nonws++;
+
+			/* Remove the prefix characters. */
+			int to_remove = prefix_length;
+			/* Also remove one trailing space if present. */
+			if (first_nonws + prefix_length < (int)ln->cell_count
+			    && ln->cells[first_nonws + prefix_length].codepoint == ' ')
+				to_remove++;
+
+			for (int i = 0; i < to_remove; i++)
+				line_delete_cell(ln, (uint32_t)first_nonws);
+
+			/* Adjust cursor if on this line. */
+			if (y == editor.cursor_y) {
+				editor.cursor_x -= to_remove;
+				if (editor.cursor_x < first_nonws)
+					editor.cursor_x = first_nonws;
+			}
+
+			syntax_propagate(y);
+		}
+	} else {
+		/* Insert prefix + space after leading whitespace on each line. */
+		for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+			struct line *ln = &editor.lines[y];
+			line_ensure_warm(ln);
+
+			if (ln->cell_count == 0)
+				continue;
+
+			int first_nonws = 0;
+			while (first_nonws < (int)ln->cell_count
+			       && (ln->cells[first_nonws].codepoint == ' '
+			           || ln->cells[first_nonws].codepoint == '\t'))
+				first_nonws++;
+
+			/* Insert a space after the prefix. */
+			struct cell space_cell = {
+				.codepoint = ' ',
+				.syntax = HL_NORMAL,
+				.neighbor = 0,
+				.flags = 0,
+				.context = 0,
+			};
+			line_insert_cell(ln, (uint32_t)first_nonws, space_cell);
+
+			/* Insert the prefix characters in reverse order at
+			 * first_nonws so they end up in the correct order. */
+			for (int i = prefix_length - 1; i >= 0; i--) {
+				struct cell prefix_cell = {
+					.codepoint = (uint32_t)prefix[i],
+					.syntax = HL_NORMAL,
+					.neighbor = 0,
+					.flags = 0,
+					.context = 0,
+				};
+				line_insert_cell(ln, (uint32_t)first_nonws, prefix_cell);
+			}
+
+			int inserted = prefix_length + 1;
+
+			/* Adjust cursor if on this line. */
+			if (y == editor.cursor_y && editor.cursor_x >= first_nonws)
+				editor.cursor_x += inserted;
+
+			syntax_propagate(y);
+		}
+	}
+
+	editor.dirty++;
+}
+
 /*** Output ***/
 
 /* Adjusts the viewport scroll offsets so the cursor stays visible on screen.
@@ -4674,15 +5091,28 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 						editor.theme
 								.highlight_background);
 			}
-			/* Line numbers */
+			/* Line numbers and git gutter marker */
 			if (editor.line_number_width > 0) {
 				append_buffer_write_color(
 						append_buffer,
 						editor.theme.line_number);
 				char line_number_string[LINE_NUMBER_BUFFER_SIZE];
 				snprintf(line_number_string, sizeof(line_number_string),
-							 "%*d ", editor.line_number_width - 1, file_row + 1);
+							 "%*d", editor.line_number_width - 1, file_row + 1);
 				append_buffer_write(append_buffer, line_number_string, strlen(line_number_string));
+
+				/* Render gutter marker in place of the separator space. */
+				int marker = editor.lines[file_row].gutter_marker;
+				if (marker == GUTTER_ADDED) {
+					append_buffer_write_color(append_buffer, editor.theme.keyword2);
+					append_buffer_write(append_buffer, "+", 1);
+				} else if (marker == GUTTER_MODIFIED) {
+					append_buffer_write_color(append_buffer, editor.theme.number);
+					append_buffer_write(append_buffer, "~", 1);
+				} else {
+					append_buffer_write(append_buffer, " ", 1);
+				}
+
 				append_buffer_write_color(
 						append_buffer, editor.theme.foreground);
 			}
@@ -4718,6 +5148,12 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			while (ci < ln->cell_count && output_col < visible_length) {
 				uint32_t cp = ln->cells[ci].codepoint;
 				uint16_t hl = ln->cells[ci].syntax;
+
+				/* Highlight the matching bracket with HL_MATCH. */
+				if (file_row == editor.bracket_match_line
+				    && (int)ci == editor.bracket_match_cell)
+					hl = HL_MATCH;
+
 				if (cp == '\t') {
 					int cw = cell_display_width(&ln->cells[ci], col);
 					/* Expand tab to spaces */
@@ -4880,6 +5316,7 @@ void editor_draw_message_bar(struct append_buffer *append_buffer)
 void editor_refresh_screen(void)
 {
 	editor_scroll();
+	bracket_update_cursor_match();
 
 	/* Detect whether a full redraw is needed by comparing the current
 	 * frame state against the previous frame's snapshot. Pure cursor
@@ -5392,6 +5829,14 @@ void editor_process_keypress(struct input_event event)
 		editor_replace_start();
 		break;
 
+	case ALT_KEY(']'):
+		editor_jump_to_matching_bracket();
+		break;
+
+	case ALT_KEY('/'):
+		editor_toggle_comment();
+		break;
+
 	case ALT_KEY('?'):
 	case F11_KEY:
 		editor_help_open();
@@ -5618,6 +6063,22 @@ void editor_process_keypress(struct input_event event)
 		editor_scroll_rows(ARROW_DOWN, editor.scroll_speed);
 		break;
 
+	/* Tab indents the selection when text is selected; otherwise
+	 * falls through to the default handler to insert a tab. */
+	case '\t':
+		if (editor.selection.active) {
+			editor_indent_selection();
+			break;
+		}
+		editor_insert_char(key);
+		break;
+
+	/* Shift+Tab dedents the selection when text is selected. */
+	case SHIFT_TAB:
+		if (editor.selection.active)
+			editor_dedent_selection();
+		break;
+
 	case ESC_KEY:
 		if (editor.viewing_help) {
 			editor_help_close();
@@ -5631,7 +6092,7 @@ void editor_process_keypress(struct input_event event)
 		/* Only insert printable characters: Unicode codepoints above
 		 * the control range, or tab. Filter out negative values,
 		 * control characters, and unrecognized escape sequences. */
-		if (key == '\t' || (key >= 32 && key != BACKSPACE)) {
+		if (key >= 32 && key != BACKSPACE) {
 			if (editor.selection.active)
 				selection_delete();
 			editor_insert_char(key);
@@ -5745,6 +6206,8 @@ void editor_init(void)
 	editor.prev_status_message[0] = '\0';
 	editor.prev_dirty = 0;
 	editor.force_full_redraw = 1;
+	editor.bracket_match_line = -1;
+	editor.bracket_match_cell = -1;
 }
 
 /* Reads all data from stdin into a malloc'd buffer. Used when stdin is
