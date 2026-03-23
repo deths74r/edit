@@ -3082,6 +3082,20 @@ static const char *help_text =
 	"                         Arrow keys navigate matches\n"
 	"                         Enter to accept, ESC to cancel\n"
 	"\n"
+	"SELECTION\n"
+	"  Shift+Arrow          Select by character/line\n"
+	"  Shift+Ctrl+Left/Right  Select by word\n"
+	"  Alt+A / Alt+E        Select to line start / end\n"
+	"  Mouse drag           Select with mouse\n"
+	"  ESC                  Clear selection\n"
+	"\n"
+	"CLIPBOARD\n"
+	"  Alt+C                Copy\n"
+	"  Alt+X                Cut\n"
+	"  Alt+V                Paste\n"
+	"  Alt+Shift+K          Cut entire line\n"
+	"  Alt+D                Duplicate line\n"
+	"\n"
 	"EDITING\n"
 	"  Ctrl+U               Undo\n"
 	"  Ctrl+R               Redo\n"
@@ -4124,6 +4138,8 @@ void editor_process_keypress(struct input_event event)
 		case ALT_KEY('f'): case CTRL_KEY('f'):
 		/* Display toggles */
 		case ALT_KEY('t'): case ALT_KEY('n'):
+		/* Select to start/end of line */
+		case ALT_KEY('a'): case ALT_KEY('e'):
 		/* Goto line */
 		case ALT_KEY('g'): case CTRL_KEY('g'):
 			allowed = 1;
@@ -4300,6 +4316,21 @@ void editor_process_keypress(struct input_event event)
 		selection_update();
 		break;
 	}
+
+	/* Alt+A / Alt+E: select to start/end of line */
+	case ALT_KEY('a'):
+		if (!editor.selection.active)
+			selection_start();
+		editor.cursor_x = 0;
+		selection_update();
+		break;
+	case ALT_KEY('e'):
+		if (!editor.selection.active)
+			selection_start();
+		if (editor.cursor_y < editor.line_count)
+			editor.cursor_x = (int)editor.lines[editor.cursor_y].cell_count;
+		selection_update();
+		break;
 
 	/* Shift+Ctrl+Arrow word selection */
 	case SHIFT_CTRL_ARROW_LEFT:
