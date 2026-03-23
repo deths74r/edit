@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <poll.h>
 #include <sys/time.h>
 #include <sys/types.h>
@@ -299,6 +300,8 @@ struct editor_state {
 	int screen_columns;
 	/* Total number of lines in the file. */
 	int line_count;
+	/* Allocated capacity of the lines array (number of struct line slots). */
+	int line_capacity;
 	/* Dynamic array of line structures. */
 	struct line *lines;
 	/* True if file has unsaved modifications. */
@@ -537,11 +540,23 @@ int editor_emergency_save(void)
 	return 0;
 }
 
+/* Guard flag preventing terminal_die() from recursing into itself.
+ * Uses volatile sig_atomic_t because terminal_die() may be called
+ * from signal handlers. */
+static volatile sig_atomic_t terminal_die_in_progress = 0;
+
 /* Prints an error message and exits. Clears the screen first to leave the
  * terminal in a clean state before displaying the error via perror().
  * Attempts to save unsaved changes to a recovery file before exiting. */
 void terminal_die(const char *message)
 {
+	/* Reentrancy guard: if we're already dying, just exit immediately.
+	 * This prevents infinite recursion when malloc fails inside
+	 * editor_emergency_save(). */
+	if (terminal_die_in_progress)
+		_exit(1);
+	terminal_die_in_progress = 1;
+
 	write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
 	write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
 
@@ -549,7 +564,7 @@ void terminal_die(const char *message)
 	editor_emergency_save();
 
 	perror(message);
-	exit(1);
+	_exit(1);
 }
 
 /* Restores the terminal to its original settings saved before entering
@@ -608,6 +623,20 @@ void terminal_handle_resize(int signal_number)
 {
 	(void)signal_number;
 	resize_pending = 1;
+}
+
+/* Handles SIGTERM and SIGHUP by attempting an emergency save and exiting
+ * cleanly. Restores the terminal before exit. Only uses async-signal-safe
+ * operations where possible. */
+void terminal_handle_terminate(int signal_number)
+{
+	(void)signal_number;
+	write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
+	write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+	write(STDOUT_FILENO, DISABLE_MOUSE_REPORTING,
+	      strlen(DISABLE_MOUSE_REPORTING));
+	editor_emergency_save();
+	_exit(1);
 }
 
 /* Processes a pending terminal resize by re-querying the terminal size,
@@ -1460,6 +1489,22 @@ void editor_update_gutter_width(void)
 	editor.line_number_width = digits + 1;
 }
 
+/* Ensures the lines array has room for at least 'needed' entries.
+ * Uses a doubling strategy starting from 16 to amortize realloc costs. */
+void editor_lines_ensure_capacity(int needed)
+{
+	if (needed <= editor.line_capacity)
+		return;
+	int new_capacity = editor.line_capacity ? editor.line_capacity : 16;
+	while (new_capacity < needed)
+		new_capacity *= 2;
+	editor.lines = realloc(editor.lines,
+			       sizeof(struct line) * new_capacity);
+	if (editor.lines == NULL)
+		terminal_die("realloc");
+	editor.line_capacity = new_capacity;
+}
+
 /* Inserts a new line at the given position in the editor's lines array.
  * Populates the line from the provided byte string, initializes the line
  * fields, and triggers a syntax update. Shifts existing lines down and
@@ -1469,10 +1514,7 @@ void editor_line_insert(int position, const char *string, size_t length)
 	if (position < 0 || position > editor.line_count)
 		return;
 
-	editor.lines =
-			realloc(editor.lines, sizeof(struct line) * (editor.line_count + 1));
-	if (editor.lines == NULL)
-		terminal_die("realloc");
+	editor_lines_ensure_capacity(editor.line_count + 1);
 	memmove(&editor.lines[position + 1], &editor.lines[position],
 				sizeof(struct line) * (editor.line_count - position));
 	for (int j = position + 1; j <= editor.line_count; j++)
@@ -1668,7 +1710,6 @@ int editor_open_mmap(char *filename)
 	fd = -1;
 
 	/* Scan for newlines to build line index */
-	int line_capacity = 0;
 	size_t line_start = 0;
 	for (size_t i = 0; i < (size_t)file_size; i++) {
 		if (base[i] == '\n') {
@@ -1677,13 +1718,7 @@ int editor_open_mmap(char *filename)
 			if (line_len > 0 && base[line_start + line_len - 1] == '\r')
 				line_len--;
 
-			if (editor.line_count >= line_capacity) {
-				line_capacity = line_capacity ? line_capacity * 2 : 1024;
-				editor.lines = realloc(editor.lines,
-						       sizeof(struct line) * line_capacity);
-				if (editor.lines == NULL)
-					terminal_die("realloc");
-			}
+			editor_lines_ensure_capacity(editor.line_count + 1);
 			struct line *ln = &editor.lines[editor.line_count];
 			ln->cells = NULL;
 			ln->cell_count = 0;
@@ -1705,13 +1740,7 @@ int editor_open_mmap(char *filename)
 		if (line_len > 0 && base[line_start + line_len - 1] == '\r')
 			line_len--;
 
-		if (editor.line_count >= line_capacity) {
-			line_capacity = line_capacity ? line_capacity * 2 : 1024;
-			editor.lines = realloc(editor.lines,
-					       sizeof(struct line) * line_capacity);
-			if (editor.lines == NULL)
-				terminal_die("realloc");
-		}
+		editor_lines_ensure_capacity(editor.line_count + 1);
 		struct line *ln = &editor.lines[editor.line_count];
 		ln->cells = NULL;
 		ln->cell_count = 0;
@@ -1722,14 +1751,6 @@ int editor_open_mmap(char *filename)
 		ln->mmap_length = (uint32_t)line_len;
 		ln->temperature = LINE_COLD;
 		editor.line_count++;
-	}
-
-	/* Shrink to fit */
-	if (editor.line_count > 0 && editor.line_count < line_capacity) {
-		editor.lines = realloc(editor.lines,
-				       sizeof(struct line) * editor.line_count);
-		if (editor.lines == NULL)
-			terminal_die("realloc");
 	}
 
 out:
@@ -1780,14 +1801,15 @@ int editor_open(char *filename)
 	return 0;
 }
 
-/* Writes the current file content to disk. Assumes editor.filename is set.
- * Converts all rows to a string, releases mmap, truncates the file, and
- * writes the content. If quit_after_save is set, exits after success.
+/* Writes the current file content to disk using an atomic write-to-temp
+ * + rename pattern. This ensures the original file is never corrupted
+ * if a write fails partway through (disk full, I/O error, etc).
  * Returns 0 on success, negative errno on failure. */
 int editor_save_write(void)
 {
 	int ret = 0;
 	int fd = -1;
+	char *tmp_path = NULL;
 	size_t file_length;
 	char *file_content = editor_rows_to_string(&file_length);
 
@@ -1802,17 +1824,30 @@ int editor_save_write(void)
 		editor.file_descriptor = -1;
 	}
 
-	fd = open(editor.filename, O_RDWR | O_CREAT, FILE_PERMISSION_DEFAULT);
+	/* Build temporary file path in the same directory as the target
+	 * so rename() is atomic (same filesystem). */
+	size_t filename_len = strlen(editor.filename);
+	tmp_path = malloc(filename_len + 8);
+	if (tmp_path == NULL) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	snprintf(tmp_path, filename_len + 8, "%s.XXXXXX", editor.filename);
+
+	fd = mkstemp(tmp_path);
 	if (fd == -1) {
 		ret = -errno;
 		goto out;
 	}
-	if (ftruncate(fd, (off_t)file_length) == -1) {
-		ret = -errno;
-		goto out;
+
+	/* Preserve original file permissions if the file exists */
+	struct stat original_stat;
+	if (stat(editor.filename, &original_stat) == 0) {
+		fchmod(fd, original_stat.st_mode);
+	} else {
+		fchmod(fd, FILE_PERMISSION_DEFAULT);
 	}
-	if (file_length == 0)
-		goto success;
+
 	/* Write all content, retrying on short writes. */
 	size_t bytes_written = 0;
 	while (bytes_written < file_length) {
@@ -1827,14 +1862,32 @@ int editor_save_write(void)
 		bytes_written += (size_t)result;
 	}
 
-success:
-	/* Success */
+	/* Flush to stable storage before rename */
+	if (fsync(fd) == -1) {
+		ret = -errno;
+		goto out;
+	}
+	close(fd);
+	fd = -1;
+
+	/* Atomic rename over the original file */
+	if (rename(tmp_path, editor.filename) == -1) {
+		ret = -errno;
+		goto out;
+	}
+	/* tmp_path is now consumed by rename — don't unlink it */
+	free(tmp_path);
+	tmp_path = NULL;
+
 	editor.dirty = 0;
 	editor_set_status_message("%zu bytes written to disk", file_length);
 
 out:
 	if (fd != -1)
 		close(fd);
+	if (tmp_path != NULL)
+		unlink(tmp_path);
+	free(tmp_path);
 	free(file_content);
 	if (ret < 0) {
 		const char *error_msg;
@@ -1870,6 +1923,7 @@ out:
  * filename, selects syntax highlighting, and writes the file. */
 void editor_save_accept(char *filename)
 {
+	free(editor.filename);
 	editor.filename = filename;
 	syntax_select_highlight();
 	editor_save_write();
@@ -2938,7 +2992,11 @@ void editor_process_keypress(struct input_event event)
 		break;
 
 	default:
-		editor_insert_char(key);
+		/* Only insert printable characters: Unicode codepoints above
+		 * the control range, or tab. Filter out negative values,
+		 * control characters, and unrecognized escape sequences. */
+		if (key == '\t' || (key >= 32 && key != BACKSPACE))
+			editor_insert_char(key);
 		break;
 	}
 
@@ -2959,6 +3017,7 @@ void editor_init(void)
 	editor.row_offset = 0;
 	editor.column_offset = 0;
 	editor.line_count = 0;
+	editor.line_capacity = 0;
 	editor_update_gutter_width();
 	editor.lines = NULL;
 	editor.dirty = 0;
@@ -2968,7 +3027,22 @@ void editor_init(void)
 	editor.syntax = NULL;
 	editor_set_theme(current_theme_index);
 
-	signal(SIGWINCH, terminal_handle_resize);
+	/* Install signal handlers using sigaction for portable, reliable behavior.
+	 * SA_RESTART ensures system calls are not interrupted by signals. */
+	struct sigaction sa_resize = {.sa_handler = terminal_handle_resize,
+				     .sa_flags = SA_RESTART};
+	sigemptyset(&sa_resize.sa_mask);
+	sigaction(SIGWINCH, &sa_resize, NULL);
+
+	struct sigaction sa_terminate = {.sa_handler = terminal_handle_terminate,
+					.sa_flags = 0};
+	sigemptyset(&sa_terminate.sa_mask);
+	sigaction(SIGTERM, &sa_terminate, NULL);
+	sigaction(SIGHUP, &sa_terminate, NULL);
+
+	/* Ignore SIGPIPE so write() to a broken pipe returns EPIPE instead
+	 * of killing the process. */
+	signal(SIGPIPE, SIG_IGN);
 	if (terminal_get_window_size(&editor.screen_rows, &editor.screen_columns) ==
 			-1) {
 		/* terminal_get_window_size already set defaults, just warn */
