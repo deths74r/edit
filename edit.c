@@ -466,6 +466,12 @@ struct editor_state {
 	/* When set, search and replace ignore letter case. Toggled
 	 * with Alt+C during an active search prompt. */
 	int search_case_insensitive;
+	/* Search string for find-and-replace, or NULL when inactive. */
+	char *replace_query;
+	/* Replacement string for find-and-replace, or NULL when inactive. */
+	char *replace_with;
+	/* Number of replacements performed in the current replace-all pass. */
+	int replace_count;
 	/* Desired render column preserved across vertical movement. */
 	int preferred_column;
 	/* When set, editor_scroll() skips the margin and uses simple
@@ -3358,6 +3364,10 @@ void editor_quit(void)
 	/* Free syntax highlighting scratch buffers */
 	free(editor.scratch_buffer);
 	free(editor.scratch_offsets);
+
+	/* Free any in-progress replace state */
+	free(editor.replace_query);
+	free(editor.replace_with);
 }
 
 /*** Help ***/
@@ -3386,7 +3396,9 @@ static const char *help_text =
 	"SEARCH\n"
 	"  Alt+F / Ctrl+F       Find (incremental)\n"
 	"                         Arrow keys navigate matches\n"
+	"                         Alt+C toggles case sensitivity\n"
 	"                         Enter to accept, ESC to cancel\n"
+	"  Alt+R                Find and replace\n"
 	"\n"
 	"SELECTION\n"
 	"  Shift+Arrow          Select by character/line\n"
@@ -3739,8 +3751,249 @@ void editor_find_start(void)
 	editor.search_last_match = -1;
 	editor.search_last_match_offset = -1;
 	editor.search_direction = 1;
-	prompt_open("Search: %s (Use ESC/Arrows/Enter)",
+	prompt_open("Search: %s (ESC/Arrows/Enter, Alt+C=case)",
 		    editor_find_callback, editor_find_accept, editor_find_cancel);
+}
+
+/* Finds the next match for the current replace query starting from the
+ * cursor position. Positions the cursor at the match and returns 1 if
+ * found, 0 if no more matches exist. */
+int editor_replace_find_next(void)
+{
+	if (!editor.replace_query)
+		return 0;
+	size_t query_length = strlen(editor.replace_query);
+	if (query_length == 0)
+		return 0;
+	int case_flag = editor.search_case_insensitive;
+
+	/* Search from the current cursor position forward, wrapping once. */
+	int start_line = editor.cursor_y;
+	int start_col = editor.cursor_x;
+	for (int i = 0; i < editor.line_count; i++) {
+		int line_index = (start_line + i) % editor.line_count;
+		struct line *ln = &editor.lines[line_index];
+		size_t byte_length;
+		char *bytes = line_to_bytes(ln, &byte_length);
+
+		/* On the starting line, skip bytes before the cursor so we
+		 * don't re-find a match we have already processed. */
+		int byte_start = 0;
+		if (i == 0) {
+			int cells_counted = 0;
+			size_t byte_position = 0;
+			while (cells_counted < start_col && byte_position < byte_length) {
+				uint32_t codepoint;
+				int consumed = utf8_decode(&bytes[byte_position], (int)(byte_length - byte_position), &codepoint);
+				if (consumed <= 0) consumed = 1;
+				byte_position += consumed;
+				cells_counted++;
+			}
+			byte_start = (int)byte_position;
+		}
+
+		char *match = editor_memmem(bytes + byte_start, byte_length - byte_start, editor.replace_query, query_length, case_flag);
+		if (match) {
+			int match_byte_offset = (int)(match - bytes);
+			/* Convert byte offset to cell index */
+			int cell_index = 0;
+			size_t byte_position = 0;
+			while ((int)byte_position < match_byte_offset && (uint32_t)cell_index < ln->cell_count) {
+				uint32_t codepoint;
+				int consumed = utf8_decode(&bytes[byte_position], (int)(byte_length - byte_position), &codepoint);
+				if (consumed <= 0) consumed = 1;
+				byte_position += consumed;
+				cell_index++;
+			}
+			editor.cursor_y = line_index;
+			editor.cursor_x = cell_index;
+
+			/* Center the match on screen */
+			int screen_middle = editor.screen_rows / 2;
+			editor.row_offset = editor.cursor_y - screen_middle;
+			if (editor.row_offset < 0)
+				editor.row_offset = 0;
+			int max_offset = editor.line_count - editor.screen_rows;
+			if (max_offset < 0)
+				max_offset = 0;
+			if (editor.row_offset > max_offset)
+				editor.row_offset = max_offset;
+
+			/* Highlight the match cells */
+			int query_cell_count = 0;
+			size_t qpos = 0;
+			while (qpos < query_length) {
+				uint32_t codepoint;
+				int consumed = utf8_decode(&editor.replace_query[qpos], (int)(query_length - qpos), &codepoint);
+				if (consumed <= 0) consumed = 1;
+				qpos += consumed;
+				query_cell_count++;
+			}
+			line_ensure_warm(ln);
+			for (int k = 0; k < query_cell_count && cell_index + k < (int)ln->cell_count; k++)
+				ln->cells[cell_index + k].syntax = HL_MATCH;
+
+			free(bytes);
+			editor.force_full_redraw = 1;
+			return 1;
+		}
+		free(bytes);
+	}
+	return 0;
+}
+
+/* Performs one replacement at the current cursor position: deletes
+ * the matched cells and inserts the replacement text character by
+ * character using editor_insert_char(). */
+void editor_replace_perform_one(void)
+{
+	if (!editor.replace_query || !editor.replace_with)
+		return;
+	/* Count cells in the matched query */
+	size_t query_length = strlen(editor.replace_query);
+	int query_cell_count = 0;
+	size_t qpos = 0;
+	while (qpos < query_length) {
+		uint32_t codepoint;
+		int consumed = utf8_decode(&editor.replace_query[qpos], (int)(query_length - qpos), &codepoint);
+		if (consumed <= 0) consumed = 1;
+		qpos += consumed;
+		query_cell_count++;
+	}
+
+	/* Delete the matched cells at cursor position */
+	if (editor.cursor_y < editor.line_count) {
+		struct line *ln = &editor.lines[editor.cursor_y];
+		line_ensure_warm(ln);
+		for (int k = 0; k < query_cell_count && editor.cursor_x < (int)ln->cell_count; k++)
+			line_delete_cell(ln, (uint32_t)editor.cursor_x);
+	}
+
+	/* Insert replacement text character by character */
+	size_t replace_length = strlen(editor.replace_with);
+	size_t rpos = 0;
+	while (rpos < replace_length) {
+		uint32_t codepoint;
+		int consumed = utf8_decode(&editor.replace_with[rpos], (int)(replace_length - rpos), &codepoint);
+		if (consumed <= 0) { consumed = 1; codepoint = '?'; }
+		editor_insert_char((int)codepoint);
+		rpos += consumed;
+	}
+	editor.replace_count++;
+	syntax_propagate(editor.cursor_y);
+}
+
+/* Handles the y/n/a/ESC confirmation during find-and-replace.
+ * Called from MODE_CONFIRM for each keypress. */
+void editor_replace_confirm(int key)
+{
+	if (key == 'y' || key == 'Y') {
+		editor_replace_perform_one();
+		if (editor_replace_find_next()) {
+			confirm_open("Replace? (y)es (n)o (a)ll (ESC)cancel",
+				     editor_replace_confirm);
+		} else {
+			editor_set_status_message("Replaced %d occurrence(s)",
+						 editor.replace_count);
+			free(editor.replace_query);
+			editor.replace_query = NULL;
+			free(editor.replace_with);
+			editor.replace_with = NULL;
+		}
+	} else if (key == 'n' || key == 'N') {
+		/* Skip: advance past the current match and find the next */
+		size_t query_length = strlen(editor.replace_query);
+		int query_cell_count = 0;
+		size_t qpos = 0;
+		while (qpos < query_length) {
+			uint32_t codepoint;
+			int consumed = utf8_decode(&editor.replace_query[qpos], (int)(query_length - qpos), &codepoint);
+			if (consumed <= 0) consumed = 1;
+			qpos += consumed;
+			query_cell_count++;
+		}
+		editor.cursor_x += query_cell_count;
+		if (editor_replace_find_next()) {
+			confirm_open("Replace? (y)es (n)o (a)ll (ESC)cancel",
+				     editor_replace_confirm);
+		} else {
+			editor_set_status_message("Replaced %d occurrence(s)",
+						 editor.replace_count);
+			free(editor.replace_query);
+			editor.replace_query = NULL;
+			free(editor.replace_with);
+			editor.replace_with = NULL;
+		}
+	} else if (key == 'a' || key == 'A') {
+		/* Replace all remaining matches */
+		editor_replace_perform_one();
+		while (editor_replace_find_next())
+			editor_replace_perform_one();
+		editor_set_status_message("Replaced %d occurrence(s)",
+					 editor.replace_count);
+		free(editor.replace_query);
+		editor.replace_query = NULL;
+		free(editor.replace_with);
+		editor.replace_with = NULL;
+	} else {
+		/* ESC or any other key cancels */
+		editor_set_status_message("Replace cancelled (%d replaced)",
+					 editor.replace_count);
+		free(editor.replace_query);
+		editor.replace_query = NULL;
+		free(editor.replace_with);
+		editor.replace_with = NULL;
+	}
+}
+
+/* Called when the user accepts the replacement string. Stores it and
+ * begins the interactive find-and-replace confirmation loop. */
+void editor_replace_with_accept(char *replacement)
+{
+	editor.replace_with = replacement;
+	editor.replace_count = 0;
+	editor.cursor_x = 0;
+	editor.cursor_y = 0;
+	if (editor_replace_find_next()) {
+		confirm_open("Replace? (y)es (n)o (a)ll (ESC)cancel",
+			     editor_replace_confirm);
+	} else {
+		editor_set_status_message("No matches found");
+		free(editor.replace_query);
+		editor.replace_query = NULL;
+		free(editor.replace_with);
+		editor.replace_with = NULL;
+	}
+}
+
+/* Called when the user cancels the replacement string prompt. */
+void editor_replace_with_cancel(void)
+{
+	editor_set_status_message("Replace cancelled");
+	free(editor.replace_query);
+	editor.replace_query = NULL;
+}
+
+/* Called when the user accepts the search string for replace. Stores
+ * it and opens a second prompt for the replacement text. */
+void editor_replace_search_accept(char *query)
+{
+	editor.replace_query = query;
+	prompt_open("Replace with: %s (ESC to cancel)", NULL,
+		    editor_replace_with_accept, editor_replace_with_cancel);
+}
+
+/* Called when the user cancels the search prompt for replace. */
+void editor_replace_search_cancel(void)
+{
+	editor_set_status_message("Replace cancelled");
+}
+
+/* Starts the find-and-replace flow by opening a search prompt. */
+void editor_replace_start(void)
+{
+	prompt_open("Replace: %s (ESC to cancel)", NULL,
+		    editor_replace_search_accept, editor_replace_search_cancel);
 }
 
 /* Called when the user accepts a jump-to-line input. Parses the line
@@ -4620,6 +4873,10 @@ void editor_process_keypress(struct input_event event)
 		editor_find_start();
 		break;
 
+	case ALT_KEY('r'):
+		editor_replace_start();
+		break;
+
 	case ALT_KEY('?'):
 	case F11_KEY:
 		editor_help_open();
@@ -4937,6 +5194,11 @@ void editor_init(void)
 	editor.search_saved_highlight_line = 0;
 	editor.search_saved_syntax = NULL;
 	editor.search_saved_syntax_count = 0;
+	editor.search_case_insensitive = 0;
+
+	editor.replace_query = NULL;
+	editor.replace_with = NULL;
+	editor.replace_count = 0;
 
 	editor.preferred_column = -1;
 	editor.suppress_scroll_margin = 0;
@@ -4960,13 +5222,90 @@ void editor_init(void)
 	editor.force_full_redraw = 1;
 }
 
-/* Entry point. Sets up the terminal (mouse reporting, raw mode), initializes
- * the editor, optionally opens a file from the command line argument, and
- * enters a poll()-based main loop. Input is buffered and decoded without
- * blocking, so paste and resize are handled efficiently. */
+/* Reads all data from stdin into a malloc'd buffer. Used when stdin is
+ * a pipe or when "-" is passed as the filename. Stores the total number
+ * of bytes read in *out_length. Returns the buffer (caller frees), or
+ * NULL on failure. */
+char *editor_read_stdin_pipe(size_t *out_length)
+{
+	size_t capacity = 4096;
+	size_t total = 0;
+	char *buffer = malloc(capacity);
+	if (!buffer)
+		return NULL;
+	while (1) {
+		if (total + 1024 > capacity) {
+			capacity *= 2;
+			buffer = realloc(buffer, capacity);
+			if (!buffer)
+				return NULL;
+		}
+		ssize_t bytes_read = read(STDIN_FILENO, buffer + total, capacity - total);
+		if (bytes_read <= 0)
+			break;
+		total += (size_t)bytes_read;
+	}
+	*out_length = total;
+	return buffer;
+}
+
+/* Entry point. Initializes the editor, checks for piped stdin, sets up
+ * the terminal (mouse reporting, raw mode), optionally opens a file from
+ * the command line, and enters a poll()-based main loop. Input is buffered
+ * and decoded without blocking, so paste and resize are handled efficiently.
+ *
+ * Startup order matters: editor_init() must run before raw mode because
+ * it queries the terminal size. When stdin is a pipe, we must read all
+ * piped data and reopen /dev/tty BEFORE entering raw mode, since
+ * tcgetattr() fails on a pipe file descriptor. */
 int main(int argc, char *argv[])
 {
 	atexit(editor_quit);
+
+	/* Initialize editor state first (needs terminal queries via ioctl,
+	 * which work on stdout even when stdin is a pipe). */
+	editor_init();
+
+	/* Detect piped stdin: either stdin is not a terminal, or the user
+	 * passed "-" as the filename argument. Read everything from the
+	 * pipe into the editor buffer, then reconnect stdin to /dev/tty
+	 * so raw mode and keyboard input work normally. */
+	int stdin_is_pipe = !isatty(STDIN_FILENO);
+	int arg_is_dash = (argc >= 2 && strcmp(argv[1], "-") == 0);
+	if (stdin_is_pipe || arg_is_dash) {
+		if (stdin_is_pipe) {
+			size_t pipe_length;
+			char *pipe_data = editor_read_stdin_pipe(&pipe_length);
+			if (pipe_data && pipe_length > 0) {
+				/* Parse piped data into editor lines */
+				const char *pos = pipe_data;
+				const char *end = pipe_data + pipe_length;
+				while (pos < end) {
+					const char *newline = memchr(pos, '\n', (size_t)(end - pos));
+					if (!newline)
+						newline = end;
+					size_t line_length = (size_t)(newline - pos);
+					/* Strip trailing carriage return */
+					if (line_length > 0 && pos[line_length - 1] == '\r')
+						line_length--;
+					editor_line_insert(editor.line_count, pos, line_length);
+					pos = (newline < end) ? newline + 1 : end;
+				}
+				free(pipe_data);
+				editor.dirty = 1;
+				editor_update_gutter_width();
+			}
+		}
+
+		/* Reopen /dev/tty as stdin so raw mode and keyboard input work */
+		int tty_fd = open("/dev/tty", O_RDONLY);
+		if (tty_fd == -1) {
+			write(STDOUT_FILENO, "Cannot open /dev/tty\r\n", 22);
+			_exit(1);
+		}
+		dup2(tty_fd, STDIN_FILENO);
+		close(tty_fd);
+	}
 
 	/* Enable mouse reporting (non-fatal if it fails) */
 	if (terminal_enable_mouse_reporting() == -1) {
@@ -4976,9 +5315,12 @@ int main(int argc, char *argv[])
 	/* Enable raw mode */
 	terminal_enable_raw_mode();
 
-	editor_init();
-	if (argc >= 2) {
+	/* Open a file from the command line, unless we already loaded
+	 * piped data or the argument was "-". */
+	if (argc >= 2 && !arg_is_dash && !stdin_is_pipe) {
 		editor_open(argv[1]);
+	} else if (argc >= 2 && arg_is_dash && !stdin_is_pipe) {
+		/* "-" was passed but stdin was a terminal -- just start empty */
 	}
 
 	editor_set_status_message(
