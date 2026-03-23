@@ -87,14 +87,14 @@
 
 *Theme: The cell model pays dividends.*
 
-- [ ] **Bracket matching** — highlight + jump-to-match using the reserved `context` field
-- [ ] **Bracket pair colorization** — map pair IDs to colors during render
-- [ ] **Git gutter markers** — added/modified/deleted indicators (mmap gives us original content for free)
-- [ ] **Indent/dedent block** — Tab/Shift+Tab on selection
-- [ ] **Comment toggle** — Alt+/ based on filetype
-- [ ] **Trailing whitespace visualization** — using cell `flags`
-- [ ] **Horizontal scroll indicator** — visual cue when content exists off-screen
-- [ ] **Improved status bar** — filetype indicator, file percentage, proportional filename truncation, colorized dirty indicator
+- [x] **Bracket matching** — Alt+] jump, highlight match, depth scan capped at 5000 lines
+- [x] **Bracket pair colorization** — cycling colors by nesting depth (keyword1/2/string/number)
+- [x] **Git gutter markers** — + (added) and ~ (modified) in line number gutter, reset on save
+- [x] **Indent/dedent block** — Tab/Shift+Tab on selection, skips empty lines
+- [x] **Comment toggle** — Alt+/ using filetype comment prefix (// or #)
+- [x] **Trailing whitespace visualization** — muted background on trailing spaces/tabs
+- [x] **Horizontal scroll indicator** — < and > at viewport edges
+- [x] **Improved status bar** — filetype, percentage, proportional truncation, colored [+]
 
 ---
 
