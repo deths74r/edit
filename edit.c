@@ -529,7 +529,7 @@ struct editor_theme editor_themes[] = {
 };
 
 /* Index of the currently active theme in editor_themes[]. */
-int current_theme_index = 3;
+int current_theme_index = 0;
 
 /* Applies the theme at the given index in editor_themes[]. */
 void editor_set_theme(int index)
