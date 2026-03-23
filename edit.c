@@ -2599,7 +2599,7 @@ void editor_help_close(void)
 	editor.viewing_help = 0;
 	editor_snapshot_restore();
 	editor_set_status_message(
-		"Alt: S=save Q=quit F=find G=goto N=lines T=theme ?=help");
+		"Alt: S=save Q=quit F=find G=goto N=lines T=theme F11=help");
 }
 
 /*** Find ***/
@@ -3744,7 +3744,7 @@ int main(int argc, char *argv[])
 	}
 
 	editor_set_status_message(
-			"Alt: S=save Q=quit F=find G=goto N=lines T=theme ?=help");
+			"Alt: S=save Q=quit F=find G=goto N=lines T=theme F11=help");
 
 	/* Switch to fully non-blocking reads now that startup terminal
 	 * queries (which need VTIME=1) are complete. */
