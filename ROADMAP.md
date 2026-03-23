@@ -52,11 +52,11 @@
 ### Performance
 
 - [x] **Lazy syntax highlighting** — deferred to line_ensure_warm(), syntax_stale flag, COLD lines stay COLD
-- [ ] **Dirty region tracking** — cursor-only movement emits ~12 bytes instead of full screen redraw
+- [x] **Dirty region tracking** — cursor-only movement skips full redraw, just repositions cursor
 - [x] **Zero-copy search on COLD lines** — memmem() directly on mmap bytes, zero allocation
 - [x] **`memchr()`-based newline scan** — glibc SIMD-accelerated memchr() for file open
 - [x] **Pre-parsed theme colors** — cached RGB parse, sscanf skipped on same-pointer calls
-- [ ] **ASCII fast path for syntax** — skip line_to_bytes() allocation when all codepoints < 128
+- [x] **ASCII fast path for syntax** — direct char cast + identity mapping for ASCII-only lines
 - [x] **Scratch buffers** — reusable buffers in editor_state, no per-line malloc/free
 - [x] **`madvise()` hints** — MADV_SEQUENTIAL during scan, MADV_RANDOM after
 - [x] **Pre-computed keyword lengths** — strlen() called once at syntax selection
