@@ -3070,6 +3070,8 @@ static const char *help_text =
 	"NAVIGATION\n"
 	"  Arrows / Alt+HJKL    Move cursor\n"
 	"  Home / End           Start / end of line\n"
+	"  Ctrl+A / Ctrl+E      Start / end of line\n"
+	"  Ctrl+Left/Right      Jump by word\n"
 	"  PgUp / PgDn          Scroll by screen\n"
 	"  Alt+G / Ctrl+G       Go to line number\n"
 	"  Mouse click          Position cursor\n"
@@ -4189,10 +4191,12 @@ void editor_process_keypress(struct input_event event)
 		break;
 
 	case HOME_KEY:
+	case CTRL_KEY('a'):
 		editor.cursor_x = 0;
 		break;
 
 	case END_KEY:
+	case CTRL_KEY('e'):
 		if (editor.cursor_y < editor.line_count)
 			editor.cursor_x = (int)editor.lines[editor.cursor_y].cell_count;
 		break;
