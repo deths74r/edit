@@ -6662,6 +6662,39 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 				}
 			}
 
+			/* Empty-line selection indicator: when a line with no
+			 * cells falls within the selection range, render one
+			 * space of reverse video so the selection looks
+			 * contiguous across blank lines. */
+			if (ln->cell_count == 0 && editor.selection.active
+			    && file_row >= 0 && file_row < editor.line_count) {
+				int sel_sy, sel_sx, sel_ey, sel_ex;
+				if (selection_get_range(&sel_sy, &sel_sx,
+						       &sel_ey, &sel_ex)
+				    && file_row >= sel_sy
+				    && file_row <= sel_ey) {
+					append_buffer_write(append_buffer,
+						INVERT_COLOR,
+						strlen(INVERT_COLOR));
+					append_buffer_write(append_buffer,
+						" ", 1);
+					append_buffer_write(append_buffer,
+						RESET_ALL_ATTRIBUTES,
+						strlen(RESET_ALL_ATTRIBUTES));
+					/* Re-establish line background */
+					if (file_row == editor.cursor_y)
+						append_buffer_write_background(
+							append_buffer,
+							editor.theme
+							.highlight_background);
+					else
+						append_buffer_write_background(
+							append_buffer,
+							editor.theme
+							.background);
+				}
+			}
+
 			/* Advance to next line or continue wrapping */
 			if (editor.word_wrap && (int)ci < (int)ln->cell_count
 			    && wrap_end < (int)ln->cell_count) {
