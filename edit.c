@@ -8612,10 +8612,19 @@ const char *command_complete(const char *partial, int cycle_index)
 	return matches[index];
 }
 
+/* Tab completion state — declared here so all command prompt functions
+ * can access them. */
+int command_completion_index = -1;
+char command_completion_prefix[COMMAND_INPUT_MAX];
+int command_saved_theme_index = -1;
+
 /* Called when the user presses Enter in the command prompt. Tries to
  * dispatch the input as a command; falls through to search on failure. */
 void command_prompt_accept(char *input)
 {
+	/* Clear the saved theme — user committed the choice */
+	command_saved_theme_index = -1;
+
 	if (command_dispatch(input)) {
 		free(input);
 		return;
@@ -8640,20 +8649,24 @@ void command_prompt_accept(char *input)
 	}
 }
 
-/* Called when the user presses ESC in the command prompt. */
+/* Called when the user presses ESC in the command prompt. Reverts
+ * any live preview (e.g., theme cycling). */
 void command_prompt_cancel(void)
 {
+	/* Revert theme if we were cycling through themes */
+	if (command_saved_theme_index >= 0) {
+		current_theme_index = command_saved_theme_index;
+		editor_set_theme(current_theme_index);
+		command_saved_theme_index = -1;
+		editor.force_full_redraw = 1;
+	}
 	editor_set_status_message("");
 }
 
 /* Tracks the current tab completion cycling state for the command prompt. */
-int command_completion_index = -1;
-/* The original text the user typed before Tab was pressed. Completion
- * always matches against this, not the completed buffer. */
-char command_completion_prefix[COMMAND_INPUT_MAX];
 
 /* Per-key callback for the command prompt. Handles Tab for command name
- * completion and resets completion cycling on other keys. */
+ * and argument completion, and resets cycling on other keys. */
 void command_prompt_per_key(char *buffer, int key)
 {
 	if (key == '\t') {
@@ -8662,6 +8675,33 @@ void command_prompt_per_key(char *buffer, int key)
 			snprintf(command_completion_prefix,
 				 sizeof(command_completion_prefix),
 				 "%s", buffer);
+
+		/* Check if we're completing a command argument rather
+		 * than a command name. Currently supports theme names. */
+		if (strncmp(command_completion_prefix, "theme", 5) == 0
+		    && (command_completion_prefix[5] == '\0'
+			|| command_completion_prefix[5] == ' ')) {
+			/* Save original theme on first cycle */
+			if (command_saved_theme_index == -1)
+				command_saved_theme_index = current_theme_index;
+			/* Cycle through theme names */
+			int theme_count = (int)(sizeof(editor_themes) /
+					  sizeof(editor_themes[0]));
+			command_completion_index++;
+			if (command_completion_index >= theme_count)
+				command_completion_index = 0;
+			char theme_cmd[COMMAND_INPUT_MAX];
+			snprintf(theme_cmd, sizeof(theme_cmd),
+				 "theme %s",
+				 editor_themes[command_completion_index].name);
+			prompt_set_buffer(theme_cmd);
+			/* Live preview the theme */
+			editor_set_theme(command_completion_index);
+			editor_set_status_message("> %s", theme_cmd);
+			editor.force_full_redraw = 1;
+			return;
+		}
+
 		const char *match = command_complete(
 			command_completion_prefix,
 			command_completion_index + 1);
