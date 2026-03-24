@@ -1674,8 +1674,12 @@ void line_ensure_warm(struct line *line)
 		line->cell_count = 0;
 		line->temperature = LINE_WARM;
 		line->cached_render_width = -1;
-		line_populate_from_bytes(line, editor.mmap_base + line->mmap_offset,
-					line->mmap_length);
+		/* If the mmap region was released (e.g., after a save),
+		 * we cannot decode this line. Initialize it as empty. */
+		if (editor.mmap_base != NULL)
+			line_populate_from_bytes(line,
+				editor.mmap_base + line->mmap_offset,
+				line->mmap_length);
 	}
 
 	/* Apply deferred syntax highlighting on first access. Resolves the
@@ -8510,10 +8514,14 @@ void command_prompt_accept(char *input)
 	editor_find_start();
 	if (saved_input) {
 		prompt_set_buffer(saved_input);
-		/* Trigger the find callback to execute the search. */
+		/* Trigger the find callback with a regular key to execute
+		 * the incremental search. Using ARROW_RIGHT which the find
+		 * callback interprets as "search forward". */
 		if (editor.prompt.per_key_callback)
 			editor.prompt.per_key_callback(
-				editor.prompt.buffer, '\r');
+				editor.prompt.buffer, ARROW_RIGHT);
+		editor_set_status_message(editor.prompt.format,
+					 editor.prompt.buffer);
 		free(saved_input);
 	}
 }
