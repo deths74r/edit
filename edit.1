@@ -1,0 +1,246 @@
+.TH EDIT 1 "2026" "edit v0.9.0" "User Commands"
+.SH NAME
+edit \- a terminal text editor
+.SH SYNOPSIS
+.B edit
+.RI [ options ]
+.RI [ file ]
+.br
+.I command
+.B "| edit"
+.br
+.B "edit \-"
+.SH DESCRIPTION
+.B edit
+is a terminal text editor written in C23. It features Unicode/grapheme\-aware
+editing, mmap\-based lazy loading for instant file opens, syntax highlighting
+for 9 languages, incremental search with regex, mouse support, and multiple
+color themes.
+.PP
+Files of any size open instantly because
+.B edit
+uses memory\-mapped I/O. Only the visible portion of the file is decoded
+into memory.
+.SH OPTIONS
+.TP
+.BI \-\-tabstop= N
+Set the tab display width to
+.I N
+columns (1\-32). Overrides the config file setting.
+.TP
+.BI \-\-ruler= N
+Display a column ruler at column
+.IR N .
+Set to 0 to disable.
+.TP
+.B \-
+Read from standard input (pipe mode). After reading, the editor
+reopens /dev/tty for interactive editing.
+.SH KEY BINDINGS
+.SS File Operations
+.TP
+.BR Alt+S ", " Ctrl+S
+Save the current file. Prompts for a filename if unnamed.
+.TP
+.B Alt+Shift+S
+Save as: always prompts for a filename.
+.TP
+.BR Alt+Q ", " Ctrl+Q
+Quit. Prompts to save if there are unsaved changes.
+.TP
+.B Ctrl+Z
+Suspend the editor and return to the shell. Resume with
+.BR fg .
+.SS Navigation
+.TP
+.BR "Arrow keys" ", " Alt+HJKL
+Move cursor by one character or line.
+.TP
+.BR Home ", " End ", " Ctrl+A ", " Ctrl+E
+Move to beginning or end of line.
+.TP
+.BR Ctrl+Left ", " Ctrl+Right
+Jump by word boundary.
+.TP
+.BR "Page Up" ", " "Page Down"
+Scroll by one screenful.
+.TP
+.BR Alt+G ", " Ctrl+G
+Jump to a specific line number.
+.SS Selection
+.TP
+.B Shift+Arrow
+Select by character or line.
+.TP
+.BR Shift+Ctrl+Left ", " Shift+Ctrl+Right
+Select by word.
+.TP
+.BR Alt+A ", " Alt+E
+Select to line start or end.
+.TP
+.B Mouse drag
+Select with the mouse.
+.TP
+.B ESC
+Clear selection.
+.SS Clipboard
+.TP
+.B Alt+C
+Copy selection.
+.TP
+.B Alt+X
+Cut selection.
+.TP
+.B Alt+V
+Paste.
+.TP
+.B Alt+Shift+K
+Cut entire line.
+.TP
+.B Alt+D
+Duplicate line.
+.SS Editing
+.TP
+.B Enter
+Insert newline with auto\-indent.
+.TP
+.BR Ctrl+U
+Undo.
+.TP
+.BR Ctrl+R
+Redo.
+.TP
+.B Tab
+Insert tab, or indent selection.
+.TP
+.B Shift+Tab
+Dedent selection.
+.TP
+.B Alt+/
+Toggle line comment (filetype\-aware).
+.TP
+.B Alt+]
+Jump to matching bracket.
+.SS Search
+.TP
+.BR Alt+F ", " Ctrl+F
+Incremental search. Left/Right navigate matches, Up/Down browse
+search history. Enter accepts, ESC cancels.
+.TP
+.B Alt+C
+Toggle case sensitivity during search.
+.TP
+.B Alt+X
+Toggle regex mode during search (POSIX ERE).
+.TP
+.B Alt+R
+Find and replace.
+.SS Display
+.TP
+.B Alt+T
+Cycle color theme (persisted to config).
+.TP
+.B Alt+N
+Toggle line numbers.
+.TP
+.B Alt+W
+Toggle soft word wrap.
+.TP
+.BR F11 ", " Alt+?
+Show help screen.
+.SH CONFIGURATION
+.B edit
+reads configuration from
+.I $XDG_CONFIG_HOME/edit/config
+(defaults to
+.IR ~/.config/edit/config ).
+.PP
+The config file uses a simple key = value format.
+Lines starting with # are comments.
+.PP
+.RS
+.nf
+# Example configuration
+tabstop = 4
+theme = Cyberpunk
+line_numbers = true
+ruler = 80
+.fi
+.RE
+.SS Configuration Keys
+.TP
+.B tabstop
+Tab display width in columns (1\-32). Default: 8.
+.TP
+.B theme
+Color theme name. Default: Cyberpunk. Available: Cyberpunk, Nightwatch,
+Daywatch, Tokyo Night, Akira, Tokyo Cyberpunk, Clarity.
+.TP
+.B line_numbers
+Show line number gutter (true/false). Default: true.
+.TP
+.B ruler
+Column ruler position (0 to disable). Default: 0.
+.SH THEMES
+All themes use 24\-bit RGB color. Cycle at runtime with Alt+T.
+.TP
+.B Cyberpunk
+Dark background with neon magenta, cyan, and green accents.
+.TP
+.B Nightwatch
+Monochrome dark palette using shades of gray.
+.TP
+.B Daywatch
+Monochrome light palette with dark text on near\-white.
+.TP
+.B "Tokyo Night"
+Deep indigo base with soft purple, blue, and green.
+.TP
+.B Akira
+Neo\-Tokyo red and cyan on a warm dark base.
+.TP
+.B "Tokyo Cyberpunk"
+Tokyo Night's indigo base with neon accents.
+.TP
+.B Clarity
+Colorblind\-accessible blue/orange/yellow palette.
+.SH SYNTAX HIGHLIGHTING
+Syntax highlighting activates automatically based on file extension.
+Supported languages: C/C++ (.c, .h, .cpp), Python (.py), JavaScript
+(.js, .jsx, .mjs), Go (.go), Rust (.rs), Bash (.sh, .bash), JSON
+(.json), YAML (.yml, .yaml), Markdown (.md, .markdown).
+.SH ENVIRONMENT
+.TP
+.B COLORTERM
+If set to "truecolor" or "24bit", confirms true color support.
+.TP
+.B XDG_CONFIG_HOME
+Base directory for the configuration file. Defaults to ~/.config.
+.TP
+.B XDG_DATA_HOME
+Base directory for cursor position history. Defaults to ~/.local/share.
+.SH FILES
+.TP
+.I ~/.config/edit/config
+Configuration file.
+.TP
+.I ~/.local/share/edit/cursor_history
+Remembered cursor positions per file.
+.TP
+.I <file>.edit.swp
+Swap file for crash recovery, created alongside the edited file.
+.SH EXIT STATUS
+.TP
+.B 0
+Normal exit.
+.TP
+.B 1
+Fatal error (terminal I/O failure, out of memory).
+.SH BUGS
+Report bugs at https://github.com/deths74r/edit/issues
+.SH SEE ALSO
+.BR nano (1),
+.BR vi (1),
+.BR micro (1)
+.SH AUTHOR
+Edward Edmonds

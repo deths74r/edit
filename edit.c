@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <regex.h>
 #include <unistd.h>
+#include <limits.h>
 #include "gstr.h"
 
 /*** Defines ***/
@@ -317,6 +318,33 @@ enum editor_mode {
  * cooling scan of distant off-screen lines. */
 #define COOL_SCAN_LINES_PER_FRAME 100
 
+/* Seconds between automatic swap file writes. */
+#define SWAP_WRITE_INTERVAL_SECONDS 30
+
+/* File suffix appended to the original filename for swap files. */
+#define SWAP_FILE_SUFFIX ".edit.swp"
+
+/* Magic bytes at the start of a swap file for format identification. */
+#define SWAP_MAGIC "EDSWAP01"
+
+/* Size of the swap file magic header in bytes. */
+#define SWAP_MAGIC_SIZE 8
+
+/* Size of the PID field in the swap file header (little-endian uint32). */
+#define SWAP_PID_SIZE 4
+
+/* Total size of the swap file header (magic + PID). */
+#define SWAP_HEADER_SIZE (SWAP_MAGIC_SIZE + SWAP_PID_SIZE)
+
+/* Maximum number of cursor position entries to remember across files. */
+#define CURSOR_HISTORY_MAX_ENTRIES 200
+
+/* Maximum path length for cursor history and data directory paths. */
+#define DATA_PATH_MAX 1024
+
+/* Filename for the cursor position history storage. */
+#define CURSOR_HISTORY_FILENAME "cursor_history"
+
 /*** Data ***/
 
 /* Color theme configuration for the editor. Each field holds a hex color
@@ -596,6 +624,17 @@ struct editor_state {
 	 * Cycles through all lines over multiple frames to avoid O(N) work
 	 * per frame. */
 	int cool_scan_position;
+	/* Path to the swap file for crash recovery, or NULL. */
+	char *swap_file_path;
+	/* Timestamp of the last swap file write, for throttling. */
+	time_t last_swap_write_time;
+	/* Modification time of the file when it was opened or last saved.
+	 * Used to detect external changes before overwriting. */
+	struct timespec file_mtime;
+	/* Device ID of the file when opened, for change detection. */
+	dev_t file_device;
+	/* Inode number of the file when opened, for change detection. */
+	ino_t file_inode;
 };
 
 /* Global editor state. */
@@ -626,6 +665,16 @@ void line_init(struct line *line, int index);
 void terminal_die(const char *message);
 void editor_cool_distant_lines(void);
 void editor_prefetch_lines(void);
+void editor_lines_ensure_capacity(int needed);
+void swap_file_write(void);
+void swap_file_remove(void);
+void swap_file_check_existing(void);
+char *swap_file_generate_path(void);
+void file_record_stat(void);
+int file_check_changed(void);
+void cursor_history_restore(void);
+void cursor_history_record(void);
+static int config_mkdir_parents(const char *path);
 
 /*** Filetypes ***/
 
@@ -3280,6 +3329,10 @@ int editor_open(char *filename)
 		return -ENOMEM;
 	}
 
+	/* Check for an existing swap file before loading. If recovery
+	 * is accepted, the callback replaces the buffer content. */
+	swap_file_check_existing();
+
 	int ret = editor_open_mmap(filename);
 	if (ret < 0) {
 		const char *error_msg;
@@ -3300,6 +3353,10 @@ int editor_open(char *filename)
 		editor_set_status_message("Can't open file: %s", error_msg);
 		return ret;
 	}
+
+	/* Record the file's stat for external change detection. */
+	file_record_stat();
+
 	editor_update_gutter_width();
 
 	syntax_select_highlight();
@@ -3334,8 +3391,32 @@ static int write_full(int fd, const char *data, size_t length)
  * instead of O(file_size). COLD lines are written straight from the mmap
  * region; WARM/HOT lines are converted to bytes one at a time.
  * Returns 0 on success, negative errno on failure. */
+/* Callback for the file-changed-on-disk confirmation. Proceeds with
+ * the save on 'y', cancels on anything else. */
+static void file_changed_overwrite_callback(int key)
+{
+	if (key == 'y' || key == 'Y') {
+		editor_save_write();
+	} else {
+		editor_set_status_message("Save cancelled");
+		editor.quit_after_save = 0;
+	}
+}
+
 int editor_save_write(void)
 {
+	/* Check whether the file was modified externally since we opened
+	 * or last saved it. If so, prompt for confirmation before
+	 * overwriting. The check is skipped when we are already inside
+	 * the confirmation callback (file_mtime will be zeroed). */
+	if (file_check_changed()) {
+		/* Reset the stored stat so the callback doesn't re-prompt. */
+		file_record_stat();
+		confirm_open("File changed on disk! Overwrite? (y/n)",
+			     file_changed_overwrite_callback);
+		return 0;
+	}
+
 	int ret = 0;
 	int fd = -1;
 	char *tmp_path = NULL;
@@ -3424,6 +3505,12 @@ int editor_save_write(void)
 	tmp_path = NULL;
 
 	editor.dirty = 0;
+
+	/* Update the stored stat so subsequent saves detect new changes. */
+	file_record_stat();
+
+	/* Remove the swap file since the buffer is now safely on disk. */
+	swap_file_remove();
 
 	/* Reset all gutter markers since the file is now saved. */
 	for (int i = 0; i < editor.line_count; i++)
@@ -3540,6 +3627,13 @@ void editor_quit_confirm(int key)
  * atexit() so it runs automatically on exit. */
 void editor_quit(void)
 {
+	/* Record cursor position before cleanup destroys the state. */
+	cursor_history_record();
+
+	/* Remove the swap file if the buffer is clean. */
+	if (!editor.dirty)
+		swap_file_remove();
+
 	/* Free clipboard and undo history */
 	clipboard_clear();
 	undo_stack_destroy(&editor.undo);
@@ -3589,6 +3683,554 @@ void editor_quit(void)
 	for (int i = 0; i < editor.search_history_count; i++)
 		free(editor.search_history[i]);
 	free(editor.search_history_stash);
+
+	/* Free swap file path */
+	free(editor.swap_file_path);
+}
+
+/*** Swap file ***/
+
+/* Generates the swap file path for the current buffer. For named files
+ * the swap file lives alongside the original with ".edit.swp" appended
+ * (e.g., "foo.c.edit.swp"). For unnamed buffers it uses a PID-based
+ * temporary path. Caller must free the returned string. */
+char *swap_file_generate_path(void)
+{
+	if (editor.filename) {
+		size_t filename_length = strlen(editor.filename);
+		size_t suffix_length = strlen(SWAP_FILE_SUFFIX);
+		char *path = malloc(filename_length + suffix_length + 1);
+		if (!path)
+			return NULL;
+		memcpy(path, editor.filename, filename_length);
+		memcpy(path + filename_length, SWAP_FILE_SUFFIX, suffix_length);
+		path[filename_length + suffix_length] = '\0';
+		return path;
+	}
+
+	/* Unnamed buffer: use /tmp with a PID-based name. */
+	char path[DATA_PATH_MAX];
+	snprintf(path, sizeof(path), "/tmp/.edit_unnamed_%d.swp",
+		 (int)getpid());
+	return strdup(path);
+}
+
+/* Writes the current buffer to the swap file for crash recovery. Only
+ * writes when the buffer is dirty and enough time has elapsed since the
+ * last write. Failure is non-fatal -- a warning is shown in the status
+ * bar but editing continues normally. */
+void swap_file_write(void)
+{
+	if (!editor.dirty || editor.line_count == 0)
+		return;
+
+	time_t now = time(NULL);
+	if (now - editor.last_swap_write_time < SWAP_WRITE_INTERVAL_SECONDS)
+		return;
+
+	/* Generate the swap path if we haven't already. */
+	if (!editor.swap_file_path) {
+		editor.swap_file_path = swap_file_generate_path();
+		if (!editor.swap_file_path)
+			return;
+	}
+
+	int fd = open(editor.swap_file_path,
+		      O_WRONLY | O_CREAT | O_TRUNC, FILE_PERMISSION_DEFAULT);
+	if (fd == -1) {
+		editor_set_status_message("Swap file warning: %s",
+					 strerror(errno));
+		editor.last_swap_write_time = now;
+		return;
+	}
+
+	/* Write the header: 8-byte magic + 4-byte little-endian PID. */
+	unsigned char header[SWAP_HEADER_SIZE];
+	memcpy(header, SWAP_MAGIC, SWAP_MAGIC_SIZE);
+	uint32_t pid = (uint32_t)getpid();
+	header[SWAP_MAGIC_SIZE + 0] = (unsigned char)(pid & 0xFF);
+	header[SWAP_MAGIC_SIZE + 1] = (unsigned char)((pid >> 8) & 0xFF);
+	header[SWAP_MAGIC_SIZE + 2] = (unsigned char)((pid >> 16) & 0xFF);
+	header[SWAP_MAGIC_SIZE + 3] = (unsigned char)((pid >> 24) & 0xFF);
+	if (write_full(fd, (const char *)header, SWAP_HEADER_SIZE) < 0)
+		goto fail;
+
+	/* Stream each line to the swap file, using the same COLD/WARM/HOT
+	 * strategy as editor_save_write(). */
+	char newline = '\n';
+	for (int j = 0; j < editor.line_count; j++) {
+		struct line *line = &editor.lines[j];
+
+		if (line->temperature == LINE_COLD && editor.mmap_base) {
+			if (write_full(fd, editor.mmap_base + line->mmap_offset,
+				       line->mmap_length) < 0)
+				goto fail;
+		} else {
+			size_t byte_length;
+			char *bytes = line_to_bytes(line, &byte_length);
+			int result = write_full(fd, bytes, byte_length);
+			free(bytes);
+			if (result < 0)
+				goto fail;
+		}
+
+		if (write_full(fd, &newline, 1) < 0)
+			goto fail;
+	}
+
+	close(fd);
+	editor.last_swap_write_time = now;
+	return;
+
+fail:
+	close(fd);
+	editor.last_swap_write_time = now;
+	editor_set_status_message("Swap file warning: write failed");
+}
+
+/* Removes the swap file from disk. Called after a successful save and
+ * on clean exit when there are no unsaved changes. */
+void swap_file_remove(void)
+{
+	if (editor.swap_file_path) {
+		unlink(editor.swap_file_path);
+		free(editor.swap_file_path);
+		editor.swap_file_path = NULL;
+	}
+}
+
+/* Callback for the swap file recovery confirmation prompt. On 'y',
+ * loads the swap file content into the buffer. On 'n', deletes the
+ * stale swap file and proceeds with the normal file open. */
+static void swap_file_recover_callback(int key)
+{
+	if (key != 'y' && key != 'Y') {
+		/* User declined recovery -- remove the stale swap file. */
+		if (editor.swap_file_path) {
+			unlink(editor.swap_file_path);
+			free(editor.swap_file_path);
+			editor.swap_file_path = NULL;
+		}
+		editor_set_status_message("Recovery skipped");
+		return;
+	}
+
+	/* Read the swap file and load its content into the buffer. */
+	if (!editor.swap_file_path)
+		return;
+
+	int fd = open(editor.swap_file_path, O_RDONLY);
+	if (fd == -1) {
+		editor_set_status_message("Cannot open swap file: %s",
+					 strerror(errno));
+		return;
+	}
+
+	off_t file_size = lseek(fd, 0, SEEK_END);
+	if (file_size < SWAP_HEADER_SIZE) {
+		close(fd);
+		editor_set_status_message("Swap file is corrupt");
+		return;
+	}
+	lseek(fd, 0, SEEK_SET);
+
+	char *data = malloc((size_t)file_size);
+	if (!data) {
+		close(fd);
+		editor_set_status_message("Out of memory reading swap file");
+		return;
+	}
+
+	ssize_t bytes_read = read(fd, data, (size_t)file_size);
+	close(fd);
+	if (bytes_read < SWAP_HEADER_SIZE) {
+		free(data);
+		editor_set_status_message("Swap file read error");
+		return;
+	}
+
+	/* Verify the magic header. */
+	if (memcmp(data, SWAP_MAGIC, SWAP_MAGIC_SIZE) != 0) {
+		free(data);
+		editor_set_status_message("Swap file has invalid magic");
+		return;
+	}
+
+	/* Clear the existing buffer content. */
+	for (int i = 0; i < editor.line_count; i++)
+		line_free(&editor.lines[i]);
+	editor.line_count = 0;
+
+	/* Release existing mmap since we are replacing the content. */
+	if (editor.mmap_base) {
+		munmap(editor.mmap_base, editor.mmap_size);
+		editor.mmap_base = NULL;
+		editor.mmap_size = 0;
+	}
+	if (editor.file_descriptor != -1) {
+		close(editor.file_descriptor);
+		editor.file_descriptor = -1;
+	}
+
+	/* Parse the content after the header into editor lines. */
+	const char *pos = data + SWAP_HEADER_SIZE;
+	const char *end = data + bytes_read;
+	while (pos < end) {
+		const char *newline = memchr(pos, '\n', (size_t)(end - pos));
+		if (!newline)
+			newline = end;
+		size_t line_length = (size_t)(newline - pos);
+		if (line_length > 0 && pos[line_length - 1] == '\r')
+			line_length--;
+		editor_line_insert(editor.line_count, pos, line_length);
+		pos = (newline < end) ? newline + 1 : end;
+	}
+
+	free(data);
+	editor.dirty = 1;
+	editor_update_gutter_width();
+	editor_set_status_message("Recovered from swap file");
+}
+
+/* Checks whether a swap file exists for the current filename. If the
+ * creator PID is still alive, shows a warning. If the creator is dead,
+ * prompts the user to recover. Called before loading the file. */
+void swap_file_check_existing(void)
+{
+	char *swap_path = swap_file_generate_path();
+	if (!swap_path)
+		return;
+
+	struct stat swap_stat;
+	if (stat(swap_path, &swap_stat) == -1) {
+		/* No swap file exists -- nothing to do. */
+		free(swap_path);
+		return;
+	}
+
+	/* Read the header to extract the creator PID. */
+	int fd = open(swap_path, O_RDONLY);
+	if (fd == -1) {
+		free(swap_path);
+		return;
+	}
+
+	unsigned char header[SWAP_HEADER_SIZE];
+	ssize_t bytes_read = read(fd, header, SWAP_HEADER_SIZE);
+	close(fd);
+	if (bytes_read < SWAP_HEADER_SIZE
+	    || memcmp(header, SWAP_MAGIC, SWAP_MAGIC_SIZE) != 0) {
+		free(swap_path);
+		return;
+	}
+
+	uint32_t creator_pid = (uint32_t)header[SWAP_MAGIC_SIZE]
+		| ((uint32_t)header[SWAP_MAGIC_SIZE + 1] << 8)
+		| ((uint32_t)header[SWAP_MAGIC_SIZE + 2] << 16)
+		| ((uint32_t)header[SWAP_MAGIC_SIZE + 3] << 24);
+
+	/* Save the path so the callback can access it. */
+	free(editor.swap_file_path);
+	editor.swap_file_path = swap_path;
+
+	/* Check if the creator process is still running. */
+	if (kill((pid_t)creator_pid, 0) == 0) {
+		/* Process is alive -- just warn, don't offer recovery. */
+		editor_set_status_message(
+			"Swap file exists (PID %u is running)",
+			(unsigned)creator_pid);
+		return;
+	}
+
+	/* Creator is dead -- offer recovery. */
+	confirm_open("Recovery file found. Recover? (y/n)",
+		     swap_file_recover_callback);
+}
+
+/*** File change detection ***/
+
+/* Records the file's mtime, device, and inode from stat so we can
+ * detect external modifications later. Called after a successful
+ * editor_open_mmap() or editor_save_write(). */
+void file_record_stat(void)
+{
+	if (!editor.filename)
+		return;
+
+	struct stat file_stat;
+	if (stat(editor.filename, &file_stat) == 0) {
+		editor.file_mtime = file_stat.st_mtim;
+		editor.file_device = file_stat.st_dev;
+		editor.file_inode = file_stat.st_ino;
+	}
+}
+
+/* Compares the file's current stat against the stored values to detect
+ * external changes. Returns 1 if the file has been modified or replaced
+ * since we last recorded its stat, 0 otherwise. */
+int file_check_changed(void)
+{
+	if (!editor.filename)
+		return 0;
+
+	struct stat file_stat;
+	if (stat(editor.filename, &file_stat) != 0)
+		return 0;
+
+	/* Different device or inode means the file was replaced. */
+	if (file_stat.st_dev != editor.file_device
+	    || file_stat.st_ino != editor.file_inode)
+		return 1;
+
+	/* Different modification time means the file was edited. */
+	if (file_stat.st_mtim.tv_sec != editor.file_mtime.tv_sec
+	    || file_stat.st_mtim.tv_nsec != editor.file_mtime.tv_nsec)
+		return 1;
+
+	return 0;
+}
+
+/*** Cursor history ***/
+
+/* Builds the cursor history directory path into the provided buffer.
+ * Uses $XDG_DATA_HOME/edit or falls back to $HOME/.local/share/edit.
+ * Returns 0 on success, -1 if no home directory is set. */
+static int cursor_history_build_directory(char *dir_out, size_t dir_size)
+{
+	const char *xdg = getenv("XDG_DATA_HOME");
+	if (xdg && xdg[0] != '\0') {
+		snprintf(dir_out, dir_size, "%s/edit", xdg);
+		return 0;
+	}
+	const char *home = getenv("HOME");
+	if (home && home[0] != '\0') {
+		snprintf(dir_out, dir_size, "%s/.local/share/edit", home);
+		return 0;
+	}
+	return -1;
+}
+
+/* Builds the full path to the cursor history file. Returns 0 on
+ * success, -1 if the home directory cannot be determined. */
+static int cursor_history_build_path(char *path_out, size_t path_size)
+{
+	char dir[DATA_PATH_MAX];
+	if (cursor_history_build_directory(dir, sizeof(dir)) == -1)
+		return -1;
+	snprintf(path_out, path_size, "%s/%s", dir, CURSOR_HISTORY_FILENAME);
+	return 0;
+}
+
+/* Restores the cursor position and viewport offset for the current file
+ * from the on-disk history. Resolves the filename to an absolute path
+ * and looks it up in the history file. Clamps the restored values to
+ * the actual file bounds. Called after editor_open() loads the file. */
+void cursor_history_restore(void)
+{
+	if (!editor.filename)
+		return;
+
+	char *absolute_path = realpath(editor.filename, NULL);
+	if (!absolute_path)
+		return;
+
+	char history_path[DATA_PATH_MAX];
+	if (cursor_history_build_path(history_path,
+				      sizeof(history_path)) == -1) {
+		free(absolute_path);
+		return;
+	}
+
+	FILE *history_file = fopen(history_path, "r");
+	if (!history_file) {
+		free(absolute_path);
+		return;
+	}
+
+	char line_buffer[DATA_PATH_MAX];
+	int found_cursor_y = -1;
+	int found_cursor_x = -1;
+	int found_row_offset = -1;
+
+	while (fgets(line_buffer, sizeof(line_buffer), history_file)) {
+		/* Strip trailing newline. */
+		char *newline = strchr(line_buffer, '\n');
+		if (newline)
+			*newline = '\0';
+
+		/* Parse "path:cursor_y:cursor_x:row_offset". Find the last
+		 * three colons to handle paths that contain colons. */
+		char *last_colon = strrchr(line_buffer, ':');
+		if (!last_colon || last_colon == line_buffer)
+			continue;
+		*last_colon = '\0';
+		int row_offset_value = atoi(last_colon + 1);
+
+		char *second_colon = strrchr(line_buffer, ':');
+		if (!second_colon || second_colon == line_buffer)
+			continue;
+		*second_colon = '\0';
+		int cursor_x_value = atoi(second_colon + 1);
+
+		char *first_colon = strrchr(line_buffer, ':');
+		if (!first_colon || first_colon == line_buffer)
+			continue;
+		*first_colon = '\0';
+		int cursor_y_value = atoi(first_colon + 1);
+
+		if (strcmp(line_buffer, absolute_path) == 0) {
+			found_cursor_y = cursor_y_value;
+			found_cursor_x = cursor_x_value;
+			found_row_offset = row_offset_value;
+			/* Keep scanning -- last entry for this path wins
+			 * (it is the most recent). */
+		}
+	}
+
+	fclose(history_file);
+
+	if (found_cursor_y >= 0) {
+		/* Clamp cursor_y to file bounds. */
+		if (found_cursor_y >= editor.line_count)
+			found_cursor_y = editor.line_count > 0
+				? editor.line_count - 1 : 0;
+
+		editor.cursor_y = found_cursor_y;
+
+		/* Clamp cursor_x to line bounds. */
+		if (found_cursor_y < editor.line_count) {
+			struct line *target_line =
+				&editor.lines[found_cursor_y];
+			line_ensure_warm(target_line);
+			if (found_cursor_x > (int)target_line->cell_count)
+				found_cursor_x = (int)target_line->cell_count;
+		}
+		editor.cursor_x = found_cursor_x < 0 ? 0 : found_cursor_x;
+
+		/* Clamp and restore row_offset. */
+		if (found_row_offset < 0)
+			found_row_offset = 0;
+		if (found_row_offset >= editor.line_count)
+			found_row_offset = editor.line_count > 0
+				? editor.line_count - 1 : 0;
+		editor.row_offset = found_row_offset;
+	}
+
+	free(absolute_path);
+}
+
+/* Records the current cursor position and viewport offset for the file
+ * into the on-disk history. Uses LRU eviction to keep the history file
+ * at most CURSOR_HISTORY_MAX_ENTRIES entries. Called before editor_quit()
+ * cleans up resources. */
+void cursor_history_record(void)
+{
+	if (!editor.filename)
+		return;
+
+	char *absolute_path = realpath(editor.filename, NULL);
+	if (!absolute_path)
+		return;
+
+	char data_directory[DATA_PATH_MAX];
+	if (cursor_history_build_directory(data_directory,
+					   sizeof(data_directory)) == -1) {
+		free(absolute_path);
+		return;
+	}
+
+	/* Ensure the data directory exists. */
+	config_mkdir_parents(data_directory);
+
+	char history_path[DATA_PATH_MAX];
+	if (cursor_history_build_path(history_path,
+				      sizeof(history_path)) == -1) {
+		free(absolute_path);
+		return;
+	}
+
+	/* Read existing entries, filtering out the current file. */
+	char **entries = NULL;
+	int entry_count = 0;
+	int entry_capacity = 0;
+
+	FILE *history_file = fopen(history_path, "r");
+	if (history_file) {
+		char line_buffer[DATA_PATH_MAX];
+		while (fgets(line_buffer, sizeof(line_buffer), history_file)) {
+			/* Strip trailing newline. */
+			char *newline = strchr(line_buffer, '\n');
+			if (newline)
+				*newline = '\0';
+			if (line_buffer[0] == '\0')
+				continue;
+
+			/* Check if this entry is for the same file by
+			 * parsing the path portion (everything before the
+			 * last three colon-separated fields). */
+			char test_buffer[DATA_PATH_MAX];
+			snprintf(test_buffer, sizeof(test_buffer),
+				 "%s", line_buffer);
+			char *last = strrchr(test_buffer, ':');
+			if (last) *last = '\0';
+			char *second = strrchr(test_buffer, ':');
+			if (second) *second = '\0';
+			char *first = strrchr(test_buffer, ':');
+			if (first) *first = '\0';
+
+			/* Skip entries for the current file (will be
+			 * re-added at the end). */
+			if (strcmp(test_buffer, absolute_path) == 0)
+				continue;
+
+			/* Grow the entries array if needed. */
+			if (entry_count >= entry_capacity) {
+				entry_capacity = entry_capacity
+					? entry_capacity * 2 : 32;
+				entries = realloc(entries,
+						  sizeof(char *) * entry_capacity);
+				if (!entries) {
+					free(absolute_path);
+					fclose(history_file);
+					return;
+				}
+			}
+			entries[entry_count++] = strdup(line_buffer);
+		}
+		fclose(history_file);
+	}
+
+	/* Evict oldest entries if we are at the limit. The new entry
+	 * will be appended, so make room for it. */
+	while (entry_count >= CURSOR_HISTORY_MAX_ENTRIES - 1
+	       && entry_count > 0) {
+		free(entries[0]);
+		memmove(&entries[0], &entries[1],
+			sizeof(char *) * (entry_count - 1));
+		entry_count--;
+	}
+
+	/* Write all entries plus the new one. */
+	FILE *output = fopen(history_path, "w");
+	if (!output) {
+		for (int i = 0; i < entry_count; i++)
+			free(entries[i]);
+		free(entries);
+		free(absolute_path);
+		return;
+	}
+
+	for (int i = 0; i < entry_count; i++) {
+		fprintf(output, "%s\n", entries[i]);
+		free(entries[i]);
+	}
+	free(entries);
+
+	fprintf(output, "%s:%d:%d:%d\n", absolute_path,
+		editor.cursor_y, editor.cursor_x, editor.row_offset);
+
+	fclose(output);
+	free(absolute_path);
 }
 
 /*** Help ***/
@@ -7229,6 +7871,11 @@ void editor_init(void)
 	editor.binary_file_warning = 0;
 	editor.prev_row_offset_for_prefetch = 0;
 	editor.cool_scan_position = 0;
+	editor.swap_file_path = NULL;
+	editor.last_swap_write_time = 0;
+	editor.file_mtime = (struct timespec){0};
+	editor.file_device = 0;
+	editor.file_inode = 0;
 }
 
 /* Reads all data from stdin into a malloc'd buffer. Used when stdin is
@@ -7348,6 +7995,7 @@ int main(int argc, char *argv[])
 	 * piped data or the argument was "-". */
 	if (filename_arg && !arg_is_dash && !stdin_is_pipe) {
 		editor_open(filename_arg);
+		cursor_history_restore();
 	} else if (filename_arg && arg_is_dash && !stdin_is_pipe) {
 		/* "-" was passed but stdin was a terminal -- just start empty */
 	}
@@ -7371,8 +8019,15 @@ int main(int argc, char *argv[])
 		editor_cool_distant_lines();
 		editor_prefetch_lines();
 
+		/* Periodically write a swap file for crash recovery. */
+		swap_file_write();
+
+		/* Use a bounded timeout so the swap file writer gets a
+		 * chance to run even when the user is idle. The interval
+		 * matches the swap write period (in milliseconds). */
 		struct pollfd stdin_poll = {STDIN_FILENO, POLLIN, 0};
-		if (poll(&stdin_poll, 1, -1) == -1) {
+		int poll_timeout = SWAP_WRITE_INTERVAL_SECONDS * 1000;
+		if (poll(&stdin_poll, 1, poll_timeout) == -1) {
 			if (errno == EINTR)
 				continue;
 			terminal_die("poll");
