@@ -6508,12 +6508,10 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			 * the cell loop to guarantee visibility regardless of
 			 * how the loop exited. */
 			if (has_right_indicator) {
-				int right_col = editor.line_number_width +
-						text_columns;
 				char move_buf[CURSOR_BUFFER_SIZE];
 				snprintf(move_buf, sizeof(move_buf),
 					 CURSOR_MOVE, screen_row + 1,
-					 right_col);
+					 editor.screen_columns);
 				append_buffer_write(append_buffer, move_buf,
 						    strlen(move_buf));
 				append_buffer_write_color(append_buffer,
