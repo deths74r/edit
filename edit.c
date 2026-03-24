@@ -6424,15 +6424,6 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 									editor.theme.line_number);
 								append_buffer_write(append_buffer, "<", 1);
 								current_color = NULL;
-							/* Right scroll indicator: override last visible
-							 * character position with '>' */
-							} else if (has_right_indicator
-								   && output_col == text_columns - 1) {
-								append_buffer_write_color(
-									append_buffer,
-									editor.theme.line_number);
-								append_buffer_write(append_buffer, ">", 1);
-								current_color = NULL;
 							} else {
 								append_buffer_write(append_buffer, " ", 1);
 							}
@@ -6545,14 +6536,6 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								append_buffer,
 								editor.theme.line_number);
 							append_buffer_write(append_buffer, "<", 1);
-							current_color = NULL;
-						/* Right scroll indicator: show '>' at last visible column */
-						} else if (has_right_indicator
-							   && output_col >= text_columns - 1) {
-							append_buffer_write_color(
-								append_buffer,
-								editor.theme.line_number);
-							append_buffer_write(append_buffer, ">", 1);
 							current_color = NULL;
 						} else {
 							/* Output all codepoints in the cluster */
