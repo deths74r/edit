@@ -160,11 +160,18 @@ enum cell_flag {
 	CELL_FLAG_SELECTED = (1 << 0)
 };
 
-/* Tracks the current text selection region. */
+/* Tracks the current text selection region. When the selection is
+ * being extended (keyboard or drag), the cursor is the moving end.
+ * When finalized (mouse released, or keyboard selection idle),
+ * end_y/end_x store the fixed second endpoint so scrolling doesn't
+ * change the range. */
 struct selection_state {
 	int active;
 	int anchor_y;
 	int anchor_x;
+	int end_y;
+	int end_x;
+	int finalized;  /* 1 = both endpoints fixed, cursor can move freely */
 };
 
 /* Internal clipboard storage for cut/copy/paste. */
@@ -2634,6 +2641,7 @@ void selection_clear(void)
 			ln->cells[i].flags &= ~CELL_FLAG_SELECTED;
 	}
 	editor.selection.active = 0;
+	editor.selection.finalized = 0;
 }
 
 /* Begins a new selection at the current cursor position. */
@@ -2642,6 +2650,7 @@ void selection_start(void)
 	if (editor.selection.active)
 		return;
 	editor.selection.active = 1;
+	editor.selection.finalized = 0;
 	editor.selection.anchor_y = editor.cursor_y;
 	editor.selection.anchor_x = editor.cursor_x;
 }
@@ -2651,18 +2660,29 @@ int selection_get_range(int *start_y, int *start_x, int *end_y, int *end_x)
 {
 	if (!editor.selection.active)
 		return 0;
-	if (editor.selection.anchor_y < editor.cursor_y ||
-	    (editor.selection.anchor_y == editor.cursor_y &&
-	     editor.selection.anchor_x <= editor.cursor_x)) {
-		*start_y = editor.selection.anchor_y;
-		*start_x = editor.selection.anchor_x;
-		*end_y = editor.cursor_y;
-		*end_x = editor.cursor_x;
+
+	int ay = editor.selection.anchor_y;
+	int ax = editor.selection.anchor_x;
+	int by, bx;
+
+	if (editor.selection.finalized) {
+		by = editor.selection.end_y;
+		bx = editor.selection.end_x;
 	} else {
-		*start_y = editor.cursor_y;
-		*start_x = editor.cursor_x;
-		*end_y = editor.selection.anchor_y;
-		*end_x = editor.selection.anchor_x;
+		by = editor.cursor_y;
+		bx = editor.cursor_x;
+	}
+
+	if (ay < by || (ay == by && ax <= bx)) {
+		*start_y = ay;
+		*start_x = ax;
+		*end_y = by;
+		*end_x = bx;
+	} else {
+		*start_y = by;
+		*start_x = bx;
+		*end_y = ay;
+		*end_x = ax;
 	}
 	return 1;
 }
@@ -7811,6 +7831,13 @@ void editor_process_keypress(struct input_event event)
 		break;
 	}
 	case MOUSE_BUTTON_RELEASED:
+		/* Finalize the selection so scrolling doesn't change the
+		 * range. Both endpoints are now fixed. */
+		if (editor.selection.active) {
+			editor.selection.end_y = editor.cursor_y;
+			editor.selection.end_x = editor.cursor_x;
+			editor.selection.finalized = 1;
+		}
 		break;
 
 	case BACKSPACE:
