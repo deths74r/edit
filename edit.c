@@ -280,6 +280,9 @@ enum editor_mode {
 
 /* Seconds before the status bar message auto-clears. */
 #define STATUS_MESSAGE_TIMEOUT_SECONDS 5
+/* Microseconds threshold below which scroll events are treated as the
+ * same physical wheel notch (terminals often send 3-5 events per notch). */
+#define SCROLL_DEBOUNCE_US 5000
 /* Microseconds threshold for fast scroll acceleration. */
 #define SCROLL_ACCELERATION_FAST_US 50000
 /* Microseconds threshold for scroll speed deceleration. */
@@ -5920,6 +5923,14 @@ void editor_update_scroll_speed(void)
 	long time_diff =
 			(current_time.tv_sec - editor.last_scroll_time.tv_sec) * MICROSECONDS_PER_SECOND +
 			(current_time.tv_usec - editor.last_scroll_time.tv_usec);
+
+	/* Events arriving within 5ms are the same physical wheel notch
+	 * (terminals send 3-5 events per notch). Don't accelerate and
+	 * don't update last_scroll_time so the next real notch measures
+	 * from the start of this burst. */
+	if (time_diff < SCROLL_DEBOUNCE_US)
+		return;
+
 	if (time_diff < SCROLL_ACCELERATION_FAST_US) {
 		editor.scroll_speed = editor.scroll_speed < SCROLL_SPEED_MAX
 															? editor.scroll_speed + 1
