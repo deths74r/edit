@@ -7744,6 +7744,10 @@ void editor_process_keypress(struct input_event event)
 
 	/* Mouse drag selection */
 	case MOUSE_LEFT_BUTTON_DRAG: {
+		/* Activate selection on first drag if not already active.
+		 * The anchor was set by MOUSE_LEFT_BUTTON_PRESSED. */
+		if (!editor.selection.active)
+			editor.selection.active = 1;
 		int file_row = event.mouse_y + editor.row_offset;
 		if (file_row < 0) file_row = 0;
 		if (file_row >= editor.line_count)
@@ -7808,8 +7812,10 @@ void editor_process_keypress(struct input_event event)
 	case MOUSE_LEFT_BUTTON_PRESSED:
 		if (editor.selection.active)
 			selection_clear();
-		selection_start();
 		editor_move_cursor(event);
+		/* Set the anchor for a potential drag selection but don't
+		 * mark selection as active yet. MOUSE_LEFT_BUTTON_DRAG
+		 * will activate it if the user actually drags. */
 		editor.selection.anchor_y = editor.cursor_y;
 		editor.selection.anchor_x = editor.cursor_x;
 		break;
