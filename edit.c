@@ -7256,24 +7256,70 @@ void editor_move_cursor(struct input_event event)
 
 	case ALT_KEY('k'):
 	case ARROW_UP:
-		if (editor.cursor_y != 0) {
-			if (editor.preferred_column == -1 && current_line)
-				editor.preferred_column =
-					line_cell_to_render_column(
-						current_line, editor.cursor_x);
-			editor.cursor_y--;
+		if (editor.preferred_column == -1 && current_line)
+			editor.preferred_column =
+				line_cell_to_render_column(
+					current_line, editor.cursor_x);
+
+		if (editor.word_wrap && current_line) {
+			int text_cols = editor.screen_columns -
+					editor.line_number_width;
+			if (text_cols < 1) text_cols = 1;
+			int render_col = line_cell_to_render_column(
+				current_line, editor.cursor_x);
+			int visual_row = render_col / text_cols;
+			if (visual_row > 0) {
+				/* Move up within the same wrapped line. */
+				int col_in_row = editor.preferred_column >= 0
+					? editor.preferred_column % text_cols
+					: render_col % text_cols;
+				int target = (visual_row - 1) * text_cols +
+					     col_in_row;
+				editor.cursor_x =
+					line_render_column_to_cell(
+						current_line, target);
+				break;
+			}
 		}
+		if (editor.cursor_y != 0)
+			editor.cursor_y--;
 		break;
 
 	case ALT_KEY('j'):
 	case ARROW_DOWN:
-		if (editor.cursor_y < editor.line_count) {
-			if (editor.preferred_column == -1 && current_line)
-				editor.preferred_column =
-					line_cell_to_render_column(
-						current_line, editor.cursor_x);
-			editor.cursor_y++;
+		if (editor.preferred_column == -1 && current_line)
+			editor.preferred_column =
+				line_cell_to_render_column(
+					current_line, editor.cursor_x);
+
+		if (editor.word_wrap && current_line) {
+			int text_cols = editor.screen_columns -
+					editor.line_number_width;
+			if (text_cols < 1) text_cols = 1;
+			int render_col = line_cell_to_render_column(
+				current_line, editor.cursor_x);
+			int render_width_val = line_render_width(current_line);
+			int visual_row = render_col / text_cols;
+			int total_rows = (render_width_val + text_cols - 1) /
+					 text_cols;
+			if (total_rows < 1) total_rows = 1;
+			if (visual_row < total_rows - 1) {
+				/* Move down within the same wrapped line. */
+				int col_in_row = editor.preferred_column >= 0
+					? editor.preferred_column % text_cols
+					: render_col % text_cols;
+				int target = (visual_row + 1) * text_cols +
+					     col_in_row;
+				if (target > render_width_val)
+					target = render_width_val;
+				editor.cursor_x =
+					line_render_column_to_cell(
+						current_line, target);
+				break;
+			}
 		}
+		if (editor.cursor_y < editor.line_count)
+			editor.cursor_y++;
 		break;
 	}
 
