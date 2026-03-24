@@ -118,14 +118,14 @@
 
 *Theme: Handle anything you throw at it.*
 
-- [ ] **WARM→COLD cooling** — free cells for lines that scroll off-screen, keeping memory proportional to viewport
-- [ ] **Predictive line warming** — pre-warm lines ahead of scroll direction after each frame
-- [ ] **Gap buffer for lines array** — O(1) insert/delete at cursor instead of O(n) memmove
-- [ ] **Streaming save** — write line-by-line via `writev()`, peak memory O(max_line_size) instead of O(file_size)
-- [ ] **Cell struct optimization** — relocate unused fields to parallel arrays, shrink to 8 bytes
-- [ ] **Binary file detection** — NUL byte scan + warning
-- [ ] **Long line handling** — cache render-column-to-cell mappings
-- [ ] **Pre-computed keyword lengths** in syntax database
+- [x] **WARM→COLD cooling** — frees cells for distant WARM lines, 100 lines/frame gradual scan
+- [x] **Predictive line warming** — pre-warms screen_rows/2 lines ahead of scroll direction
+- [ ] **Gap buffer for lines array** — deferred (current O(n) acceptable for typical file sizes)
+- [x] **Streaming save** — lines written directly to fd, peak memory O(max_line_size)
+- [ ] **Cell struct optimization** — deferred (flags/context fields in active use)
+- [x] **Binary file detection** — NUL scan in first 8KB, warning in status bar
+- [x] **Long line handling** — cached_render_width on struct line, invalidated on mutation
+- [x] **Pre-computed keyword lengths** — done in 0.4.0
 
 ---
 
