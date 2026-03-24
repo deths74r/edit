@@ -6503,6 +6503,24 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 				ci = (uint32_t)grapheme_end;
 			}
 
+			/* Right scroll indicator: position cursor at the last
+			 * visible column and overwrite with '>'. Done after
+			 * the cell loop to guarantee visibility regardless of
+			 * how the loop exited. */
+			if (has_right_indicator) {
+				int right_col = editor.line_number_width +
+						text_columns;
+				char move_buf[CURSOR_BUFFER_SIZE];
+				snprintf(move_buf, sizeof(move_buf),
+					 CURSOR_MOVE, screen_row + 1,
+					 right_col);
+				append_buffer_write(append_buffer, move_buf,
+						    strlen(move_buf));
+				append_buffer_write_color(append_buffer,
+							  editor.theme.line_number);
+				append_buffer_write(append_buffer, ">", 1);
+			}
+
 			/* Restore original syntax values after rendering if
 			 * search highlighting was applied to this line. */
 			if (search_modified && search_saved) {
