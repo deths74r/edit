@@ -7269,15 +7269,16 @@ void editor_move_cursor(struct input_event event)
 				current_line, editor.cursor_x);
 			int visual_row = render_col / text_cols;
 			if (visual_row > 0) {
-				/* Move up within the same wrapped line. */
+				/* Move up within the same wrapped line.
+				 * Set preferred_column to the target render
+				 * column so the post-switch restore puts
+				 * the cursor in the right place. */
 				int col_in_row = editor.preferred_column >= 0
 					? editor.preferred_column % text_cols
 					: render_col % text_cols;
-				int target = (visual_row - 1) * text_cols +
-					     col_in_row;
-				editor.cursor_x =
-					line_render_column_to_cell(
-						current_line, target);
+				editor.preferred_column =
+					(visual_row - 1) * text_cols +
+					col_in_row;
 				break;
 			}
 		}
@@ -7304,7 +7305,10 @@ void editor_move_cursor(struct input_event event)
 					 text_cols;
 			if (total_rows < 1) total_rows = 1;
 			if (visual_row < total_rows - 1) {
-				/* Move down within the same wrapped line. */
+				/* Move down within the same wrapped line.
+				 * Set preferred_column to the target render
+				 * column so the post-switch restore puts
+				 * the cursor in the right place. */
 				int col_in_row = editor.preferred_column >= 0
 					? editor.preferred_column % text_cols
 					: render_col % text_cols;
@@ -7312,9 +7316,7 @@ void editor_move_cursor(struct input_event event)
 					     col_in_row;
 				if (target > render_width_val)
 					target = render_width_val;
-				editor.cursor_x =
-					line_render_column_to_cell(
-						current_line, target);
+				editor.preferred_column = target;
 				break;
 			}
 		}
