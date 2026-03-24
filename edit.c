@@ -6116,6 +6116,7 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 	int screen_row;
 	for (screen_row = 0; screen_row < editor.screen_rows; screen_row++) {
 		int file_row = file_row_index;
+		int has_right_indicator = 0;
 
 		/* Set background color for the entire line */
 		append_buffer_write_background(
@@ -6221,9 +6222,9 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			int has_left_indicator = (!editor.word_wrap
 						  && editor.column_offset > 0
 						  && ln->cell_count > 0);
-			int has_right_indicator = (!editor.word_wrap
-						   && render_width >
-						   editor.column_offset + text_columns);
+			has_right_indicator = (!editor.word_wrap
+					      && render_width >
+					      editor.column_offset + text_columns);
 
 			/* Render cells with tab expansion and UTF-8 encoding.
 			 * Iterates by grapheme cluster to correctly handle
@@ -6431,8 +6432,7 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 							current_color = NULL;
 						/* Right scroll indicator: show '>' at last visible column */
 						} else if (has_right_indicator
-							   && output_col + cw > text_columns - 1
-							   && output_col <= text_columns - 1) {
+							   && output_col >= text_columns - 1) {
 							append_buffer_write_color(
 								append_buffer,
 								editor.theme.line_number);
@@ -6503,22 +6503,6 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 				ci = (uint32_t)grapheme_end;
 			}
 
-			/* Right scroll indicator: position cursor at the last
-			 * visible column and overwrite with '>'. Done after
-			 * the cell loop to guarantee visibility regardless of
-			 * how the loop exited. */
-			if (has_right_indicator) {
-				char move_buf[CURSOR_BUFFER_SIZE];
-				snprintf(move_buf, sizeof(move_buf),
-					 CURSOR_MOVE, screen_row + 1,
-					 editor.screen_columns);
-				append_buffer_write(append_buffer, move_buf,
-						    strlen(move_buf));
-				append_buffer_write_color(append_buffer,
-							  editor.theme.line_number);
-				append_buffer_write(append_buffer, ">", 1);
-			}
-
 			/* Restore original syntax values after rendering if
 			 * search highlighting was applied to this line. */
 			if (search_modified && search_saved) {
@@ -6570,6 +6554,26 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			}
 		}
 		append_buffer_write(append_buffer, CLEAR_LINE, strlen(CLEAR_LINE));
+
+		/* Right scroll indicator: draw '>' at the last screen column
+		 * AFTER CLEAR_LINE so it can't be erased. Uses a cursor move
+		 * to position precisely at the rightmost column. */
+		/* Right scroll indicator: draw '>' at the last screen
+		 * column after CLEAR_LINE. Uses a cursor move to position
+		 * at the second-to-last column for compatibility with
+		 * terminals that don't render at the final column. */
+		if (has_right_indicator) {
+			char move_buf[CURSOR_BUFFER_SIZE];
+			snprintf(move_buf, sizeof(move_buf),
+				 "\x1b[%d;%dH", screen_row + 1,
+				 editor.screen_columns - 1);
+			append_buffer_write(append_buffer, move_buf,
+					    strlen(move_buf));
+			append_buffer_write_color(append_buffer,
+						  editor.theme.line_number);
+			append_buffer_write(append_buffer, ">", 1);
+		}
+
 		append_buffer_write(append_buffer, CRLF, strlen(CRLF));
 	}
 }
