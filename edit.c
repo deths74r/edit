@@ -2597,29 +2597,23 @@ void selection_clear(void)
 	if (!editor.selection.active)
 		return;
 	editor.force_full_redraw = 1;
-	int start_y, start_x, end_y, end_x;
-	if (editor.selection.anchor_y < editor.cursor_y ||
-	    (editor.selection.anchor_y == editor.cursor_y &&
-	     editor.selection.anchor_x <= editor.cursor_x)) {
-		start_y = editor.selection.anchor_y;
-		start_x = editor.selection.anchor_x;
-		end_y = editor.cursor_y;
-		end_x = editor.cursor_x;
-	} else {
-		start_y = editor.cursor_y;
-		start_x = editor.cursor_x;
-		end_y = editor.selection.anchor_y;
-		end_x = editor.selection.anchor_x;
+
+	/* Compute the full range that could have flags set. Use both
+	 * anchor and cursor to cover the widest possible range — the
+	 * cursor may have moved since the last selection_update(). */
+	int min_y = editor.selection.anchor_y;
+	int max_y = editor.cursor_y;
+	if (min_y > max_y) {
+		int tmp = min_y;
+		min_y = max_y;
+		max_y = tmp;
 	}
-	for (int y = start_y; y <= end_y && y < editor.line_count; y++) {
+
+	for (int y = min_y; y <= max_y && y < editor.line_count; y++) {
 		struct line *ln = &editor.lines[y];
 		if (ln->temperature == LINE_COLD)
 			continue;
-		int from = (y == start_y) ? start_x : 0;
-		int to = (y == end_y) ? end_x : (int)ln->cell_count;
-		if (to > (int)ln->cell_count)
-			to = (int)ln->cell_count;
-		for (int i = from; i < to; i++)
+		for (uint32_t i = 0; i < ln->cell_count; i++)
 			ln->cells[i].flags &= ~CELL_FLAG_SELECTED;
 	}
 	editor.selection.active = 0;
@@ -2656,12 +2650,38 @@ int selection_get_range(int *start_y, int *start_x, int *end_y, int *end_x)
 	return 1;
 }
 
-/* Updates CELL_FLAG_SELECTED on cells in the selection range. */
+/* Clears CELL_FLAG_SELECTED from all cells on lines between
+ * prev_start_y and prev_end_y (the previous selection range).
+ * Called before setting new flags so shrinking selections don't
+ * leave stale highlights on lines that fell out of range. */
+void selection_clear_range(int prev_start_y, int prev_end_y)
+{
+	for (int y = prev_start_y; y <= prev_end_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		if (ln->temperature == LINE_COLD)
+			continue;
+		for (uint32_t i = 0; i < ln->cell_count; i++)
+			ln->cells[i].flags &= ~CELL_FLAG_SELECTED;
+	}
+}
+
+/* Updates CELL_FLAG_SELECTED on cells in the selection range. Tracks
+ * the previous range so shrinking selections correctly clear stale
+ * flags on lines that are no longer in range. */
 void selection_update(void)
 {
 	if (!editor.selection.active)
 		return;
 	editor.force_full_redraw = 1;
+
+	/* Clear flags from the previous selection range first. This
+	 * handles the case where the selection shrank — lines that
+	 * were previously selected but are no longer in range would
+	 * otherwise keep stale CELL_FLAG_SELECTED bits. */
+	static int prev_start_y = -1, prev_end_y = -1;
+	if (prev_start_y >= 0)
+		selection_clear_range(prev_start_y, prev_end_y);
+
 	int start_y, start_x, end_y, end_x;
 	selection_get_range(&start_y, &start_x, &end_y, &end_x);
 
@@ -2679,6 +2699,9 @@ void selection_update(void)
 				ln->cells[i].flags &= ~CELL_FLAG_SELECTED;
 		}
 	}
+
+	prev_start_y = start_y;
+	prev_end_y = end_y;
 }
 
 /* Extracts the selected text as a UTF-8 string. Caller frees. */
