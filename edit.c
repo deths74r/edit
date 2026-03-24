@@ -9,6 +9,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <poll.h>
 #include <sys/time.h>
@@ -635,6 +636,13 @@ struct editor_state {
 	dev_t file_device;
 	/* Inode number of the file when opened, for change detection. */
 	ino_t file_inode;
+	/* Set when the file is not writable by the current user. Checked
+	 * via access(W_OK) after opening. Does not block saves since the
+	 * user may change permissions externally. */
+	int read_only;
+	/* File descriptor holding a LOCK_EX flock on the opened file, or
+	 * -1 when no lock is held. Prevents concurrent editing. */
+	int lock_file_descriptor;
 };
 
 /* Global editor state. */
@@ -674,6 +682,9 @@ void file_record_stat(void);
 int file_check_changed(void);
 void cursor_history_restore(void);
 void cursor_history_record(void);
+void editor_check_read_only(void);
+void file_acquire_lock(void);
+void file_release_lock(void);
 static int config_mkdir_parents(const char *path);
 
 /*** Filetypes ***/
@@ -1678,7 +1689,7 @@ char *line_to_bytes(struct line *line, size_t *out_length)
 	size_t max_size = (size_t)line->cell_count * UTF8_MAX_BYTES + 1;
 	char *bytes = malloc(max_size);
 	if (bytes == NULL)
-		terminal_die("malloc");
+		return NULL;
 	size_t pos = 0;
 	for (uint32_t i = 0; i < line->cell_count; i++) {
 		int written = utf8_encode(line->cells[i].codepoint, &bytes[pos]);
@@ -2774,6 +2785,12 @@ void clipboard_store(const char *text, size_t length, int is_line_mode)
 
 	editor.clipboard.lines = malloc(sizeof(char *) * count);
 	editor.clipboard.line_lengths = malloc(sizeof(size_t) * count);
+	if (!editor.clipboard.lines || !editor.clipboard.line_lengths) {
+		free(editor.clipboard.lines);
+		free(editor.clipboard.line_lengths);
+		editor.clipboard = (struct clipboard){0};
+		return;
+	}
 	editor.clipboard.line_count = 0;
 	editor.clipboard.is_line_mode = is_line_mode;
 
@@ -2782,6 +2799,8 @@ void clipboard_store(const char *text, size_t length, int is_line_mode)
 		if (i == length || text[i] == '\n') {
 			size_t line_len = i - start;
 			char *line = malloc(line_len + 1);
+			if (!line)
+				return;
 			memcpy(line, text + start, line_len);
 			line[line_len] = '\0';
 			editor.clipboard.lines[editor.clipboard.line_count] = line;
@@ -3071,6 +3090,8 @@ void editor_insert_newline(void)
 		 * cell indices diverge from byte positions. */
 		size_t tail_len;
 		char *tail = line_to_bytes(ln, &tail_len);
+		if (tail == NULL)
+			return;
 		size_t byte_offset = 0;
 		int cells = 0;
 		while (cells < editor.cursor_x && byte_offset < tail_len) {
@@ -3165,6 +3186,56 @@ void editor_delete_char(void)
 
 /*** File i/o ***/
 
+/* Checks whether the current file is writable by the user. Uses access()
+ * with W_OK to test write permission. New files (no filename) are never
+ * marked read-only. Called after opening a file. */
+void editor_check_read_only(void)
+{
+	if (editor.filename == NULL) {
+		editor.read_only = 0;
+		return;
+	}
+	editor.read_only = (access(editor.filename, W_OK) == -1) ? 1 : 0;
+}
+
+/* Acquires an exclusive advisory lock on the current file using flock().
+ * If the file is already locked by another process, the editor continues
+ * in read-only mode with a warning. Non-fatal on any other flock failure
+ * (e.g., NFS or unsupported filesystem) -- locking is silently skipped. */
+void file_acquire_lock(void)
+{
+	if (editor.filename == NULL)
+		return;
+
+	int fd = open(editor.filename, O_RDONLY);
+	if (fd == -1)
+		return;
+
+	if (flock(fd, LOCK_EX | LOCK_NB) == -1) {
+		if (errno == EWOULDBLOCK) {
+			editor_set_status_message(
+				"File is locked by another process");
+			editor.read_only = 1;
+		}
+		close(fd);
+		return;
+	}
+
+	editor.lock_file_descriptor = fd;
+}
+
+/* Releases the advisory file lock and closes the lock file descriptor.
+ * Safe to call when no lock is held (lock_file_descriptor == -1). */
+void file_release_lock(void)
+{
+	if (editor.lock_file_descriptor == -1)
+		return;
+
+	flock(editor.lock_file_descriptor, LOCK_UN);
+	close(editor.lock_file_descriptor);
+	editor.lock_file_descriptor = -1;
+}
+
 /* Concatenates all editor lines into a single newline-separated string for
  * writing to disk. Stores the total byte count in buffer_length. The caller
  * is responsible for freeing the returned buffer. */
@@ -3189,6 +3260,10 @@ char *editor_rows_to_string(size_t *buffer_length)
 			byte_len = line->mmap_length;
 		} else {
 			allocated_bytes = line_to_bytes(line, &byte_len);
+			if (allocated_bytes == NULL) {
+				free(buffer);
+				return NULL;
+			}
 			bytes = allocated_bytes;
 		}
 
@@ -3462,6 +3537,10 @@ int editor_save_write(void)
 		} else {
 			size_t byte_length;
 			char *bytes = line_to_bytes(line, &byte_length);
+			if (bytes == NULL) {
+				ret = -ENOMEM;
+				goto out;
+			}
 			ret = write_full(fd, bytes, byte_length);
 			free(bytes);
 			if (ret < 0)
@@ -3572,9 +3651,15 @@ void editor_save_cancel(void)
 }
 
 /* Starts the save flow. If a filename exists, writes immediately.
- * Otherwise opens a prompt to ask for one. */
+ * Otherwise opens a prompt to ask for one. Shows a warning when the
+ * file is read-only, but does not block the save since the user may
+ * have changed permissions externally. */
 void editor_save_start(void)
 {
+	if (editor.read_only) {
+		editor_set_status_message(
+			"Warning: file is read-only (saving anyway)");
+	}
 	if (editor.filename != NULL) {
 		editor_save_write();
 	} else {
@@ -3629,6 +3714,9 @@ void editor_quit(void)
 {
 	/* Record cursor position before cleanup destroys the state. */
 	cursor_history_record();
+
+	/* Release the advisory file lock before cleanup. */
+	file_release_lock();
 
 	/* Remove the swap file if the buffer is clean. */
 	if (!editor.dirty)
@@ -3768,6 +3856,8 @@ void swap_file_write(void)
 		} else {
 			size_t byte_length;
 			char *bytes = line_to_bytes(line, &byte_length);
+			if (bytes == NULL)
+				goto fail;
 			int result = write_full(fd, bytes, byte_length);
 			free(bytes);
 			if (result < 0)
@@ -4451,6 +4541,8 @@ void editor_count_search_matches(const char *query, int match_line, int match_by
 		} else {
 			line_ensure_warm(ln);
 			bytes = line_to_bytes(ln, &byte_length);
+			if (bytes == NULL)
+				continue;
 			allocated = 1;
 		}
 
@@ -4720,6 +4812,8 @@ void editor_find_callback(char *query, int key)
 		} else {
 			line_ensure_warm(ln);
 			render = line_to_bytes(ln, &byte_len);
+			if (render == NULL)
+				continue;
 			allocated = 1;
 		}
 		int case_flag = editor.search_case_insensitive;
@@ -4741,6 +4835,8 @@ void editor_find_callback(char *query, int key)
 			allocated = 0;
 			line_ensure_warm(ln);
 			char *warm_render = line_to_bytes(ln, &byte_len);
+			if (warm_render == NULL)
+				break;
 
 			/* Convert byte offset to cell index by counting
 			 * codepoints in the bytes before the match. */
@@ -4921,6 +5017,8 @@ int editor_replace_find_next(void)
 		struct line *ln = &editor.lines[line_index];
 		size_t byte_length;
 		char *bytes = line_to_bytes(ln, &byte_length);
+		if (bytes == NULL)
+			continue;
 
 		/* On the starting line, skip bytes before the cursor so we
 		 * don't re-find a match we have already processed. */
@@ -5785,6 +5883,8 @@ int editor_highlight_search_matches(struct line *line, uint16_t *saved_syntax)
 
 	size_t byte_length;
 	char *bytes = line_to_bytes(line, &byte_length);
+	if (bytes == NULL)
+		return 0;
 
 	/* Build byte-to-cell mapping */
 	int *byte_to_cell = malloc(sizeof(int) * (byte_length + 1));
@@ -6389,7 +6489,9 @@ void editor_draw_status_bar(struct append_buffer *append_buffer)
 	const char *filetype_label = editor.syntax
 		? editor.syntax->filetype : "text";
 
-	/* Compute the dirty indicator and filetype suffix. */
+	/* Compute the read-only, dirty indicator, and filetype suffix. */
+	const char *read_only_text = editor.read_only ? " [RO]" : "";
+	int read_only_length = (int)strlen(read_only_text);
 	const char *dirty_text = editor.dirty ? " [+]" : "";
 	int dirty_length = (int)strlen(dirty_text);
 	char filetype_suffix[STATUS_BUFFER_SIZE];
@@ -6397,8 +6499,9 @@ void editor_draw_status_bar(struct append_buffer *append_buffer)
 		sizeof(filetype_suffix), " %s", filetype_label);
 
 	/* Calculate available width for the filename. Reserve space for
-	 * the dirty indicator, filetype, a gap, and the right side. */
-	int reserved = dirty_length + filetype_suffix_length + 1 + right_status_length;
+	 * the read-only indicator, dirty indicator, filetype, a gap,
+	 * and the right side. */
+	int reserved = read_only_length + dirty_length + filetype_suffix_length + 1 + right_status_length;
 	int filename_max = editor.screen_columns - reserved;
 	if (filename_max < 0)
 		filename_max = 0;
@@ -6425,6 +6528,12 @@ void editor_draw_status_bar(struct append_buffer *append_buffer)
 			filename_max > filename_length ? filename_length : filename_max);
 		output_col += (filename_max > filename_length
 			? filename_length : filename_max);
+	}
+
+	/* Render the read-only indicator between filename and dirty flag. */
+	if (editor.read_only && output_col + read_only_length <= editor.screen_columns) {
+		append_buffer_write(append_buffer, read_only_text, read_only_length);
+		output_col += read_only_length;
 	}
 
 	/* Render the dirty indicator in the match/number color to stand out. */
@@ -7876,6 +7985,8 @@ void editor_init(void)
 	editor.file_mtime = (struct timespec){0};
 	editor.file_device = 0;
 	editor.file_inode = 0;
+	editor.read_only = 0;
+	editor.lock_file_descriptor = -1;
 }
 
 /* Reads all data from stdin into a malloc'd buffer. Used when stdin is
@@ -7995,6 +8106,8 @@ int main(int argc, char *argv[])
 	 * piped data or the argument was "-". */
 	if (filename_arg && !arg_is_dash && !stdin_is_pipe) {
 		editor_open(filename_arg);
+		editor_check_read_only();
+		file_acquire_lock();
 		cursor_history_restore();
 	} else if (filename_arg && arg_is_dash && !stdin_is_pipe) {
 		/* "-" was passed but stdin was a terminal -- just start empty */

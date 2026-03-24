@@ -19,7 +19,9 @@ TARGET = edit
 SRC = edit.c
 OBJ = $(SRC:.c=.o)
 
-.PHONY: all clean debug release lint test
+PREFIX ?= /usr/local
+
+.PHONY: all clean debug release lint test install uninstall
 
 all: $(TARGET)
 
@@ -48,6 +50,14 @@ test: test_edit
 
 test_edit: test_edit.c edit.c lib/gstr/include/gstr.h
 	$(CC) $(CFLAGS) -o test_edit test_edit.c
+
+install: release
+	install -Dm755 edit $(DESTDIR)$(PREFIX)/bin/edit
+	install -Dm644 edit.1 $(DESTDIR)$(PREFIX)/share/man/man1/edit.1
+
+uninstall:
+	rm -f $(DESTDIR)$(PREFIX)/bin/edit
+	rm -f $(DESTDIR)$(PREFIX)/share/man/man1/edit.1
 
 clean:
 	rm -f $(TARGET) $(OBJ) test_edit
