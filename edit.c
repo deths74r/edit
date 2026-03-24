@@ -6523,8 +6523,24 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								append_buffer,
 								editor.theme.line_number);
 						}
-						/* Selection: use terminal reverse video */
-						int selected = ln->cells[ci].flags & CELL_FLAG_SELECTED;
+						/* Selection: compute from range, not cell flags.
+						 * This handles lines that were warmed after the
+						 * selection was made (scrolling into view). */
+						int selected = 0;
+						if (editor.selection.active) {
+							int sel_sy, sel_sx, sel_ey, sel_ex;
+							if (selection_get_range(&sel_sy, &sel_sx,
+									       &sel_ey, &sel_ex)) {
+								if (file_row > sel_sy && file_row < sel_ey)
+									selected = 1;
+								else if (file_row == sel_sy && file_row == sel_ey)
+									selected = ((int)ci >= sel_sx && (int)ci < sel_ex);
+								else if (file_row == sel_sy)
+									selected = ((int)ci >= sel_sx);
+								else if (file_row == sel_ey)
+									selected = ((int)ci < sel_ex);
+							}
+						}
 						if (selected) {
 							append_buffer_write(append_buffer,
 								INVERT_COLOR, strlen(INVERT_COLOR));
