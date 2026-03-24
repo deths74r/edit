@@ -102,15 +102,15 @@
 
 *Theme: Make it your own.*
 
-- [ ] **Config file** — `~/.config/edit/config`, simple `key = value` INI format
-- [ ] **Configurable tab width** — also via `--tabstop=N` CLI flag
-- [ ] **Configurable keybindings** in config
-- [ ] **Persistent theme selection** across sessions
-- [ ] **Colorblind-accessible theme** — blue/orange/yellow palette
-- [ ] **Match background highlight** — add `match_background` to theme struct
-- [ ] **True color detection** — check `COLORTERM=truecolor`, document requirement
-- [ ] **Soft word wrap toggle** — rendering-only change, no data model modification
-- [ ] **Column ruler** at configurable width (80, 120, etc.)
+- [x] **Config file** — ~/.config/edit/config, key=value INI, XDG discovery
+- [x] **Configurable tab width** — config + --tabstop=N CLI flag
+- [ ] **Configurable keybindings** in config (deferred — config infrastructure ready)
+- [x] **Persistent theme selection** — Alt+T saves to config automatically
+- [x] **Colorblind-accessible theme** — "Clarity" blue/orange/yellow palette
+- [x] **Match background highlight** — match_background field on all themes
+- [x] **True color detection** — COLORTERM + TERM env var check
+- [x] **Soft word wrap toggle** — Alt+W, rendering-only, no data model change
+- [x] **Column ruler** — config ruler=N, subtle vertical line
 
 ---
 
