@@ -492,6 +492,9 @@ struct editor_state {
 	struct editor_theme theme;
 	/* Current scroll speed (1 to SCROLL_SPEED_MAX). */
 	int scroll_speed;
+	/* Set to 1 after the first scroll event in a frame. Cleared
+	 * after each render so speed is recomputed for the next frame. */
+	int scroll_speed_set_this_frame;
 	/* Whether line numbers are displayed in the gutter. */
 	int show_line_numbers;
 	/* Number of columns reserved for the line number gutter (digits + space). */
@@ -5910,11 +5913,21 @@ void editor_scroll_rows(int scroll_direction, int scroll_amount)
 		editor.cursor_y = editor.line_count;
 }
 
-/* Updates the scroll speed based on the time between consecutive scroll
- * events. Quick successive scrolls increase speed up to SCROLL_SPEED_MAX;
- * a pause resets it back to 1. */
+/* Updates the scroll speed based on the time since the last render
+ * frame, not the last scroll event. This prevents false acceleration
+ * when terminals batch multiple scroll events per physical wheel notch
+ * (all arrive in one read() and process sub-microsecond apart).
+ * Speed is computed once per render and held for all events in that
+ * frame. The flag scroll_speed_set_this_frame prevents re-computation
+ * within the same frame. */
 void editor_update_scroll_speed(void)
 {
+	/* Only compute speed once per frame. All scroll events between
+	 * two renders use the same speed. */
+	if (editor.scroll_speed_set_this_frame)
+		return;
+	editor.scroll_speed_set_this_frame = 1;
+
 	struct timeval current_time;
 	gettimeofday(&current_time, NULL);
 	long time_diff =
@@ -6682,6 +6695,9 @@ int editor_cursor_screen_row(void)
  * viewport, status bar, or selection state changed. */
 void editor_refresh_screen(void)
 {
+	/* Allow scroll speed to be recomputed on the next scroll event. */
+	editor.scroll_speed_set_this_frame = 0;
+
 	editor_scroll();
 	bracket_update_cursor_match();
 
@@ -7987,6 +8003,7 @@ void editor_init(void)
 
 	gettimeofday(&editor.last_scroll_time, NULL);
 	editor.scroll_speed = 1;
+	editor.scroll_speed_set_this_frame = 0;
 	editor.file_descriptor = -1;
 	editor.mmap_base = NULL;
 	editor.mmap_size = 0;
