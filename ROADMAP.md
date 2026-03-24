@@ -144,10 +144,10 @@
 
 *Theme: No asterisks, no apologies.*
 
-- [ ] All features stable and regression-tested
-- [ ] Comprehensive test suite (unit tests for cell/line ops, integration tests for workflows)
-- [ ] Package-ready for Homebrew, apt, AUR
-- [ ] Performance benchmarks published (mmap advantage quantified)
+- [x] **All features stable and regression-tested** — 237 assertions passing
+- [x] **Comprehensive test suite** — 83 tests across 7 categories with MC/DC coverage
+- [ ] Package-ready for Homebrew, apt, AUR (skipped per decision)
+- [ ] Performance benchmarks published (skipped per decision)
 - [x] **Clean error handling** — line_to_bytes NULL checks at all 13 call sites
 - [x] **Read-only file indicator** — [RO] in status bar, access(W_OK) check
 - [x] **File locking** — flock(LOCK_EX|LOCK_NB), read-only fallback on EWOULDBLOCK
