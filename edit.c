@@ -1461,6 +1461,14 @@ int terminal_get_cursor_position(int *rows, int *columns)
  * back to moving the cursor to the bottom-right corner and querying its
  * position. If all methods fail, uses sensible defaults (80x24).
  * Returns 0 on success, -1 if defaults were used. */
+#ifdef EDIT_TESTING
+int terminal_get_window_size(int *rows, int *columns)
+{
+	*columns = 80;
+	*rows = 24;
+	return 0;
+}
+#else
 int terminal_get_window_size(int *rows, int *columns)
 {
 	struct winsize window;
@@ -1483,6 +1491,7 @@ use_defaults:
 	*rows = 24;
 	return -1;
 }
+#endif
 
 /*** Syntax highlighting ***/
 
@@ -8025,6 +8034,7 @@ char *editor_read_stdin_pipe(size_t *out_length)
  * it queries the terminal size. When stdin is a pipe, we must read all
  * piped data and reopen /dev/tty BEFORE entering raw mode, since
  * tcgetattr() fails on a pipe file descriptor. */
+#ifndef EDIT_TESTING
 int main(int argc, char *argv[])
 {
 	atexit(editor_quit);
@@ -8166,3 +8176,4 @@ int main(int argc, char *argv[])
 		}
 	}
 }
+#endif /* EDIT_TESTING */
