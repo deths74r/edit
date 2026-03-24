@@ -6333,13 +6333,25 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			/* Render cells with tab expansion and UTF-8 encoding.
 			 * Iterates by grapheme cluster to correctly handle
 			 * multi-codepoint sequences (flags, ZWJ emoji, etc). */
+			/* Pre-compute the wrap break point so the cell loop
+			 * stops at the right cell instead of rendering past
+			 * the word boundary. */
+			int wrap_end = (int)ln->cell_count;
+			if (editor.word_wrap) {
+				int text_cols_pre = editor.screen_columns -
+						    editor.line_number_width;
+				if (text_cols_pre < 1) text_cols_pre = 1;
+				wrap_end = line_word_wrap_break(
+					ln, wrap_cell_offset, text_cols_pre);
+			}
+
 			char *current_color = NULL;
 			uint32_t ci = (uint32_t)wrap_cell_offset;
 			int col = (wrap_cell_offset > 0)
 				   ? line_cell_to_render_column(ln, wrap_cell_offset)
 				   : 0;
 			int output_col = 0;
-			while (ci < ln->cell_count && output_col < visible_length) {
+			while (ci < (uint32_t)wrap_end && output_col < visible_length) {
 				uint32_t cp = ln->cells[ci].codepoint;
 				uint16_t hl = ln->cells[ci].syntax;
 
@@ -6648,15 +6660,11 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			}
 
 			/* Advance to next line or continue wrapping */
-			if (editor.word_wrap && ci < ln->cell_count) {
-				/* More cells remain — compute the word-aware
-				 * break point for this visual row. */
-				int text_cols_wrap = editor.screen_columns -
-						    editor.line_number_width;
-				if (text_cols_wrap < 1) text_cols_wrap = 1;
-				int break_at = line_word_wrap_break(
-					ln, wrap_cell_offset, text_cols_wrap);
-				wrap_cell_offset = break_at;
+			if (editor.word_wrap && (int)ci < (int)ln->cell_count
+			    && wrap_end < (int)ln->cell_count) {
+				/* More cells remain — use the pre-computed
+				 * word-aware break point. */
+				wrap_cell_offset = wrap_end;
 			} else {
 				file_row_index++;
 				wrap_cell_offset = 0;
