@@ -8192,11 +8192,372 @@ void terminal_detect_true_color(void)
 
 /*** Init ***/
 
-/* Stub: opens the command prompt. Full implementation in Phase 1. */
+/*** Commands ***/
+
+/* Maximum number of characters in a trimmed command input. */
+#define COMMAND_INPUT_MAX 256
+
+/* Number of themes in the editor_themes array. */
+#define THEME_COUNT ((int)(sizeof(editor_themes) / sizeof(editor_themes[0])))
+
+/* Saves the file. If args provides a filename, sets it first. Otherwise
+ * delegates to the normal save flow which prompts if no name exists. */
+void command_save(const char *args)
+{
+	if (args[0] != '\0') {
+		free(editor.filename);
+		editor.filename = strdup(args);
+		syntax_select_highlight();
+	}
+	editor_save_start();
+}
+
+/* Opens a save-as prompt, or uses the provided filename directly. */
+void command_save_as(const char *args)
+{
+	if (args[0] != '\0') {
+		free(editor.filename);
+		editor.filename = strdup(args);
+		syntax_select_highlight();
+		editor_save_write();
+	} else {
+		editor_save_as_start();
+	}
+}
+
+/* Quits the editor with the same dirty-check logic as Ctrl+Q. */
+void command_quit(const char *args)
+{
+	(void)args;
+	if (editor.viewing_help) {
+		editor_help_close();
+		return;
+	}
+	if (editor.dirty) {
+		confirm_open("Unsaved changes. Save before quitting? (y/n/ESC)",
+			     editor_quit_confirm);
+	} else {
+		write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
+		write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+		exit(0);
+	}
+}
+
+/* Quits immediately without checking for unsaved changes. */
+void command_quit_force(const char *args)
+{
+	(void)args;
+	write(STDOUT_FILENO, CLEAR_SCREEN, strlen(CLEAR_SCREEN));
+	write(STDOUT_FILENO, CURSOR_HOME, strlen(CURSOR_HOME));
+	exit(0);
+}
+
+/* Undoes the last change. */
+void command_undo(const char *args)
+{
+	(void)args;
+	editor_undo();
+}
+
+/* Redoes the last undone change. */
+void command_redo(const char *args)
+{
+	(void)args;
+	editor_redo();
+}
+
+/* Opens the help screen. */
+void command_help(const char *args)
+{
+	(void)args;
+	editor_help_open();
+}
+
+/* Suspends the editor and returns to the shell. Restores terminal
+ * state, sends SIGTSTP, then re-enables raw mode on resume. */
+void command_suspend(const char *args)
+{
+	(void)args;
+	terminal_disable_mouse_reporting();
+	terminal_disable_raw_mode();
+	kill(getpid(), SIGTSTP);
+	/* Execution resumes here after SIGCONT */
+	terminal_enable_raw_mode();
+	terminal_enable_mouse_reporting();
+	editor.force_full_redraw = 1;
+}
+
+/* Cycles to the next theme, or sets a theme by name if args is given.
+ * Performs a case-insensitive match against theme names. */
+void command_theme_cycle(const char *args)
+{
+	if (args[0] == '\0') {
+		editor_switch_theme();
+		return;
+	}
+	for (int i = 0; i < THEME_COUNT; i++) {
+		if (strcasecmp(editor_themes[i].name, args) == 0) {
+			editor.force_full_redraw = 1;
+			current_theme_index = i;
+			editor_set_theme(i);
+			config_save_theme(editor.theme.name);
+			editor_set_status_message("Theme: %s",
+						  editor.theme.name);
+			return;
+		}
+	}
+	editor_set_status_message("Unknown theme: %s", args);
+}
+
+/* Parses and applies a setting. Recognized settings: tabstop N,
+ * ruler N, wrap, numbers. */
+void command_set(const char *args)
+{
+	if (args[0] == '\0') {
+		editor_set_status_message(
+			"Usage: set <tabstop N|ruler N|wrap|numbers>");
+		return;
+	}
+
+	if (strncmp(args, "tabstop ", 8) == 0) {
+		int value = atoi(args + 8);
+		if (value >= TAB_STOP_MIN && value <= TAB_STOP_MAX) {
+			editor.tab_stop = value;
+			editor.force_full_redraw = 1;
+			editor_set_status_message("Tab stop: %d", value);
+		} else {
+			editor_set_status_message(
+				"tabstop must be %d-%d",
+				TAB_STOP_MIN, TAB_STOP_MAX);
+		}
+		return;
+	}
+
+	if (strncmp(args, "ruler ", 6) == 0) {
+		int value = atoi(args + 6);
+		if (value >= 0 && value <= RULER_COLUMN_MAX) {
+			editor.ruler_column = value;
+			editor.force_full_redraw = 1;
+			editor_set_status_message("Ruler: %d", value);
+		} else {
+			editor_set_status_message(
+				"ruler must be 0-%d", RULER_COLUMN_MAX);
+		}
+		return;
+	}
+
+	if (strcmp(args, "wrap") == 0) {
+		editor_toggle_word_wrap();
+		return;
+	}
+	if (strcmp(args, "numbers") == 0) {
+		editor_toggle_line_numbers();
+		return;
+	}
+
+	editor_set_status_message("Unknown setting: %s", args);
+}
+
+/* Opens a search prompt, optionally pre-filled with the given query. */
+void command_find(const char *args)
+{
+	editor_find_start();
+	if (args[0] != '\0')
+		prompt_set_buffer(args);
+}
+
+/* Opens the find-and-replace flow. */
+void command_replace(const char *args)
+{
+	(void)args;
+	editor_replace_start();
+}
+
+/* Toggles word wrap on or off. */
+void command_wrap(const char *args)
+{
+	(void)args;
+	editor_toggle_word_wrap();
+}
+
+/* Toggles line number display on or off. */
+void command_numbers(const char *args)
+{
+	(void)args;
+	editor_toggle_line_numbers();
+}
+
+/* A single entry in the command table mapping a name to its handler. */
+struct command {
+	/* The command name typed by the user (e.g., "save", "quit!"). */
+	const char *name;
+	/* One-line description shown in help and tab completion hints. */
+	const char *description;
+	/* Handler function receiving everything after the command name. */
+	void (*handler)(const char *args);
+};
+
+/* Flat table of all recognized commands. Sorted longest-first for
+ * multi-word commands so "save as" matches before "save". */
+struct command command_table[] = {
+	{"save as", "Save with a new filename", command_save_as},
+	{"save", "Save the current file", command_save},
+	{"quit!", "Quit without saving", command_quit_force},
+	{"quit", "Quit the editor", command_quit},
+	{"undo", "Undo the last change", command_undo},
+	{"redo", "Redo the last undone change", command_redo},
+	{"help", "Show help screen", command_help},
+	{"suspend", "Suspend to shell", command_suspend},
+	{"theme", "Cycle to next theme", command_theme_cycle},
+	{"set", "Change a setting (tabstop, ruler, wrap, numbers)", command_set},
+	{"find", "Search for text", command_find},
+	{"replace", "Find and replace", command_replace},
+	{"wrap", "Toggle word wrap", command_wrap},
+	{"numbers", "Toggle line numbers", command_numbers},
+};
+
+/* Number of entries in the command table. */
+#define COMMAND_TABLE_SIZE ((int)(sizeof(command_table) / sizeof(command_table[0])))
+
+/* Parses command input and dispatches to the appropriate handler.
+ * Uses longest-match-first against the command table. Returns 1
+ * if a command matched, 0 if no match (caller should fall through
+ * to search). */
+int command_dispatch(const char *input)
+{
+	/* Skip leading whitespace. */
+	while (*input == ' ' || *input == '\t')
+		input++;
+
+	/* Find the end of meaningful content and compute trimmed length. */
+	size_t length = strlen(input);
+	while (length > 0 && (input[length - 1] == ' '
+			      || input[length - 1] == '\t'))
+		length--;
+
+	if (length == 0)
+		return 0;
+
+	/* Try each command entry. The table is ordered with multi-word
+	 * commands first, so "save as" is tried before "save". */
+	for (int i = 0; i < COMMAND_TABLE_SIZE; i++) {
+		size_t name_length = strlen(command_table[i].name);
+		if (length < name_length)
+			continue;
+		if (strncmp(input, command_table[i].name, name_length) != 0)
+			continue;
+
+		/* After the command name there must be end-of-input,
+		 * a space (args follow), or exact length match. */
+		if (length == name_length) {
+			command_table[i].handler("");
+			return 1;
+		}
+		if (input[name_length] == ' ') {
+			const char *args = input + name_length + 1;
+			while (*args == ' ')
+				args++;
+			command_table[i].handler(args);
+			return 1;
+		}
+	}
+	return 0;
+}
+
+/* Returns the next tab-completion match for the given partial input.
+ * Cycles through matches on repeated calls using cycle_index.
+ * Returns NULL if no command name matches the partial input. */
+const char *command_complete(const char *partial, int cycle_index)
+{
+	size_t partial_length = strlen(partial);
+	if (partial_length == 0)
+		return NULL;
+
+	/* Collect all matching command names. */
+	const char *matches[COMMAND_TABLE_SIZE];
+	int match_count = 0;
+
+	for (int i = 0; i < COMMAND_TABLE_SIZE; i++) {
+		if (strncmp(command_table[i].name, partial,
+			    partial_length) == 0) {
+			matches[match_count++] = command_table[i].name;
+		}
+	}
+
+	if (match_count == 0)
+		return NULL;
+
+	int index = cycle_index % match_count;
+	if (index < 0)
+		index += match_count;
+
+	return matches[index];
+}
+
+/* Called when the user presses Enter in the command prompt. Tries to
+ * dispatch the input as a command; falls through to search on failure. */
+void command_prompt_accept(char *input)
+{
+	if (command_dispatch(input)) {
+		free(input);
+		return;
+	}
+
+	/* No command matched -- fall through to incremental search.
+	 * Start a fresh search and pre-fill the buffer with the input. */
+	char *saved_input = strdup(input);
+	free(input);
+	editor_find_start();
+	if (saved_input) {
+		prompt_set_buffer(saved_input);
+		/* Trigger the find callback to execute the search. */
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(
+				editor.prompt.buffer, '\r');
+		free(saved_input);
+	}
+}
+
+/* Called when the user presses ESC in the command prompt. */
+void command_prompt_cancel(void)
+{
+	editor_set_status_message("");
+}
+
+/* Tracks the current tab completion cycling state for the command prompt. */
+int command_completion_index = -1;
+
+/* Per-key callback for the command prompt. Handles Tab for command name
+ * completion and resets completion cycling on other keys. */
+void command_prompt_per_key(char *buffer, int key)
+{
+	if (key == '\t') {
+		const char *match = command_complete(
+			buffer, command_completion_index + 1);
+		if (match) {
+			command_completion_index++;
+			prompt_set_buffer(match);
+			editor_set_status_message("> %s", match);
+		}
+		return;
+	}
+	if (key == ESC_KEY || key == '\r')
+		return;
+
+	/* Reset completion on any non-Tab key. */
+	command_completion_index = -1;
+	editor_set_status_message("> %s", buffer);
+}
+
+/* Opens the command prompt. Uses the existing prompt infrastructure
+ * with a "> " format to indicate command mode. */
 void command_prompt_open(void)
 {
-	editor_set_status_message("Command system coming soon (Phase 1)");
+	command_completion_index = -1;
+	prompt_open("> %s", command_prompt_per_key,
+		    command_prompt_accept, command_prompt_cancel);
 }
+
 
 /* Initializes all editor state to default values: cursor at origin, no file
  * loaded, light theme active. Queries the terminal size and reserves two
