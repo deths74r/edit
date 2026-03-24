@@ -147,6 +147,9 @@ struct line {
 	int syntax_stale;
 	/* Git-style gutter marker: none, added, or modified since last save. */
 	int gutter_marker;
+	/* Cached total display width of the line, or -1 when invalidated.
+	 * Avoids recomputing line_render_width() multiple times per frame. */
+	int cached_render_width;
 };
 
 /* Bit flags stored in struct cell.flags for rendering state. */
@@ -305,6 +308,14 @@ enum editor_mode {
 
 /* Carriage return + line feed sequence for terminal line endings. */
 #define CRLF "\r\n"
+
+/* Number of bytes to scan at the start of a file for NUL bytes when
+ * detecting binary content. */
+#define BINARY_DETECTION_SCAN_SIZE 8192
+
+/* Maximum number of lines to cool per frame during the gradual
+ * cooling scan of distant off-screen lines. */
+#define COOL_SCAN_LINES_PER_FRAME 100
 
 /*** Data ***/
 
@@ -575,6 +586,16 @@ struct editor_state {
 	/* Column position for the vertical ruler line (0 = disabled).
 	 * Configurable via config file or --ruler=N command line flag. */
 	int ruler_column;
+	/* Set when the opened file contains NUL bytes in its first 8 KB,
+	 * indicating it may be binary data. Used to show a one-time warning. */
+	int binary_file_warning;
+	/* Previous frame's row_offset, used to detect scroll direction for
+	 * predictive line warming (prefetching lines ahead of the viewport). */
+	int prev_row_offset_for_prefetch;
+	/* Current position in the file for the gradual line cooling scan.
+	 * Cycles through all lines over multiple frames to avoid O(N) work
+	 * per frame. */
+	int cool_scan_position;
 };
 
 /* Global editor state. */
@@ -603,6 +624,8 @@ void editor_update_gutter_width(void);
 void line_free(struct line *line);
 void line_init(struct line *line, int index);
 void terminal_die(const char *message);
+void editor_cool_distant_lines(void);
+void editor_prefetch_lines(void);
 
 /*** Filetypes ***/
 
@@ -1499,6 +1522,7 @@ void line_init(struct line *line, int index)
 	line->temperature = LINE_HOT;
 	line->syntax_stale = 1;
 	line->gutter_marker = GUTTER_NONE;
+	line->cached_render_width = -1;
 }
 /* Frees the cell array and zeroes all fields. */
 void line_free(struct line *line)
@@ -1510,6 +1534,7 @@ void line_free(struct line *line)
 	line->cell_capacity = 0;
 	line->temperature = LINE_COLD;
 	line->syntax_stale = 1;
+	line->cached_render_width = -1;
 }
 void line_ensure_warm(struct line *line);
 /* Ensures the cell array has room for at least 'needed' cells.
@@ -1569,6 +1594,7 @@ void line_ensure_warm(struct line *line)
 		line->cell_capacity = LINE_INITIAL_CAPACITY;
 		line->cell_count = 0;
 		line->temperature = LINE_WARM;
+		line->cached_render_width = -1;
 		line_populate_from_bytes(line, editor.mmap_base + line->mmap_offset,
 					line->mmap_length);
 	}
@@ -1619,6 +1645,7 @@ void line_insert_cell(struct line *line, uint32_t pos, struct cell c)
 {
 	line_ensure_warm(line);
 	line->temperature = LINE_HOT;
+	line->cached_render_width = -1;
 	if (line->gutter_marker == GUTTER_NONE)
 		line->gutter_marker = GUTTER_MODIFIED;
 	if (pos > line->cell_count)
@@ -1635,6 +1662,7 @@ void line_delete_cell(struct line *line, uint32_t pos)
 {
 	line_ensure_warm(line);
 	line->temperature = LINE_HOT;
+	line->cached_render_width = -1;
 	if (line->gutter_marker == GUTTER_NONE)
 		line->gutter_marker = GUTTER_MODIFIED;
 	if (pos >= line->cell_count)
@@ -1649,6 +1677,7 @@ void line_append_cells(struct line *dest, struct line *src, uint32_t from)
 	line_ensure_warm(dest);
 	line_ensure_warm(src);
 	dest->temperature = LINE_HOT;
+	dest->cached_render_width = -1;
 	if (from >= src->cell_count)
 		return;
 	uint32_t count = src->cell_count - from;
@@ -1821,11 +1850,17 @@ int line_render_column_to_cell(struct line *line, int render_col)
 	return (int)line->cell_count;
 }
 
-/* Returns the total display width of a line (tab and width aware). */
+/* Returns the total display width of a line (tab and width aware).
+ * Uses a cached value when available to avoid redundant traversals
+ * of the cell array, which matters for very long lines. */
 int line_render_width(struct line *line)
 {
+	if (line->cached_render_width >= 0)
+		return line->cached_render_width;
 	line_ensure_warm(line);
-	return line_cell_to_render_column(line, (int)line->cell_count);
+	int width = line_cell_to_render_column(line, (int)line->cell_count);
+	line->cached_render_width = width;
+	return width;
 }
 /* Recalculates syntax highlighting for a line. Walks through each cell
  * and assigns a syntax type based on the active syntax rules.
@@ -2295,6 +2330,7 @@ void undo_entry_apply_reverse(struct undo_entry *entry)
 			line_ensure_warm(lower);
 			upper->cell_count = (uint32_t)entry->cell_index;
 			upper->temperature = LINE_HOT;
+			upper->cached_render_width = -1;
 			line_append_cells(upper, lower, 0);
 			editor_line_delete(entry->line_index + 1);
 		}
@@ -2314,10 +2350,12 @@ void undo_entry_apply_reverse(struct undo_entry *entry)
 				memcpy(new_line->cells, &ln->cells[tail_start],
 				       sizeof(struct cell) * tail_count);
 				new_line->cell_count = tail_count;
+				new_line->cached_render_width = -1;
 			}
 			ln = &editor.lines[entry->line_index];
 			ln->cell_count = tail_start;
 			ln->temperature = LINE_HOT;
+			ln->cached_render_width = -1;
 		}
 		break;
 	case UNDO_INSERT_LINE:
@@ -2333,6 +2371,7 @@ void undo_entry_apply_reverse(struct undo_entry *entry)
 			       sizeof(struct cell) * entry->saved_cell_count);
 			ln->cell_count = entry->saved_cell_count;
 			ln->temperature = LINE_HOT;
+			ln->cached_render_width = -1;
 		}
 		break;
 	}
@@ -2372,10 +2411,12 @@ void undo_entry_apply_forward(struct undo_entry *entry)
 				memcpy(new_line->cells, &ln->cells[split],
 				       sizeof(struct cell) * tail_count);
 				new_line->cell_count = tail_count;
+				new_line->cached_render_width = -1;
 			}
 			ln = &editor.lines[entry->line_index];
 			ln->cell_count = split;
 			ln->temperature = LINE_HOT;
+			ln->cached_render_width = -1;
 		}
 		break;
 	case UNDO_JOIN_LINE:
@@ -2398,6 +2439,7 @@ void undo_entry_apply_forward(struct undo_entry *entry)
 			       sizeof(struct cell) * entry->saved_cell_count);
 			ln->cell_count = entry->saved_cell_count;
 			ln->temperature = LINE_HOT;
+			ln->cached_render_width = -1;
 		}
 		break;
 	case UNDO_DELETE_LINE:
@@ -2639,6 +2681,7 @@ void selection_delete(void)
 		line_ensure_warm(first);
 		first->cell_count = (uint32_t)start_x;
 		first->temperature = LINE_HOT;
+		first->cached_render_width = -1;
 
 		/* Append remaining cells from last line */
 		struct line *last = &editor.lines[end_y];
@@ -2995,6 +3038,7 @@ void editor_insert_newline(void)
 		/* Truncate the current line at the cursor position */
 		ln = &editor.lines[editor.cursor_y];
 		ln->cell_count = (uint32_t)editor.cursor_x;
+		ln->cached_render_width = -1;
 		syntax_propagate(editor.cursor_y);
 		editor.dirty++;
 	}
@@ -3150,6 +3194,13 @@ int editor_open_mmap(char *filename)
 	editor.mmap_size = (size_t)file_size;
 	fd = -1;
 
+	/* Scan the first few KB for NUL bytes to detect binary files. */
+	size_t scan_limit = (size_t)file_size;
+	if (scan_limit > BINARY_DETECTION_SCAN_SIZE)
+		scan_limit = BINARY_DETECTION_SCAN_SIZE;
+	if (memchr(base, '\0', scan_limit) != NULL)
+		editor.binary_file_warning = 1;
+
 	/* Hint the kernel to read ahead sequentially during the line scan. */
 	madvise(base, (size_t)file_size, MADV_SEQUENTIAL);
 
@@ -3176,6 +3227,7 @@ int editor_open_mmap(char *filename)
 		ln->temperature = LINE_COLD;
 		ln->syntax_stale = 1;
 		ln->gutter_marker = GUTTER_NONE;
+		ln->cached_render_width = -1;
 		editor.line_count++;
 
 		pos = newline + 1;
@@ -3200,6 +3252,7 @@ int editor_open_mmap(char *filename)
 		ln->temperature = LINE_COLD;
 		ln->syntax_stale = 1;
 		ln->gutter_marker = GUTTER_NONE;
+		ln->cached_render_width = -1;
 		editor.line_count++;
 	}
 
@@ -3251,32 +3304,43 @@ int editor_open(char *filename)
 
 	syntax_select_highlight();
 
+	if (editor.binary_file_warning)
+		editor_set_status_message("Warning: file appears to contain binary data");
+
 	editor.dirty = 0;
 	return 0;
 }
 
+/* Writes a buffer to a file descriptor, retrying on short writes and
+ * EINTR. Returns 0 on success, negative errno on failure. */
+static int write_full(int fd, const char *data, size_t length)
+{
+	size_t written = 0;
+	while (written < length) {
+		ssize_t result = write(fd, data + written, length - written);
+		if (result == -1) {
+			if (errno == EINTR)
+				continue;
+			return -errno;
+		}
+		written += (size_t)result;
+	}
+	return 0;
+}
+
 /* Writes the current file content to disk using an atomic write-to-temp
- * + rename pattern. This ensures the original file is never corrupted
- * if a write fails partway through (disk full, I/O error, etc).
+ * + rename pattern. Streams each line directly to the file descriptor
+ * instead of building a monolithic buffer, so peak memory is O(max_line)
+ * instead of O(file_size). COLD lines are written straight from the mmap
+ * region; WARM/HOT lines are converted to bytes one at a time.
  * Returns 0 on success, negative errno on failure. */
 int editor_save_write(void)
 {
 	int ret = 0;
 	int fd = -1;
 	char *tmp_path = NULL;
-	size_t file_length;
-	char *file_content = editor_rows_to_string(&file_length);
-
-	/* Release mmap before writing — all lines are now warm. */
-	if (editor.mmap_base) {
-		munmap(editor.mmap_base, editor.mmap_size);
-		editor.mmap_base = NULL;
-		editor.mmap_size = 0;
-	}
-	if (editor.file_descriptor != -1) {
-		close(editor.file_descriptor);
-		editor.file_descriptor = -1;
-	}
+	size_t total_bytes = 0;
+	char newline = '\n';
 
 	/* Build temporary file path in the same directory as the target
 	 * so rename() is atomic (same filesystem). */
@@ -3302,18 +3366,32 @@ int editor_save_write(void)
 		fchmod(fd, FILE_PERMISSION_DEFAULT);
 	}
 
-	/* Write all content, retrying on short writes. */
-	size_t bytes_written = 0;
-	while (bytes_written < file_length) {
-		ssize_t result = write(fd, file_content + bytes_written,
-				       file_length - bytes_written);
-		if (result == -1) {
-			if (errno == EINTR)
-				continue;
-			ret = -errno;
-			goto out;
+	/* Stream each line to the file descriptor. COLD lines are written
+	 * directly from mmap; WARM/HOT lines are serialized one at a time
+	 * to keep peak memory usage proportional to the longest line. */
+	for (int j = 0; j < editor.line_count; j++) {
+		struct line *line = &editor.lines[j];
+
+		if (line->temperature == LINE_COLD && editor.mmap_base) {
+			ret = write_full(fd, editor.mmap_base + line->mmap_offset,
+					 line->mmap_length);
+			if (ret < 0)
+				goto out;
+			total_bytes += line->mmap_length;
+		} else {
+			size_t byte_length;
+			char *bytes = line_to_bytes(line, &byte_length);
+			ret = write_full(fd, bytes, byte_length);
+			free(bytes);
+			if (ret < 0)
+				goto out;
+			total_bytes += byte_length;
 		}
-		bytes_written += (size_t)result;
+
+		ret = write_full(fd, &newline, 1);
+		if (ret < 0)
+			goto out;
+		total_bytes++;
 	}
 
 	/* Flush to stable storage before rename */
@@ -3323,6 +3401,18 @@ int editor_save_write(void)
 	}
 	close(fd);
 	fd = -1;
+
+	/* Release mmap after writing — COLD lines may have been read from
+	 * it during the streaming write above. */
+	if (editor.mmap_base) {
+		munmap(editor.mmap_base, editor.mmap_size);
+		editor.mmap_base = NULL;
+		editor.mmap_size = 0;
+	}
+	if (editor.file_descriptor != -1) {
+		close(editor.file_descriptor);
+		editor.file_descriptor = -1;
+	}
 
 	/* Atomic rename over the original file */
 	if (rename(tmp_path, editor.filename) == -1) {
@@ -3339,7 +3429,7 @@ int editor_save_write(void)
 	for (int i = 0; i < editor.line_count; i++)
 		editor.lines[i].gutter_marker = GUTTER_NONE;
 
-	editor_set_status_message("%zu bytes written to disk", file_length);
+	editor_set_status_message("%zu bytes written to disk", total_bytes);
 
 out:
 	if (fd != -1)
@@ -3347,7 +3437,6 @@ out:
 	if (tmp_path != NULL)
 		unlink(tmp_path);
 	free(tmp_path);
-	free(file_content);
 	if (ret < 0) {
 		const char *error_msg;
 		switch (-ret) {
@@ -5890,6 +5979,117 @@ void editor_refresh_screen(void)
 	editor.force_full_redraw = 0;
 }
 
+/* Frees cells for WARM lines that have scrolled far off-screen, returning
+ * them to COLD state. This keeps memory proportional to the viewport
+ * rather than growing with the total file size. Only WARM lines are
+ * cooled -- HOT lines contain user edits that would be lost. Lines
+ * inside an active selection are also skipped. Scans at most
+ * COOL_SCAN_LINES_PER_FRAME lines per call, cycling through the file
+ * gradually to avoid O(line_count) work every frame. */
+void editor_cool_distant_lines(void)
+{
+	if (editor.line_count == 0 || editor.mmap_base == NULL)
+		return;
+
+	int distance_threshold = editor.screen_rows * 3;
+	int viewport_start = editor.row_offset;
+	int viewport_end = editor.row_offset + editor.screen_rows;
+
+	/* Determine the selection range so we can skip those lines. */
+	int selection_start = -1;
+	int selection_end = -1;
+	if (editor.selection.active) {
+		int sel_sy, sel_sx, sel_ey, sel_ex;
+		if (selection_get_range(&sel_sy, &sel_sx, &sel_ey, &sel_ex)) {
+			selection_start = sel_sy;
+			selection_end = sel_ey;
+		}
+	}
+
+	int scan_start = editor.cool_scan_position;
+	if (scan_start >= editor.line_count)
+		scan_start = 0;
+
+	int scanned = 0;
+	int position = scan_start;
+	while (scanned < COOL_SCAN_LINES_PER_FRAME && scanned < editor.line_count) {
+		struct line *ln = &editor.lines[position];
+
+		/* Only cool WARM lines that are far from the viewport. */
+		if (ln->temperature == LINE_WARM) {
+			int distance_from_viewport;
+			if (position < viewport_start)
+				distance_from_viewport = viewport_start - position;
+			else if (position >= viewport_end)
+				distance_from_viewport = position - viewport_end;
+			else
+				distance_from_viewport = 0;
+
+			int in_selection = (selection_start >= 0
+					    && position >= selection_start
+					    && position <= selection_end);
+
+			if (distance_from_viewport > distance_threshold && !in_selection) {
+				free(ln->cells);
+				ln->cells = NULL;
+				ln->cell_count = 0;
+				ln->cell_capacity = 0;
+				ln->temperature = LINE_COLD;
+				ln->cached_render_width = -1;
+			}
+		}
+
+		position++;
+		if (position >= editor.line_count)
+			position = 0;
+		scanned++;
+	}
+
+	editor.cool_scan_position = position;
+}
+
+/* Pre-warms lines just beyond the viewport in the scroll direction so
+ * they are ready to render when they come into view. Compares the
+ * current row_offset against the previous frame's value to determine
+ * scroll direction, then warms up to half a screen of lines ahead.
+ * Only warms COLD lines; WARM and HOT lines already have cells. */
+void editor_prefetch_lines(void)
+{
+	if (editor.line_count == 0)
+		return;
+
+	int direction = editor.row_offset - editor.prev_row_offset_for_prefetch;
+	editor.prev_row_offset_for_prefetch = editor.row_offset;
+
+	if (direction == 0)
+		return;
+
+	int prefetch_count = editor.screen_rows / 2;
+	if (prefetch_count < 1)
+		prefetch_count = 1;
+
+	int start, end;
+	if (direction > 0) {
+		/* Scrolling down: warm lines beyond the bottom of the viewport */
+		start = editor.row_offset + editor.screen_rows;
+		end = start + prefetch_count;
+	} else {
+		/* Scrolling up: warm lines above the top of the viewport */
+		end = editor.row_offset;
+		start = end - prefetch_count;
+	}
+
+	if (start < 0)
+		start = 0;
+	if (end > editor.line_count)
+		end = editor.line_count;
+
+	for (int i = start; i < end; i++) {
+		if (editor.lines[i].temperature == LINE_COLD)
+			line_ensure_warm(&editor.lines[i]);
+	}
+}
+
 /* Sets the status bar message using printf-style formatting. Records the
  * current time so the message can be auto-cleared after a timeout. */
 void editor_set_status_message(const char *format, ...)
@@ -7026,6 +7226,9 @@ void editor_init(void)
 	editor.force_full_redraw = 1;
 	editor.bracket_match_line = -1;
 	editor.bracket_match_cell = -1;
+	editor.binary_file_warning = 0;
+	editor.prev_row_offset_for_prefetch = 0;
+	editor.cool_scan_position = 0;
 }
 
 /* Reads all data from stdin into a malloc'd buffer. Used when stdin is
@@ -7161,6 +7364,12 @@ int main(int argc, char *argv[])
 			terminal_process_resize();
 
 		editor_refresh_screen();
+
+		/* After rendering, do background maintenance: cool distant
+		 * lines to reclaim memory, and prefetch lines in the scroll
+		 * direction so they are warm before coming into view. */
+		editor_cool_distant_lines();
+		editor_prefetch_lines();
 
 		struct pollfd stdin_poll = {STDIN_FILENO, POLLIN, 0};
 		if (poll(&stdin_poll, 1, -1) == -1) {
