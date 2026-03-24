@@ -133,10 +133,10 @@
 
 *Theme: Defend your work.*
 
-- [ ] **Swap file / periodic autosave** — `.edit.swp` with recovery on startup
-- [ ] **File change detection** — `stat()` check at save time for external modifications
-- [ ] **Remember cursor position** per file across sessions
-- [ ] **Man page** (`edit.1`) — prerequisite for distro packaging
+- [x] **Swap file / periodic autosave** — .edit.swp every 30s, PID-aware recovery on open
+- [x] **File change detection** — stat() mtime/dev/ino check at save time, overwrite prompt
+- [x] **Remember cursor position** — ~/.local/share/edit/cursor_history, 200-entry LRU
+- [x] **Man page** — edit.1 with all sections, ready for packaging
 
 ---
 
