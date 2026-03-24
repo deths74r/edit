@@ -8534,14 +8534,23 @@ void command_prompt_cancel(void)
 
 /* Tracks the current tab completion cycling state for the command prompt. */
 int command_completion_index = -1;
+/* The original text the user typed before Tab was pressed. Completion
+ * always matches against this, not the completed buffer. */
+char command_completion_prefix[COMMAND_INPUT_MAX];
 
 /* Per-key callback for the command prompt. Handles Tab for command name
  * completion and resets completion cycling on other keys. */
 void command_prompt_per_key(char *buffer, int key)
 {
 	if (key == '\t') {
+		/* Save the original prefix on the first Tab press. */
+		if (command_completion_index == -1)
+			snprintf(command_completion_prefix,
+				 sizeof(command_completion_prefix),
+				 "%s", buffer);
 		const char *match = command_complete(
-			buffer, command_completion_index + 1);
+			command_completion_prefix,
+			command_completion_index + 1);
 		if (match) {
 			command_completion_index++;
 			prompt_set_buffer(match);
