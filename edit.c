@@ -6246,8 +6246,14 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			int is_continuation = (editor.word_wrap && wrap_cell_offset > 0);
 			if (editor.line_number_width > 0) {
 				if (is_continuation) {
-					for (int pad = 0; pad < editor.line_number_width; pad++)
+					/* Show '..' right-aligned in the gutter
+					 * to indicate a wrapped continuation. */
+					append_buffer_write_color(append_buffer,
+						editor.theme.line_number);
+					int pad = editor.line_number_width - 2;
+					for (int p = 0; p < pad; p++)
 						append_buffer_write(append_buffer, " ", 1);
+					append_buffer_write(append_buffer, "..", 2);
 				} else {
 					append_buffer_write_color(
 							append_buffer,
@@ -6666,7 +6672,7 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			char move_buf[CURSOR_BUFFER_SIZE];
 			snprintf(move_buf, sizeof(move_buf),
 				 "\x1b[%d;%dH", screen_row + 1,
-				 editor.screen_columns - 1);
+				 editor.screen_columns);
 			append_buffer_write(append_buffer, move_buf,
 					    strlen(move_buf));
 			append_buffer_write_color(append_buffer,
