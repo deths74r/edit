@@ -341,6 +341,8 @@ struct editor_theme {
 	char *number;
 	/* Color for search match highlighting. */
 	char *match;
+	/* Background color for search match highlighting. */
+	char *match_background;
 };
 
 /* Syntax highlighting rules for a specific file type. Contains patterns
@@ -456,6 +458,8 @@ struct editor_state {
 	int show_line_numbers;
 	/* Number of columns reserved for the line number gutter (digits + space). */
 	int line_number_width;
+	/* When set, long lines wrap at the screen edge instead of scrolling. */
+	int word_wrap;
 	/* Buffered input from stdin. */
 	struct input_buffer input;
 	/* File descriptor for mmap, or -1 if not using mmap. */
@@ -562,6 +566,15 @@ struct editor_state {
 	int bracket_match_line;
 	/* Cell index of the matching bracket, or -1 when no match. */
 	int bracket_match_cell;
+	/* Tab display width in columns (default EDIT_TAB_STOP). Configurable
+	 * via config file or --tabstop=N command line flag. */
+	int tab_stop;
+	/* Whether the terminal supports 24-bit true color. Detected at
+	 * startup from COLORTERM and TERM environment variables. */
+	int true_color;
+	/* Column position for the vertical ruler line (0 = disabled).
+	 * Configurable via config file or --ruler=N command line flag. */
+	int ruler_column;
 };
 
 /* Global editor state. */
@@ -772,6 +785,12 @@ void editor_replace_start(void);
 /* Reads all data from stdin when piped, returning a malloc'd buffer.
  * Stores the total bytes read in *out_length. */
 char *editor_read_stdin_pipe(size_t *out_length);
+/* Saves the current theme name to the config file for persistence. */
+void config_save_theme(const char *theme_name);
+/* Reads the config file and applies settings to editor state. */
+void config_load(void);
+/* Detects whether the terminal supports 24-bit true color. */
+void terminal_detect_true_color(void);
 
 /*** Editor Theme ***/
 
@@ -783,41 +802,56 @@ struct editor_theme editor_themes[] = {
 	 .line_number = "404048", .status_bar = "101014", .status_bar_text = "00FFFF",
 	 .message_bar = "FF00FF", .highlight_background = "151518",
 	 .highlight_foreground = "FFFFFF", .comment = "505060", .keyword1 = "FF00FF",
-	 .keyword2 = "00FFFF", .string = "00FF80", .number = "FFFF00", .match = "FF0080"},
+	 .keyword2 = "00FFFF", .string = "00FF80", .number = "FFFF00", .match = "FF0080",
+	 .match_background = "3D0020"},
 
 	/* Nightwatch - Monochrome dark */
 	{.name = "Nightwatch", .background = "0A0A0A", .foreground = "D0D0D0",
 	 .line_number = "505050", .status_bar = "1A1A1A", .status_bar_text = "A0A0A0",
 	 .message_bar = "808080", .highlight_background = "1A1A1A",
 	 .highlight_foreground = "E0E0E0", .comment = "606060", .keyword1 = "FFFFFF",
-	 .keyword2 = "B0B0B0", .string = "909090", .number = "C0C0C0", .match = "404040"},
+	 .keyword2 = "B0B0B0", .string = "909090", .number = "C0C0C0", .match = "404040",
+	 .match_background = "303030"},
 
 	/* Daywatch - Monochrome light */
 	{.name = "Daywatch", .background = "F5F5F5", .foreground = "303030",
 	 .line_number = "A0A0A0", .status_bar = "E5E5E5", .status_bar_text = "505050",
 	 .message_bar = "707070", .highlight_background = "E0E0E0",
 	 .highlight_foreground = "202020", .comment = "808080", .keyword1 = "000000",
-	 .keyword2 = "404040", .string = "505050", .number = "303030", .match = "C0C0C0"},
+	 .keyword2 = "404040", .string = "505050", .number = "303030", .match = "C0C0C0",
+	 .match_background = "D0D0B0"},
 
 	/* Tokyo Night */
 	{.name = "Tokyo Night", .background = "1A1B26", .foreground = "C0CAF5",
 	 .line_number = "3B4261", .status_bar = "16161E", .status_bar_text = "7AA2F7",
 	 .message_bar = "BB9AF7", .highlight_background = "292E42",
 	 .highlight_foreground = "C0CAF5", .comment = "565F89", .keyword1 = "BB9AF7",
-	 .keyword2 = "7DCFFF", .string = "9ECE6A", .number = "FF9E64", .match = "E0AF68"},
+	 .keyword2 = "7DCFFF", .string = "9ECE6A", .number = "FF9E64", .match = "E0AF68",
+	 .match_background = "3A2810"},
 
 	/* Akira - Neo-Tokyo red/cyan */
 	{.name = "Akira", .background = "0C0608", .foreground = "F0E4E8",
 	 .line_number = "584048", .status_bar = "1C1018", .status_bar_text = "E0CCD4",
 	 .message_bar = "D4C0C8", .highlight_background = "1C1014",
 	 .highlight_foreground = "F0E4E8", .comment = "685060", .keyword1 = "FF3050",
-	 .keyword2 = "40D0E8", .string = "F88080", .number = "E06878", .match = "103840"},
+	 .keyword2 = "40D0E8", .string = "F88080", .number = "E06878", .match = "103840",
+	 .match_background = "002028"},
 	/* Tokyo Night Cyberpunk - Neon accents on Tokyo Night's deep indigo base */
 	{.name = "Tokyo Cyberpunk", .background = "13141F", .foreground = "D5DEFF",
 	 .line_number = "2E3456", .status_bar = "0E0F18", .status_bar_text = "00FFFF",
 	 .message_bar = "FF44CC", .highlight_background = "1E2036",
 	 .highlight_foreground = "FFFFFF", .comment = "4A5380", .keyword1 = "FF44CC",
-	 .keyword2 = "00FFFF", .string = "7AFF8E", .number = "FFB86C", .match = "E0AF68"},
+	 .keyword2 = "00FFFF", .string = "7AFF8E", .number = "FFB86C", .match = "E0AF68",
+	 .match_background = "3A2810"},
+
+	/* Clarity - Colorblind-accessible blue/orange/yellow palette that works
+	 * across all color vision deficiencies (protanopia, deuteranopia, tritanopia). */
+	{.name = "Clarity", .background = "1B1D2A", .foreground = "D4D7E4",
+	 .line_number = "4A4D5E", .status_bar = "12131D", .status_bar_text = "5DA8E6",
+	 .message_bar = "E89B4D", .highlight_background = "252838",
+	 .highlight_foreground = "FFFFFF", .comment = "6B7089", .keyword1 = "5DA8E6",
+	 .keyword2 = "E89B4D", .string = "E8C94D", .number = "7AB8E8", .match = "D48E2A",
+	 .match_background = "2A1A08"},
 };
 
 /* Index of the currently active theme in editor_themes[]. */
@@ -829,13 +863,15 @@ void editor_set_theme(int index)
 	editor.theme = editor_themes[index];
 }
 
-/* Cycles to the next theme in editor_themes[] and displays its name. */
+/* Cycles to the next theme in editor_themes[] and displays its name.
+ * Persists the choice to the config file so it survives restarts. */
 void editor_switch_theme(void)
 {
 	editor.force_full_redraw = 1;
 	current_theme_index = (current_theme_index + 1) %
 		(int)(sizeof(editor_themes) / sizeof(editor_themes[0]));
 	editor_set_theme(current_theme_index);
+	config_save_theme(editor.theme.name);
 	editor_set_status_message("Theme: %s", editor.theme.name);
 }
 /* Toggles line number gutter visibility and updates the gutter width. */
@@ -846,6 +882,18 @@ void editor_toggle_line_numbers(void)
 	editor_update_gutter_width();
 	editor_set_status_message(
 			"Line numbers: %s", editor.show_line_numbers ? "on" : "off");
+}
+
+/* Toggles soft word wrap. When enabled, long lines wrap at the screen
+ * edge instead of scrolling horizontally. */
+void editor_toggle_word_wrap(void)
+{
+	editor.force_full_redraw = 1;
+	editor.word_wrap = !editor.word_wrap;
+	if (editor.word_wrap)
+		editor.column_offset = 0;
+	editor_set_status_message(
+			"Word wrap: %s", editor.word_wrap ? "on" : "off");
 }
 
 /*** Terminal ***/
@@ -1610,12 +1658,13 @@ void line_append_cells(struct line *dest, struct line *src, uint32_t from)
 	dest->cell_count += count;
 }
 /* Returns the display width of a single cell at the given column position.
- * Tabs expand to the next tab stop; wide/CJK characters take 2 columns;
- * control and zero-width characters take 1 column (rendered as symbols). */
+ * Tabs expand to the next tab stop using the configurable editor.tab_stop
+ * width; wide/CJK characters take 2 columns; control and zero-width
+ * characters take 1 column (rendered as symbols). */
 int cell_display_width(struct cell *c, int current_column)
 {
 	if (c->codepoint == '\t')
-		return EDIT_TAB_STOP - (current_column % EDIT_TAB_STOP);
+		return editor.tab_stop - (current_column % editor.tab_stop);
 	int w = utf8_cpwidth(c->codepoint);
 	return (w < 1) ? 1 : w;
 }
@@ -3510,6 +3559,7 @@ static const char *help_text =
 	"DISPLAY\n"
 	"  Alt+T                Cycle color theme\n"
 	"  Alt+N                Toggle line numbers\n"
+	"  Alt+W                Toggle word wrap\n"
 	"  F1 / Alt+?           This help screen\n"
 	"\n"
 	"Press ESC or Alt+Q to return to your file.\n";
@@ -4885,12 +4935,34 @@ void editor_scroll(void)
 	if (editor.cursor_y >= editor.row_offset + editor.screen_rows - margin) {
 		editor.row_offset = editor.cursor_y - editor.screen_rows + margin + 1;
 	}
-	if (editor.render_x < editor.column_offset) {
-		editor.column_offset = editor.render_x;
-	}
 	int text_columns = editor.screen_columns - editor.line_number_width;
-	if (editor.render_x >= editor.column_offset + text_columns) {
-		editor.column_offset = editor.render_x - text_columns + 1;
+
+	if (editor.word_wrap) {
+		/* With word wrap, horizontal scrolling is disabled. Instead,
+		 * ensure the cursor line is visible by counting how many
+		 * visual rows the lines between row_offset and cursor_y
+		 * occupy. If they exceed the screen, bump row_offset. */
+		editor.column_offset = 0;
+		while (editor.row_offset < editor.cursor_y) {
+			int visual_rows = 0;
+			for (int i = editor.row_offset; i <= editor.cursor_y && i < editor.line_count; i++) {
+				int width = line_render_width(&editor.lines[i]);
+				int rows = (text_columns > 0 && width > text_columns)
+					   ? (width + text_columns - 1) / text_columns
+					   : 1;
+				visual_rows += rows;
+			}
+			if (visual_rows <= editor.screen_rows)
+				break;
+			editor.row_offset++;
+		}
+	} else {
+		if (editor.render_x < editor.column_offset) {
+			editor.column_offset = editor.render_x;
+		}
+		if (editor.render_x >= editor.column_offset + text_columns) {
+			editor.column_offset = editor.render_x - text_columns + 1;
+		}
 	}
 }
 
@@ -5101,9 +5173,15 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 	 * have balanced brackets per function. */
 	int bracket_depth = editor.bracket_depth_at_viewport;
 
+	/* When word wrap is on, a logical line may span multiple screen
+	 * rows. Track the current file line and cell offset separately
+	 * so continuation rows resume where the previous row stopped. */
+	int file_row_index = editor.row_offset;
+	int wrap_cell_offset = 0;
+
 	int screen_row;
 	for (screen_row = 0; screen_row < editor.screen_rows; screen_row++) {
-		int file_row = screen_row + editor.row_offset;
+		int file_row = file_row_index;
 
 		/* Set background color for the entire line */
 		append_buffer_write_background(
@@ -5124,26 +5202,33 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 						editor.theme
 								.highlight_background);
 			}
-			/* Line numbers and git gutter marker */
+			/* Line numbers and git gutter marker.
+			 * Continuation rows from word wrap get a blank gutter. */
+			int is_continuation = (editor.word_wrap && wrap_cell_offset > 0);
 			if (editor.line_number_width > 0) {
-				append_buffer_write_color(
-						append_buffer,
-						editor.theme.line_number);
-				char line_number_string[LINE_NUMBER_BUFFER_SIZE];
-				snprintf(line_number_string, sizeof(line_number_string),
-							 "%*d", editor.line_number_width - 1, file_row + 1);
-				append_buffer_write(append_buffer, line_number_string, strlen(line_number_string));
-
-				/* Render gutter marker in place of the separator space. */
-				int marker = editor.lines[file_row].gutter_marker;
-				if (marker == GUTTER_ADDED) {
-					append_buffer_write_color(append_buffer, editor.theme.keyword2);
-					append_buffer_write(append_buffer, "+", 1);
-				} else if (marker == GUTTER_MODIFIED) {
-					append_buffer_write_color(append_buffer, editor.theme.number);
-					append_buffer_write(append_buffer, "~", 1);
+				if (is_continuation) {
+					for (int pad = 0; pad < editor.line_number_width; pad++)
+						append_buffer_write(append_buffer, " ", 1);
 				} else {
-					append_buffer_write(append_buffer, " ", 1);
+					append_buffer_write_color(
+							append_buffer,
+							editor.theme.line_number);
+					char line_number_string[LINE_NUMBER_BUFFER_SIZE];
+					snprintf(line_number_string, sizeof(line_number_string),
+								 "%*d", editor.line_number_width - 1, file_row + 1);
+					append_buffer_write(append_buffer, line_number_string, strlen(line_number_string));
+
+					/* Render gutter marker in place of the separator space. */
+					int marker = editor.lines[file_row].gutter_marker;
+					if (marker == GUTTER_ADDED) {
+						append_buffer_write_color(append_buffer, editor.theme.keyword2);
+						append_buffer_write(append_buffer, "+", 1);
+					} else if (marker == GUTTER_MODIFIED) {
+						append_buffer_write_color(append_buffer, editor.theme.number);
+						append_buffer_write(append_buffer, "~", 1);
+					} else {
+						append_buffer_write(append_buffer, " ", 1);
+					}
 				}
 
 				append_buffer_write_color(
@@ -5165,12 +5250,17 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			}
 
 			int render_width = line_render_width(ln);
-			int visible_length = render_width - editor.column_offset;
-			if (visible_length < 0)
-				visible_length = 0;
 			int text_columns = editor.screen_columns - editor.line_number_width;
-			if (visible_length > text_columns)
+			int visible_length;
+			if (editor.word_wrap) {
 				visible_length = text_columns;
+			} else {
+				visible_length = render_width - editor.column_offset;
+				if (visible_length < 0)
+					visible_length = 0;
+				if (visible_length > text_columns)
+					visible_length = text_columns;
+			}
 
 			/* Compute trailing whitespace start index for this line.
 			 * Scan backward from the end to find the first non-whitespace
@@ -5194,18 +5284,22 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			 * A left indicator shows when content is scrolled off-screen
 			 * to the left; a right indicator when content extends past
 			 * the visible area to the right. */
-			int has_left_indicator = (editor.column_offset > 0
+			int has_left_indicator = (!editor.word_wrap
+						  && editor.column_offset > 0
 						  && ln->cell_count > 0);
-			int has_right_indicator = (render_width >
+			int has_right_indicator = (!editor.word_wrap
+						   && render_width >
 						   editor.column_offset + text_columns);
 
 			/* Render cells with tab expansion and UTF-8 encoding.
 			 * Iterates by grapheme cluster to correctly handle
 			 * multi-codepoint sequences (flags, ZWJ emoji, etc). */
 			char *current_color = NULL;
-			int col = 0;
+			uint32_t ci = (uint32_t)wrap_cell_offset;
+			int col = (wrap_cell_offset > 0)
+				   ? line_cell_to_render_column(ln, wrap_cell_offset)
+				   : 0;
 			int output_col = 0;
-			uint32_t ci = 0;
 			while (ci < ln->cell_count && output_col < visible_length) {
 				uint32_t cp = ln->cells[ci].codepoint;
 				uint16_t hl = ln->cells[ci].syntax;
@@ -5246,6 +5340,18 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								append_buffer_write_background(
 									append_buffer,
 									editor.theme.line_number);
+							} else if (editor.ruler_column > 0
+								   && col == editor.ruler_column) {
+								/* Ruler column background tint */
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.line_number);
+							}
+							/* Apply match background for search hits */
+							if (hl == HL_MATCH) {
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.match_background);
 							}
 							if (hl == HL_NORMAL) {
 								if (current_color != NULL) {
@@ -5280,8 +5386,30 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								append_buffer_write(append_buffer, " ", 1);
 							}
 							output_col++;
+							/* Restore background after match highlight */
+							if (hl == HL_MATCH && !in_trailing) {
+								if (file_row == editor.cursor_y)
+									append_buffer_write_background(
+										append_buffer,
+										editor.theme.highlight_background);
+								else
+									append_buffer_write_background(
+										append_buffer,
+										editor.theme.background);
+							}
 							/* Restore normal background after trailing ws */
 							if (in_trailing) {
+								if (file_row == editor.cursor_y)
+									append_buffer_write_background(
+										append_buffer,
+										editor.theme.highlight_background);
+								else
+									append_buffer_write_background(
+										append_buffer,
+										editor.theme.background);
+							} else if (editor.ruler_column > 0
+								   && col == editor.ruler_column) {
+								/* Restore background after ruler tint */
 								if (file_row == editor.cursor_y)
 									append_buffer_write_background(
 										append_buffer,
@@ -5313,6 +5441,22 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 					} else {
 						/* Apply trailing whitespace background tint */
 						if (in_trailing) {
+							append_buffer_write_background(
+								append_buffer,
+								editor.theme.line_number);
+						}
+						/* Apply match background for search hits */
+						if (hl == HL_MATCH && !in_trailing) {
+							append_buffer_write_background(
+								append_buffer,
+								editor.theme.match_background);
+						}
+						/* Ruler column background tint for
+						 * non-trailing, non-match cells. */
+						if (editor.ruler_column > 0
+						    && col == editor.ruler_column
+						    && !in_trailing
+						    && hl != HL_MATCH) {
 							append_buffer_write_background(
 								append_buffer,
 								editor.theme.line_number);
@@ -5382,8 +5526,33 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 									editor.theme.background);
 							current_color = NULL;
 						}
+						/* Restore background after match highlight */
+						if (hl == HL_MATCH && !in_trailing && !selected) {
+							if (file_row == editor.cursor_y)
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.highlight_background);
+							else
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.background);
+						}
 						/* Restore background after trailing whitespace */
 						if (in_trailing && !selected) {
+							if (file_row == editor.cursor_y)
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.highlight_background);
+							else
+								append_buffer_write_background(
+									append_buffer,
+									editor.theme.background);
+						}
+						/* Restore background after ruler tint */
+						if (editor.ruler_column > 0
+						    && col == editor.ruler_column
+						    && !in_trailing && !selected
+						    && hl != HL_MATCH) {
 							if (file_row == editor.cursor_y)
 								append_buffer_write_background(
 									append_buffer,
@@ -5410,6 +5579,45 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 
 			append_buffer_write_color(
 					append_buffer, editor.theme.foreground);
+
+			/* Draw ruler character in empty space past end of text.
+			 * If the ruler column falls within the visible area
+			 * but beyond the rendered content, pad with spaces to
+			 * that position and draw a faint vertical bar. */
+			if (editor.ruler_column > 0) {
+				int ruler_screen_col = editor.ruler_column
+						       - editor.column_offset;
+				if (ruler_screen_col >= output_col
+				    && ruler_screen_col < text_columns) {
+					/* Pad to the ruler position. */
+					int pad = ruler_screen_col - output_col;
+					for (int p = 0; p < pad; p++)
+						append_buffer_write(
+							append_buffer, " ", 1);
+					/* Draw faint vertical bar. */
+					append_buffer_write_color(
+						append_buffer,
+						editor.theme.line_number);
+					/* U+2502 BOX DRAWINGS LIGHT VERTICAL
+					 * encoded as 3 UTF-8 bytes. */
+					append_buffer_write(
+						append_buffer,
+						"\xe2\x94\x82", 3);
+					append_buffer_write_color(
+						append_buffer,
+						editor.theme.foreground);
+				}
+			}
+
+			/* Advance to next line or continue wrapping */
+			if (editor.word_wrap && ci < ln->cell_count) {
+				/* More cells remain -- continue this line
+				 * on the next screen row. */
+				wrap_cell_offset = (int)ci;
+			} else {
+				file_row_index++;
+				wrap_cell_offset = 0;
+			}
 		}
 		append_buffer_write(append_buffer, CLEAR_LINE, strlen(CLEAR_LINE));
 		append_buffer_write(append_buffer, CRLF, strlen(CRLF));
@@ -5539,6 +5747,28 @@ void editor_draw_message_bar(struct append_buffer *append_buffer)
 	}
 }
 
+/* Computes the cursor's screen row when word wrap is active. Counts the
+ * visual rows consumed by lines from row_offset up to (but not including)
+ * cursor_y, plus any wrap rows within the cursor line itself. */
+int editor_cursor_screen_row(void)
+{
+	int text_columns = editor.screen_columns - editor.line_number_width;
+	if (text_columns <= 0)
+		text_columns = 1;
+	int visual_row = 0;
+	for (int i = editor.row_offset; i < editor.cursor_y && i < editor.line_count; i++) {
+		int width = line_render_width(&editor.lines[i]);
+		int rows = (width > text_columns)
+			   ? (width + text_columns - 1) / text_columns
+			   : 1;
+		visual_row += rows;
+	}
+	/* Add the wrap row offset within the cursor line itself */
+	int cursor_render_col = editor.render_x;
+	visual_row += cursor_render_col / text_columns;
+	return visual_row;
+}
+
 /* Redraws the screen. When only the cursor moved since the last frame,
  * emits just a cursor reposition escape (~12 bytes) instead of redrawing
  * every visible line (~20KB). Falls through to a full redraw when content,
@@ -5562,7 +5792,8 @@ void editor_refresh_screen(void)
 		|| editor.dirty != editor.prev_dirty
 		|| editor.selection.active
 		|| strcmp(editor.status_message, editor.prev_status_message) != 0
-		|| message_visible != prev_message_visible;
+		|| message_visible != prev_message_visible
+		|| (editor.word_wrap && editor.render_x != editor.prev_render_x);
 
 	if (!needs_full_redraw) {
 		/* Cursor-only fast path: skip the expensive row drawing but
@@ -5580,10 +5811,20 @@ void editor_refresh_screen(void)
 		editor_draw_message_bar(&output_buffer);
 
 		/* Position the cursor at the correct editing location */
+		int cursor_screen_row, cursor_screen_col;
+		if (editor.word_wrap) {
+			int text_cols = editor.screen_columns - editor.line_number_width;
+			if (text_cols <= 0)
+				text_cols = 1;
+			cursor_screen_row = editor_cursor_screen_row() + 1;
+			cursor_screen_col = (editor.render_x % text_cols) + editor.line_number_width + 1;
+		} else {
+			cursor_screen_row = (editor.cursor_y - editor.row_offset) + 1;
+			cursor_screen_col = (editor.render_x - editor.column_offset) + editor.line_number_width + 1;
+		}
 		char cursor_buffer[CURSOR_BUFFER_SIZE];
 		snprintf(cursor_buffer, sizeof(cursor_buffer), CURSOR_MOVE,
-			 (editor.cursor_y - editor.row_offset) + 1,
-			 (editor.render_x - editor.column_offset) + editor.line_number_width + 1);
+			 cursor_screen_row, cursor_screen_col);
 		append_buffer_write(&output_buffer, cursor_buffer, strlen(cursor_buffer));
 		append_buffer_write(&output_buffer, SHOW_CURSOR, strlen(SHOW_CURSOR));
 
@@ -5607,10 +5848,20 @@ void editor_refresh_screen(void)
 	editor_draw_status_bar(&output_buffer);
 	editor_draw_message_bar(&output_buffer);
 
+	int cursor_screen_row, cursor_screen_col;
+	if (editor.word_wrap) {
+		int text_cols = editor.screen_columns - editor.line_number_width;
+		if (text_cols <= 0)
+			text_cols = 1;
+		cursor_screen_row = editor_cursor_screen_row() + 1;
+		cursor_screen_col = (editor.render_x % text_cols) + editor.line_number_width + 1;
+	} else {
+		cursor_screen_row = (editor.cursor_y - editor.row_offset) + 1;
+		cursor_screen_col = (editor.render_x - editor.column_offset) + editor.line_number_width + 1;
+	}
 	char cursor_buffer[CURSOR_BUFFER_SIZE];
 	snprintf(cursor_buffer, sizeof(cursor_buffer), CURSOR_MOVE,
-					 (editor.cursor_y - editor.row_offset) + 1,
-					 (editor.render_x - editor.column_offset) + editor.line_number_width + 1);
+					 cursor_screen_row, cursor_screen_col);
 	append_buffer_write(&output_buffer, cursor_buffer, strlen(cursor_buffer));
 
 	append_buffer_write(&output_buffer, SHOW_CURSOR, strlen(SHOW_CURSOR));
@@ -5969,7 +6220,7 @@ void editor_process_keypress(struct input_event event)
 		/* Search (read-only browsing) */
 		case ALT_KEY('f'): case CTRL_KEY('f'):
 		/* Display toggles */
-		case ALT_KEY('t'): case ALT_KEY('n'):
+		case ALT_KEY('t'): case ALT_KEY('n'): case ALT_KEY('w'):
 		/* Select to start/end of line */
 		case ALT_KEY('a'): case ALT_KEY('e'):
 		/* Goto line */
@@ -5996,6 +6247,9 @@ void editor_process_keypress(struct input_event event)
 		break;
 	case ALT_KEY('n'):
 		editor_toggle_line_numbers();
+		break;
+	case ALT_KEY('w'):
+		editor_toggle_word_wrap();
 		break;
 
 	case ALT_KEY('g'):
@@ -6333,6 +6587,330 @@ void editor_process_keypress(struct input_event event)
 }
 
 
+
+/*** Configuration ***/
+
+/* Maximum path length for config file paths. */
+#define CONFIG_PATH_MAX 1024
+
+/* Maximum length of a single line in the config file. */
+#define CONFIG_LINE_MAX 256
+
+/* Minimum allowed tab stop value. */
+#define TAB_STOP_MIN 1
+
+/* Maximum allowed tab stop value. */
+#define TAB_STOP_MAX 32
+
+/* Maximum allowed ruler column value. */
+#define RULER_COLUMN_MAX 999
+
+/* Temporary file suffix for atomic config writes. */
+#define CONFIG_TEMP_SUFFIX ".tmp"
+
+/* Builds the config file path into the provided buffer. Checks
+ * $XDG_CONFIG_HOME/edit/config first, then falls back to
+ * $HOME/.config/edit/config. Returns 0 on success, -1 if neither
+ * environment variable is set. */
+static int config_build_path(char *path_out, size_t path_size)
+{
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	if (xdg && xdg[0] != '\0') {
+		snprintf(path_out, path_size, "%s/edit/config", xdg);
+		return 0;
+	}
+	const char *home = getenv("HOME");
+	if (home && home[0] != '\0') {
+		snprintf(path_out, path_size, "%s/.config/edit/config", home);
+		return 0;
+	}
+	return -1;
+}
+
+/* Builds the config directory path into the provided buffer. Returns 0
+ * on success, -1 if neither XDG_CONFIG_HOME nor HOME is set. */
+static int config_build_directory(char *dir_out, size_t dir_size)
+{
+	const char *xdg = getenv("XDG_CONFIG_HOME");
+	if (xdg && xdg[0] != '\0') {
+		snprintf(dir_out, dir_size, "%s/edit", xdg);
+		return 0;
+	}
+	const char *home = getenv("HOME");
+	if (home && home[0] != '\0') {
+		snprintf(dir_out, dir_size, "%s/.config/edit", home);
+		return 0;
+	}
+	return -1;
+}
+
+/* Creates a directory and all missing parent components, similar to
+ * mkdir -p. Returns 0 on success, -1 on failure. */
+static int config_mkdir_parents(const char *path)
+{
+	char working_path[CONFIG_PATH_MAX];
+	snprintf(working_path, sizeof(working_path), "%s", path);
+	for (char *separator = working_path + 1; *separator; separator++) {
+		if (*separator == '/') {
+			*separator = '\0';
+			if (mkdir(working_path, 0755) == -1 && errno != EEXIST)
+				return -1;
+			*separator = '/';
+		}
+	}
+	if (mkdir(working_path, 0755) == -1 && errno != EEXIST)
+		return -1;
+	return 0;
+}
+
+/* Reads the config file and applies key=value settings to the editor state.
+ * Skips blank lines and comments starting with '#'. Unknown keys are
+ * silently ignored. Shows the first parse error in the status bar. */
+void config_load(void)
+{
+	char config_path[CONFIG_PATH_MAX];
+	if (config_build_path(config_path, sizeof(config_path)) == -1)
+		return;
+
+	FILE *config_file = fopen(config_path, "r");
+	if (!config_file)
+		return;
+
+	char line_buffer[CONFIG_LINE_MAX];
+	int line_number = 0;
+	int first_error_line = 0;
+	char first_error_message[STATUS_MESSAGE_SIZE];
+	first_error_message[0] = '\0';
+
+	while (fgets(line_buffer, sizeof(line_buffer), config_file)) {
+		line_number++;
+
+		/* Strip trailing newline and carriage return. */
+		char *newline = strchr(line_buffer, '\n');
+		if (newline)
+			*newline = '\0';
+		newline = strchr(line_buffer, '\r');
+		if (newline)
+			*newline = '\0';
+
+		/* Skip blank lines and comments. */
+		char *cursor = line_buffer;
+		while (*cursor == ' ' || *cursor == '\t')
+			cursor++;
+		if (*cursor == '\0' || *cursor == '#')
+			continue;
+
+		/* Find the '=' separator. */
+		char *equals = strchr(cursor, '=');
+		if (!equals) {
+			if (first_error_line == 0) {
+				first_error_line = line_number;
+				snprintf(first_error_message,
+					 sizeof(first_error_message),
+					 "Config error line %d: missing '='",
+					 line_number);
+			}
+			continue;
+		}
+
+		/* Extract and trim the key. */
+		char *key_end = equals - 1;
+		while (key_end > cursor
+		       && (*key_end == ' ' || *key_end == '\t'))
+			key_end--;
+		int key_length = (int)(key_end - cursor) + 1;
+		char key[CONFIG_LINE_MAX];
+		memcpy(key, cursor, (size_t)key_length);
+		key[key_length] = '\0';
+
+		/* Extract and trim the value. */
+		char *value_start = equals + 1;
+		while (*value_start == ' ' || *value_start == '\t')
+			value_start++;
+		char *value_end = value_start + strlen(value_start) - 1;
+		while (value_end > value_start
+		       && (*value_end == ' ' || *value_end == '\t'))
+			value_end--;
+		int value_length = (int)(value_end - value_start) + 1;
+		if (value_start > value_end)
+			value_length = 0;
+		char value[CONFIG_LINE_MAX];
+		if (value_length > 0)
+			memcpy(value, value_start, (size_t)value_length);
+		value[value_length] = '\0';
+
+		/* Apply known configuration keys. */
+		if (strcmp(key, "tabstop") == 0) {
+			int tab_value = atoi(value);
+			if (tab_value >= TAB_STOP_MIN
+			    && tab_value <= TAB_STOP_MAX) {
+				editor.tab_stop = tab_value;
+			} else if (first_error_line == 0) {
+				first_error_line = line_number;
+				snprintf(first_error_message,
+					 sizeof(first_error_message),
+					 "Config line %d: tabstop %d-%d",
+					 line_number, TAB_STOP_MIN,
+					 TAB_STOP_MAX);
+			}
+		} else if (strcmp(key, "theme") == 0) {
+			int theme_count = (int)(sizeof(editor_themes)
+					/ sizeof(editor_themes[0]));
+			int found = 0;
+			for (int i = 0; i < theme_count; i++) {
+				if (strcmp(editor_themes[i].name,
+					  value) == 0) {
+					current_theme_index = i;
+					editor_set_theme(i);
+					found = 1;
+					break;
+				}
+			}
+			if (!found && first_error_line == 0) {
+				first_error_line = line_number;
+				snprintf(first_error_message,
+					 sizeof(first_error_message),
+					 "Config line %d: unknown theme",
+					 line_number);
+			}
+		} else if (strcmp(key, "line_numbers") == 0) {
+			if (strcmp(value, "true") == 0) {
+				editor.show_line_numbers = 1;
+			} else if (strcmp(value, "false") == 0) {
+				editor.show_line_numbers = 0;
+			} else if (first_error_line == 0) {
+				first_error_line = line_number;
+				snprintf(first_error_message,
+					 sizeof(first_error_message),
+					 "Config line %d: "
+					 "line_numbers must be true/false",
+					 line_number);
+			}
+		} else if (strcmp(key, "ruler") == 0) {
+			int ruler_value = atoi(value);
+			if (ruler_value >= 0
+			    && ruler_value <= RULER_COLUMN_MAX) {
+				editor.ruler_column = ruler_value;
+			} else if (first_error_line == 0) {
+				first_error_line = line_number;
+				snprintf(first_error_message,
+					 sizeof(first_error_message),
+					 "Config line %d: ruler 0-%d",
+					 line_number, RULER_COLUMN_MAX);
+			}
+		}
+		/* Unknown keys are silently ignored. */
+	}
+
+	fclose(config_file);
+
+	/* Update gutter width in case show_line_numbers changed. */
+	editor_update_gutter_width();
+
+	/* Show the first parse error as a status message at startup. */
+	if (first_error_line > 0)
+		editor_set_status_message("%s", first_error_message);
+}
+
+/* Saves the current theme name to the config file. Creates the config
+ * directory if it does not exist. If the config file already contains a
+ * theme line, it is replaced in-place. Otherwise the theme setting is
+ * appended. Uses atomic write (temp file + rename) to avoid corruption. */
+void config_save_theme(const char *theme_name)
+{
+	char config_directory[CONFIG_PATH_MAX];
+	if (config_build_directory(config_directory,
+				   sizeof(config_directory)) == -1)
+		return;
+
+	/* Ensure the config directory exists. */
+	if (config_mkdir_parents(config_directory) == -1)
+		return;
+
+	char config_path[CONFIG_PATH_MAX];
+	if (config_build_path(config_path, sizeof(config_path)) == -1)
+		return;
+
+	/* Extra room for the ".tmp" suffix beyond the config path. */
+	char temp_path[CONFIG_PATH_MAX + sizeof(CONFIG_TEMP_SUFFIX)];
+	snprintf(temp_path, sizeof(temp_path), "%s%s",
+		 config_path, CONFIG_TEMP_SUFFIX);
+
+	/* Read the existing config file if present. */
+	FILE *existing = fopen(config_path, "r");
+	FILE *output = fopen(temp_path, "w");
+	if (!output) {
+		if (existing)
+			fclose(existing);
+		return;
+	}
+
+	int theme_written = 0;
+	if (existing) {
+		char line_buffer[CONFIG_LINE_MAX];
+		while (fgets(line_buffer, sizeof(line_buffer), existing)) {
+			/* Check if this line sets the theme. */
+			char *cursor = line_buffer;
+			while (*cursor == ' ' || *cursor == '\t')
+				cursor++;
+			if (strncmp(cursor, "theme", 5) == 0) {
+				char *after_key = cursor + 5;
+				while (*after_key == ' '
+				       || *after_key == '\t')
+					after_key++;
+				if (*after_key == '=') {
+					fprintf(output, "theme = %s\n",
+						theme_name);
+					theme_written = 1;
+					continue;
+				}
+			}
+			fputs(line_buffer, output);
+		}
+		fclose(existing);
+	}
+
+	/* Append theme line if none existed in the original file. */
+	if (!theme_written)
+		fprintf(output, "theme = %s\n", theme_name);
+
+	fclose(output);
+
+	/* Atomic rename to replace the config file safely. */
+	rename(temp_path, config_path);
+}
+
+/*** True Color Detection ***/
+
+/* Checks environment variables to determine if the terminal supports
+ * 24-bit true color rendering. Looks at COLORTERM for "truecolor" or
+ * "24bit", then falls back to checking TERM for terminal types known
+ * to support true color (256color, kitty, alacritty). */
+void terminal_detect_true_color(void)
+{
+	const char *colorterm = getenv("COLORTERM");
+	if (colorterm) {
+		if (strcmp(colorterm, "truecolor") == 0
+		    || strcmp(colorterm, "24bit") == 0) {
+			editor.true_color = 1;
+			return;
+		}
+	}
+
+	const char *term = getenv("TERM");
+	if (term) {
+		if (strstr(term, "256color") != NULL
+		    || strstr(term, "kitty") != NULL
+		    || strstr(term, "alacritty") != NULL) {
+			editor.true_color = 1;
+			return;
+		}
+	}
+
+	editor.true_color = 0;
+}
+
+
 /*** Init ***/
 
 /* Initializes all editor state to default values: cursor at origin, no file
@@ -6344,6 +6922,7 @@ void editor_init(void)
 	editor.cursor_y = 0;
 	editor.render_x = 0;
 	editor.show_line_numbers = 1;
+	editor.word_wrap = 0;
 	editor.row_offset = 0;
 	editor.column_offset = 0;
 	editor.line_count = 0;
@@ -6355,7 +6934,16 @@ void editor_init(void)
 	editor.status_message[0] = '\0';
 	editor.status_message_time = 0;
 	editor.syntax = NULL;
+	editor.tab_stop = EDIT_TAB_STOP;
+	editor.true_color = 0;
+	editor.ruler_column = 0;
 	editor_set_theme(current_theme_index);
+
+	/* Load config file after defaults are set so it can override them. */
+	config_load();
+
+	/* Detect true color terminal support from environment variables. */
+	terminal_detect_true_color();
 
 	/* Install signal handlers using sigaction for portable, reliable behavior.
 	 * SA_RESTART ensures system calls are not interrupted by signals. */
@@ -6484,12 +7072,32 @@ int main(int argc, char *argv[])
 	 * which work on stdout even when stdin is a pipe). */
 	editor_init();
 
+	/* Parse command line flags before opening any file. Flags use
+	 * --key=value syntax. Non-flag arguments are treated as filenames. */
+	char *filename_arg = NULL;
+	for (int i = 1; i < argc; i++) {
+		if (strncmp(argv[i], "--tabstop=", 10) == 0) {
+			int tab_value = atoi(argv[i] + 10);
+			if (tab_value >= TAB_STOP_MIN
+			    && tab_value <= TAB_STOP_MAX)
+				editor.tab_stop = tab_value;
+		} else if (strncmp(argv[i], "--ruler=", 8) == 0) {
+			int ruler_value = atoi(argv[i] + 8);
+			if (ruler_value >= 0
+			    && ruler_value <= RULER_COLUMN_MAX)
+				editor.ruler_column = ruler_value;
+		} else {
+			/* First non-flag argument is the filename. */
+			filename_arg = argv[i];
+		}
+	}
+
 	/* Detect piped stdin: either stdin is not a terminal, or the user
 	 * passed "-" as the filename argument. Read everything from the
 	 * pipe into the editor buffer, then reconnect stdin to /dev/tty
 	 * so raw mode and keyboard input work normally. */
 	int stdin_is_pipe = !isatty(STDIN_FILENO);
-	int arg_is_dash = (argc >= 2 && strcmp(argv[1], "-") == 0);
+	int arg_is_dash = (filename_arg && strcmp(filename_arg, "-") == 0);
 	if (stdin_is_pipe || arg_is_dash) {
 		if (stdin_is_pipe) {
 			size_t pipe_length;
@@ -6535,9 +7143,9 @@ int main(int argc, char *argv[])
 
 	/* Open a file from the command line, unless we already loaded
 	 * piped data or the argument was "-". */
-	if (argc >= 2 && !arg_is_dash && !stdin_is_pipe) {
-		editor_open(argv[1]);
-	} else if (argc >= 2 && arg_is_dash && !stdin_is_pipe) {
+	if (filename_arg && !arg_is_dash && !stdin_is_pipe) {
+		editor_open(filename_arg);
+	} else if (filename_arg && arg_is_dash && !stdin_is_pipe) {
 		/* "-" was passed but stdin was a terminal -- just start empty */
 	}
 
