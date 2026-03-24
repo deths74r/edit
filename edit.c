@@ -486,15 +486,17 @@ struct editor_state {
 	struct editor_syntax *syntax;
 	/* Terminal settings to restore on exit. */
 	struct termios original_termios;
-	/* Timestamp of last scroll event for acceleration. */
-	struct timeval last_scroll_time;
 	/* Current color theme. */
 	struct editor_theme theme;
-	/* Current scroll speed (1 to SCROLL_SPEED_MAX). */
-	int scroll_speed;
-	/* Set to 1 after the first scroll event in a frame. Cleared
-	 * after each render so speed is recomputed for the next frame. */
-	int scroll_speed_set_this_frame;
+	/* Pending scroll events accumulated during the event loop.
+	 * Processed once at the start of editor_refresh_screen(). */
+	int scroll_pending_up;
+	int scroll_pending_down;
+	/* Timestamp of the last render frame that processed scroll events. */
+	struct timeval scroll_last_frame_time;
+	/* Number of consecutive frames with scroll events. Drives the
+	 * acceleration multiplier (0 = first frame, ramps up). */
+	int scroll_consecutive_frames;
 	/* Whether line numbers are displayed in the gutter. */
 	int show_line_numbers;
 	/* Number of columns reserved for the line number gutter (digits + space). */
@@ -5936,34 +5938,61 @@ void editor_scroll_rows(int scroll_direction, int scroll_amount)
 		editor.cursor_y = editor.line_count;
 }
 
-/* Updates the scroll speed based on the time since the last render
- * frame, not the last scroll event. This prevents false acceleration
- * when terminals batch multiple scroll events per physical wheel notch
- * (all arrive in one read() and process sub-microsecond apart).
- * Speed is computed once per render and held for all events in that
- * frame. The flag scroll_speed_set_this_frame prevents re-computation
- * within the same frame. */
-void editor_update_scroll_speed(void)
+/* Processes pending scroll events accumulated during the event loop.
+ * Called once per frame at the start of editor_refresh_screen().
+ * Scrolls exactly 1 line per frame at base speed regardless of how
+ * many events the terminal batched. Acceleration ramps up when
+ * consecutive frames contain scroll events. */
+void editor_process_pending_scroll(void)
 {
-	/* Only compute speed once per frame. All scroll events between
-	 * two renders use the same speed. */
-	if (editor.scroll_speed_set_this_frame)
-		return;
-	editor.scroll_speed_set_this_frame = 1;
+	int pending_up = editor.scroll_pending_up;
+	int pending_down = editor.scroll_pending_down;
+	editor.scroll_pending_up = 0;
+	editor.scroll_pending_down = 0;
 
-	struct timeval current_time;
-	gettimeofday(&current_time, NULL);
-	long time_diff =
-			(current_time.tv_sec - editor.last_scroll_time.tv_sec) * MICROSECONDS_PER_SECOND +
-			(current_time.tv_usec - editor.last_scroll_time.tv_usec);
-	if (time_diff < SCROLL_ACCELERATION_FAST_US) {
-		editor.scroll_speed = editor.scroll_speed < SCROLL_SPEED_MAX
-															? editor.scroll_speed + 1
-															: SCROLL_SPEED_MAX;
-	} else if (time_diff > SCROLL_DECELERATION_SLOW_US) {
-		editor.scroll_speed = 1;
+	if (pending_up == 0 && pending_down == 0)
+		return;
+
+	/* Determine scroll direction. If both directions present
+	 * (unlikely), use whichever had more events. */
+	int direction, pending;
+	if (pending_up >= pending_down) {
+		direction = ARROW_UP;
+		pending = pending_up;
+	} else {
+		direction = ARROW_DOWN;
+		pending = pending_down;
 	}
-	editor.last_scroll_time = current_time;
+	(void)pending;
+
+	/* Measure time since last frame with scrolling to detect
+	 * whether the user is scrolling continuously. */
+	struct timeval now;
+	gettimeofday(&now, NULL);
+	long elapsed =
+		(now.tv_sec - editor.scroll_last_frame_time.tv_sec) *
+			MICROSECONDS_PER_SECOND +
+		(now.tv_usec - editor.scroll_last_frame_time.tv_usec);
+	editor.scroll_last_frame_time = now;
+
+	if (elapsed < SCROLL_ACCELERATION_FAST_US) {
+		if (editor.scroll_consecutive_frames < SCROLL_SPEED_MAX)
+			editor.scroll_consecutive_frames++;
+	} else if (elapsed > SCROLL_DECELERATION_SLOW_US) {
+		editor.scroll_consecutive_frames = 0;
+	}
+
+	/* Base speed is always 1 line. Acceleration kicks in
+	 * immediately and ramps aggressively. */
+	int multiplier;
+	if (editor.scroll_consecutive_frames <= 1)
+		multiplier = 1;
+	else
+		multiplier = (editor.scroll_consecutive_frames - 1) * 4;
+	if (multiplier > SCROLL_SPEED_MAX)
+		multiplier = SCROLL_SPEED_MAX;
+
+	editor_scroll_rows(direction, multiplier);
 }
 
 /* Highlights all occurrences of the search query in a line by setting
@@ -6738,8 +6767,8 @@ int editor_cursor_screen_row(void)
  * viewport, status bar, or selection state changed. */
 void editor_refresh_screen(void)
 {
-	/* Allow scroll speed to be recomputed on the next scroll event. */
-	editor.scroll_speed_set_this_frame = 0;
+	/* Process batched scroll events before adjusting the viewport. */
+	editor_process_pending_scroll();
 
 	editor_scroll();
 	bracket_update_cursor_match();
@@ -6913,6 +6942,7 @@ void editor_cool_distant_lines(void)
 				ln->cell_capacity = 0;
 				ln->temperature = LINE_COLD;
 				ln->cached_render_width = -1;
+				ln->syntax_stale = 1;
 			}
 		}
 
@@ -7614,13 +7644,11 @@ void editor_process_keypress(struct input_event event)
 		break;
 
 	case MOUSE_SCROLL_UP:
-		editor_update_scroll_speed();
-		editor_scroll_rows(ARROW_UP, editor.scroll_speed);
+		editor.scroll_pending_up++;
 		break;
 
 	case MOUSE_SCROLL_DOWN:
-		editor_update_scroll_speed();
-		editor_scroll_rows(ARROW_DOWN, editor.scroll_speed);
+		editor.scroll_pending_down++;
 		break;
 
 	/* Tab indents the selection when text is selected; otherwise
@@ -8044,9 +8072,10 @@ void editor_init(void)
 	}
 	editor.screen_rows -= 2;
 
-	gettimeofday(&editor.last_scroll_time, NULL);
-	editor.scroll_speed = 1;
-	editor.scroll_speed_set_this_frame = 0;
+	editor.scroll_pending_up = 0;
+	editor.scroll_pending_down = 0;
+	gettimeofday(&editor.scroll_last_frame_time, NULL);
+	editor.scroll_consecutive_frames = 0;
 	editor.file_descriptor = -1;
 	editor.mmap_base = NULL;
 	editor.mmap_size = 0;
