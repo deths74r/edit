@@ -6246,14 +6246,18 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 			int is_continuation = (editor.word_wrap && wrap_cell_offset > 0);
 			if (editor.line_number_width > 0) {
 				if (is_continuation) {
-					/* Show '..' right-aligned in the gutter
-					 * to indicate a wrapped continuation. */
+					/* Show '..' right-aligned in the digit
+					 * columns, followed by the separator space.
+					 * e.g., "  .. " for a 4-digit gutter. */
 					append_buffer_write_color(append_buffer,
 						editor.theme.line_number);
-					int pad = editor.line_number_width - 2;
+					int digits = editor.line_number_width - 1;
+					int pad = digits - 2;
+					if (pad < 0) pad = 0;
 					for (int p = 0; p < pad; p++)
 						append_buffer_write(append_buffer, " ", 1);
 					append_buffer_write(append_buffer, "..", 2);
+					append_buffer_write(append_buffer, " ", 1);
 				} else {
 					append_buffer_write_color(
 							append_buffer,
