@@ -66,6 +66,7 @@ enum editor_key {
 	MOUSE_RIGHT_BUTTON_PRESSED,
 	MOUSE_SCROLL_UP,
 	MOUSE_SCROLL_DOWN,
+	F1_KEY,
 	F11_KEY,
 	SHIFT_ARROW_LEFT,
 	SHIFT_ARROW_RIGHT,
@@ -877,6 +878,8 @@ void config_save_theme(const char *theme_name);
 void config_load(void);
 /* Detects whether the terminal supports 24-bit true color. */
 void terminal_detect_true_color(void);
+/* Opens the command prompt for entering editor commands. */
+void command_prompt_open(void);
 
 /*** Editor Theme ***/
 
@@ -1302,6 +1305,8 @@ struct input_event terminal_decode_key(void)
 						int code = (sequence[1] - '0') * 10
 							+ (sequence[2] - '0');
 						switch (code) {
+						case 11:
+							return (struct input_event){.key = F1_KEY};
 						case 23:
 							return (struct input_event){.key = F11_KEY};
 						}
@@ -1399,6 +1404,8 @@ struct input_event terminal_decode_key(void)
 				return (struct input_event){.key = HOME_KEY};
 			case 'F':
 				return (struct input_event){.key = END_KEY};
+			case 'P':
+				return (struct input_event){.key = F1_KEY};
 			}
 		} else {
 			return (struct input_event){.key = ALT_KEY(sequence[0])};
@@ -4360,35 +4367,34 @@ void cursor_history_record(void)
 
 /*** Help ***/
 
-/* Help text displayed when the user presses F1 or Alt+?. Loaded into
+/* Help text displayed when the user presses F1 or F11. Loaded into
  * the editor buffer as a temporary read-only view. */
 static const char *help_text =
 	"edit -- Terminal Text Editor (v" EDIT_VERSION ")\n"
 	"\n"
 	"FILE\n"
-	"  Alt+S / Ctrl+S       Save\n"
+	"  Ctrl+S               Save\n"
 	"  Alt+Shift+S          Save as\n"
-	"  Alt+Q / Ctrl+Q       Quit\n"
-	"  Ctrl+Z               Suspend (return to shell)\n"
+	"  Ctrl+Q               Quit\n"
 	"\n"
 	"NAVIGATION\n"
-	"  Arrows / Alt+HJKL    Move cursor\n"
+	"  Arrow keys           Move cursor\n"
 	"  Home / End           Start / end of line\n"
 	"  Ctrl+A / Ctrl+E      Start / end of line\n"
 	"  Ctrl+Left/Right      Jump by word\n"
 	"  PgUp / PgDn          Scroll by screen\n"
-	"  Alt+G / Ctrl+G       Go to line number\n"
+	"  Ctrl+G               Go to line number\n"
 	"  Mouse click          Position cursor\n"
 	"  Mouse scroll         Scroll (accelerated)\n"
 	"\n"
 	"SEARCH\n"
-	"  Alt+F / Ctrl+F       Find (incremental)\n"
+	"  Ctrl+F               Find (incremental)\n"
 	"                         Left/Right navigate matches\n"
 	"                         Up/Down browse search history\n"
 	"                         Alt+C toggles case sensitivity\n"
 	"                         Alt+X toggles regex mode\n"
-	"                         Enter to accept, ESC to cancel\n"
-	"  Alt+R                Find and replace\n"
+	"                         Enter to accept, ESC/Ctrl+C to cancel\n"
+	"  Ctrl+H               Find and replace\n"
 	"\n"
 	"SELECTION\n"
 	"  Shift+Arrow          Select by character/line\n"
@@ -4398,27 +4404,27 @@ static const char *help_text =
 	"  ESC                  Clear selection\n"
 	"\n"
 	"CLIPBOARD\n"
-	"  Alt+C                Copy\n"
-	"  Alt+X                Cut\n"
-	"  Alt+V                Paste\n"
+	"  Ctrl+C               Copy (line if no selection)\n"
+	"  Ctrl+X               Cut (line if no selection)\n"
+	"  Ctrl+V               Paste\n"
 	"  Alt+Shift+K          Cut entire line\n"
-	"  Alt+D                Duplicate line\n"
+	"  Ctrl+D               Duplicate line\n"
 	"\n"
 	"EDITING\n"
-	"  Ctrl+U               Undo\n"
-	"  Ctrl+R               Redo\n"
+	"  Ctrl+Z               Undo\n"
+	"  Ctrl+Y               Redo\n"
 	"  Tab (with selection)  Indent block\n"
 	"  Shift+Tab (w/ sel)   Dedent block\n"
-	"  Alt+/                Toggle line comment\n"
-	"  Alt+]                Jump to matching bracket\n"
+	"  Ctrl+/               Toggle line comment\n"
+	"  Ctrl+]               Jump to matching bracket\n"
 	"\n"
 	"DISPLAY\n"
 	"  Alt+T                Cycle color theme\n"
 	"  Alt+N                Toggle line numbers\n"
 	"  Alt+W                Toggle word wrap\n"
-	"  F1 / Alt+?           This help screen\n"
+	"  F1 / F11             This help screen\n"
 	"\n"
-	"Press ESC or Alt+Q to return to your file.\n";
+	"Press ESC or Ctrl+Q to return to your file.\n";
 
 /* Saves the current buffer state into the snapshot so it can be
  * restored later. Zeroes the buffer fields in editor so the
@@ -4505,7 +4511,7 @@ void editor_help_open(void)
 	editor.dirty = 0;
 	editor.viewing_help = 1;
 	editor_update_gutter_width();
-	editor_set_status_message("HELP -- Press ESC or Alt+Q to return");
+	editor_set_status_message("HELP -- Press ESC or Ctrl+Q to return");
 }
 
 /* Closes the help screen and restores the previous buffer. */
@@ -4518,7 +4524,7 @@ void editor_help_close(void)
 	editor.viewing_help = 0;
 	editor_snapshot_restore();
 	editor_set_status_message(
-		"Alt: S=save Q=quit F=find G=goto N=lines T=theme F11=help");
+		"Ctrl: S=save Q=quit F=find Z=undo Y=redo C/X/V=clip F1=help");
 }
 
 /*** Find ***/
@@ -7136,6 +7142,20 @@ void prompt_handle_key(struct input_event event)
 	int key = event.key;
 	int is_search = (editor.prompt.per_key_callback == editor_find_callback);
 
+	/* Ctrl+C cancels the prompt, same as ESC. */
+	if (key == CTRL_KEY('c')) {
+		editor_set_status_message("");
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(editor.prompt.buffer, ESC_KEY);
+		void (*on_cancel)(void) = editor.prompt.on_cancel;
+		free(editor.prompt.buffer);
+		editor.prompt.buffer = NULL;
+		editor.mode = MODE_NORMAL;
+		if (on_cancel)
+			on_cancel();
+		return;
+	}
+
 	/* Alt+C during search toggles case sensitivity. Only active when
 	 * the per-key callback is the incremental search handler. */
 	if (key == ALT_KEY('c') && is_search) {
@@ -7198,7 +7218,7 @@ void prompt_handle_key(struct input_event event)
 		editor_set_status_message(editor.prompt.format, editor.prompt.buffer);
 		return;
 	}
-	if (key == DEL_KEY || key == CTRL_KEY('h') || key == BACKSPACE) {
+	if (key == DEL_KEY || key == BACKSPACE) {
 		if (editor.prompt.buffer_length != 0)
 			editor.prompt.buffer[--editor.prompt.buffer_length] = '\0';
 	} else if (key == ESC_KEY) {
@@ -7289,8 +7309,6 @@ void editor_move_cursor(struct input_event event)
 
 	/* Reset preferred column on any horizontal movement */
 	int is_vertical = (event.key == ARROW_UP || event.key == ARROW_DOWN
-			   || event.key == ALT_KEY('j')
-			   || event.key == ALT_KEY('k')
 			   || event.key == PAGE_UP || event.key == PAGE_DOWN
 			   || event.key == MOUSE_SCROLL_UP
 			   || event.key == MOUSE_SCROLL_DOWN);
@@ -7311,7 +7329,6 @@ void editor_move_cursor(struct input_event event)
 		}
 		break;
 
-	case ALT_KEY('h'):
 	case ARROW_LEFT:
 		if (current_line == NULL)
 			break;
@@ -7323,7 +7340,6 @@ void editor_move_cursor(struct input_event event)
 		}
 		break;
 
-	case ALT_KEY('l'):
 	case ARROW_RIGHT:
 		if (current_line && editor.cursor_x < (int)current_line->cell_count) {
 			editor.cursor_x = cursor_next_grapheme(current_line, editor.cursor_x);
@@ -7335,7 +7351,6 @@ void editor_move_cursor(struct input_event event)
 		}
 		break;
 
-	case ALT_KEY('k'):
 	case ARROW_UP:
 		if (editor.preferred_column == -1 && current_line)
 			editor.preferred_column =
@@ -7376,7 +7391,6 @@ void editor_move_cursor(struct input_event event)
 			editor.cursor_y--;
 		break;
 
-	case ALT_KEY('j'):
 	case ARROW_DOWN:
 		if (editor.preferred_column == -1 && current_line)
 			editor.preferred_column =
@@ -7462,7 +7476,6 @@ void editor_process_keypress(struct input_event event)
 		switch (key) {
 		/* Navigation */
 		case ARROW_UP: case ARROW_DOWN: case ARROW_LEFT: case ARROW_RIGHT:
-		case ALT_KEY('h'): case ALT_KEY('j'): case ALT_KEY('k'): case ALT_KEY('l'):
 		case PAGE_UP: case PAGE_DOWN: case HOME_KEY: case END_KEY:
 		case CTRL_ARROW_LEFT: case CTRL_ARROW_RIGHT:
 		case MOUSE_LEFT_BUTTON_PRESSED:
@@ -7482,7 +7495,7 @@ void editor_process_keypress(struct input_event event)
 		}
 		if (!allowed) {
 			editor_set_status_message(
-				"Help is read-only -- ESC or Alt+Q to return");
+				"Help is read-only -- ESC or Ctrl+Q to return");
 			return;
 		}
 	}
@@ -7494,6 +7507,8 @@ void editor_process_keypress(struct input_event event)
 		editor_insert_newline();
 		break;
 
+	/* TODO: Remove Alt+T/N/W once command system (/theme, /set numbers,
+	 * /set wrap) is implemented in Phase 1. */
 	case ALT_KEY('t'):
 		editor_switch_theme();
 		break;
@@ -7533,18 +7548,6 @@ void editor_process_keypress(struct input_event event)
 		editor_save_as_start();
 		break;
 
-	case CTRL_KEY('z'):
-		/* Suspend: restore terminal, stop the process, re-enable
-		 * raw mode when resumed. */
-		terminal_disable_mouse_reporting();
-		terminal_disable_raw_mode();
-		kill(getpid(), SIGTSTP);
-		/* Execution resumes here after SIGCONT */
-		terminal_enable_raw_mode();
-		terminal_enable_mouse_reporting();
-		editor.force_full_redraw = 1;
-		break;
-
 	case HOME_KEY:
 	case CTRL_KEY('a'):
 		editor.cursor_x = 0;
@@ -7561,44 +7564,67 @@ void editor_process_keypress(struct input_event event)
 		editor_find_start();
 		break;
 
-	case ALT_KEY('r'):
+	case CTRL_KEY('h'):
 		editor_replace_start();
 		break;
 
-	case ALT_KEY(']'):
+	/* Ctrl+] sends 0x1d in raw mode. */
+	case 0x1d:
 		editor_jump_to_matching_bracket();
 		break;
 
-	case ALT_KEY('/'):
+	/* Ctrl+/ sends 0x1f in raw mode. */
+	case 0x1f:
 		editor_toggle_comment();
 		break;
 
-	case ALT_KEY('?'):
+	case F1_KEY:
 	case F11_KEY:
 		editor_help_open();
 		break;
 
-	case CTRL_KEY('u'):
+	case CTRL_KEY('z'):
 		editor_undo();
 		break;
-	case CTRL_KEY('r'):
+	case CTRL_KEY('y'):
 		editor_redo();
 		break;
 
-	/* Clipboard operations */
-	case ALT_KEY('c'):
+	/* Clipboard operations: Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes.
+	 * When no selection is active, copy/cut operate on the whole line
+	 * (VS Code convention). */
+	case CTRL_KEY('c'):
+		if (!editor.selection.active) {
+			/* No selection: copy current line */
+			if (editor.cursor_y < editor.line_count) {
+				size_t length;
+				char *bytes = line_to_bytes(&editor.lines[editor.cursor_y], &length);
+				if (bytes) {
+					clipboard_store(bytes, length, 1);
+					clipboard_set_system(bytes, length);
+					editor_set_status_message("Line copied");
+					free(bytes);
+				}
+			}
+			break;
+		}
 		editor_copy();
 		break;
-	case ALT_KEY('x'):
+	case CTRL_KEY('x'):
+		if (!editor.selection.active) {
+			/* No selection: cut current line */
+			editor_cut_line();
+			break;
+		}
 		editor_cut();
 		break;
-	case ALT_KEY('v'):
+	case CTRL_KEY('v'):
 		editor_paste();
 		break;
 	case ALT_KEY('K'):
 		editor_cut_line();
 		break;
-	case ALT_KEY('d'):
+	case CTRL_KEY('d'):
 		editor_duplicate_line();
 		break;
 
@@ -7668,7 +7694,8 @@ void editor_process_keypress(struct input_event event)
 		break;
 	}
 
-	/* Alt+A / Alt+E: select to start/end of line */
+	/* TODO: Replace Alt+A / Alt+E with Ctrl+Shift+Home / Ctrl+Shift+End
+	 * once Ctrl+Shift decoding is implemented. */
 	case ALT_KEY('a'):
 		if (!editor.selection.active)
 			selection_start();
@@ -7730,7 +7757,6 @@ void editor_process_keypress(struct input_event event)
 		break;
 
 	case BACKSPACE:
-	case CTRL_KEY('h'):
 		if (editor.selection.active) {
 			selection_delete();
 			break;
@@ -7766,10 +7792,6 @@ void editor_process_keypress(struct input_event event)
 			editor_move_cursor((struct input_event){.key = key == PAGE_UP ? ARROW_UP : ARROW_DOWN});
 	} break;
 
-	case ALT_KEY('h'):
-	case ALT_KEY('j'):
-	case ALT_KEY('k'):
-	case ALT_KEY('l'):
 	case ARROW_UP:
 	case ARROW_DOWN:
 	case ARROW_LEFT:
@@ -7817,8 +7839,16 @@ void editor_process_keypress(struct input_event event)
 			editor_help_close();
 			break;
 		}
-		if (editor.selection.active)
+		if (editor.selection.active) {
 			selection_clear();
+			break;
+		}
+		command_prompt_open();
+		break;
+
+	/* Ctrl+Space sends NUL (0x00) and always opens the command prompt. */
+	case 0:
+		command_prompt_open();
 		break;
 
 	default:
@@ -8162,6 +8192,12 @@ void terminal_detect_true_color(void)
 
 /*** Init ***/
 
+/* Stub: opens the command prompt. Full implementation in Phase 1. */
+void command_prompt_open(void)
+{
+	editor_set_status_message("Command system coming soon (Phase 1)");
+}
+
 /* Initializes all editor state to default values: cursor at origin, no file
  * loaded, light theme active. Queries the terminal size and reserves two
  * rows for the status and message bars. */
@@ -8414,7 +8450,7 @@ int main(int argc, char *argv[])
 	}
 
 	editor_set_status_message(
-			"Alt: S=save Q=quit F=find G=goto N=lines T=theme F11=help");
+			"Ctrl: S=save Q=quit F=find Z=undo Y=redo C/X/V=clip F1=help");
 
 	/* Switch to fully non-blocking reads now that startup terminal
 	 * queries (which need VTIME=1) are complete. */
