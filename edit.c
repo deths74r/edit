@@ -670,6 +670,10 @@ void editor_update_gutter_width(void);
 void line_free(struct line *line);
 void line_init(struct line *line, int index);
 void terminal_die(const char *message);
+int line_word_wrap_break(struct line *line, int wrap_start, int text_cols);
+int line_visual_row_count(struct line *line, int text_cols);
+int line_visual_row_for_cell(struct line *line, int cell_index,
+			     int text_cols, int *row_start_out);
 void editor_cool_distant_lines(void);
 void editor_prefetch_lines(void);
 void editor_lines_ensure_capacity(int needed);
@@ -5799,11 +5803,8 @@ void editor_scroll(void)
 		while (editor.row_offset < editor.cursor_y) {
 			int visual_rows = 0;
 			for (int i = editor.row_offset; i <= editor.cursor_y && i < editor.line_count; i++) {
-				int width = line_render_width(&editor.lines[i]);
-				int rows = (text_columns > 0 && width > text_columns)
-					   ? (width + text_columns - 1) / text_columns
-					   : 1;
-				visual_rows += rows;
+				visual_rows += line_visual_row_count(
+					&editor.lines[i], text_columns);
 			}
 			if (visual_rows <= editor.screen_rows)
 				break;
@@ -6095,6 +6096,80 @@ int editor_highlight_search_matches(struct line *line, uint16_t *saved_syntax)
 	free(byte_to_cell);
 	free(bytes);
 	return modified;
+}
+
+/* Computes the cell index where a word-wrap break should occur for a
+ * given visual row of a wrapped line. The break prefers the last
+ * whitespace before the column limit; falls back to hard-break at
+ * the limit if no whitespace is found (e.g., a single very long word).
+ *
+ * Returns the cell index where the NEXT visual row starts, or
+ * cell_count if this is the last row. wrap_start is the cell index
+ * where this visual row begins (0 for the first row). */
+int line_word_wrap_break(struct line *line, int wrap_start, int text_cols)
+{
+	line_ensure_warm(line);
+	int col = 0;
+	int last_space = -1;
+	int i = wrap_start;
+
+	while (i < (int)line->cell_count) {
+		int cw = cell_display_width(&line->cells[i], col);
+		if (col + cw > text_cols) {
+			/* Exceeded the column limit. Break at the last
+			 * whitespace if we found one, otherwise hard-break
+			 * at this cell. */
+			if (last_space >= 0)
+				return last_space + 1;
+			return i;
+		}
+		if (line->cells[i].codepoint == ' ' ||
+		    line->cells[i].codepoint == '\t')
+			last_space = i;
+		col += cw;
+		i++;
+	}
+	return (int)line->cell_count;
+}
+
+/* Returns the number of visual rows a line occupies when word-wrapped
+ * to the given column width. */
+int line_visual_row_count(struct line *line, int text_cols)
+{
+	if (text_cols < 1) text_cols = 1;
+	line_ensure_warm(line);
+	int rows = 1;
+	int pos = 0;
+	while (pos < (int)line->cell_count) {
+		pos = line_word_wrap_break(line, pos, text_cols);
+		if (pos < (int)line->cell_count)
+			rows++;
+	}
+	return rows;
+}
+
+/* Returns the visual row index (0-based) and the cell offset where
+ * that row starts for a given cursor_x within a wrapped line. */
+int line_visual_row_for_cell(struct line *line, int cell_index,
+			     int text_cols, int *row_start_out)
+{
+	if (text_cols < 1) text_cols = 1;
+	line_ensure_warm(line);
+	int row = 0;
+	int pos = 0;
+	while (pos < (int)line->cell_count) {
+		int next = line_word_wrap_break(line, pos, text_cols);
+		if (cell_index < next || next >= (int)line->cell_count) {
+			if (row_start_out)
+				*row_start_out = pos;
+			return row;
+		}
+		pos = next;
+		row++;
+	}
+	if (row_start_out)
+		*row_start_out = pos;
+	return row;
 }
 
 /* Returns true if the codepoint is an opening or closing bracket character
@@ -6574,9 +6649,14 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 
 			/* Advance to next line or continue wrapping */
 			if (editor.word_wrap && ci < ln->cell_count) {
-				/* More cells remain -- continue this line
-				 * on the next screen row. */
-				wrap_cell_offset = (int)ci;
+				/* More cells remain — compute the word-aware
+				 * break point for this visual row. */
+				int text_cols_wrap = editor.screen_columns -
+						    editor.line_number_width;
+				if (text_cols_wrap < 1) text_cols_wrap = 1;
+				int break_at = line_word_wrap_break(
+					ln, wrap_cell_offset, text_cols_wrap);
+				wrap_cell_offset = break_at;
 			} else {
 				file_row_index++;
 				wrap_cell_offset = 0;
@@ -6749,15 +6829,15 @@ int editor_cursor_screen_row(void)
 		text_columns = 1;
 	int visual_row = 0;
 	for (int i = editor.row_offset; i < editor.cursor_y && i < editor.line_count; i++) {
-		int width = line_render_width(&editor.lines[i]);
-		int rows = (width > text_columns)
-			   ? (width + text_columns - 1) / text_columns
-			   : 1;
-		visual_row += rows;
+		visual_row += line_visual_row_count(
+			&editor.lines[i], text_columns);
 	}
-	/* Add the wrap row offset within the cursor line itself */
-	int cursor_render_col = editor.render_x;
-	visual_row += cursor_render_col / text_columns;
+	/* Add the visual row within the cursor line itself */
+	if (editor.cursor_y < editor.line_count) {
+		visual_row += line_visual_row_for_cell(
+			&editor.lines[editor.cursor_y],
+			editor.cursor_x, text_columns, NULL);
+	}
 	return visual_row;
 }
 
@@ -7265,20 +7345,29 @@ void editor_move_cursor(struct input_event event)
 			int text_cols = editor.screen_columns -
 					editor.line_number_width;
 			if (text_cols < 1) text_cols = 1;
-			int render_col = line_cell_to_render_column(
-				current_line, editor.cursor_x);
-			int visual_row = render_col / text_cols;
+			int row_start;
+			int visual_row = line_visual_row_for_cell(
+				current_line, editor.cursor_x,
+				text_cols, &row_start);
 			if (visual_row > 0) {
 				/* Move up within the same wrapped line.
-				 * Set preferred_column to the target render
-				 * column so the post-switch restore puts
-				 * the cursor in the right place. */
+				 * Find where the previous visual row starts
+				 * and position cursor at the same offset. */
+				int prev_start = 0;
+				line_visual_row_for_cell(
+					current_line, row_start - 1,
+					text_cols, &prev_start);
+				int render_at_start = line_cell_to_render_column(
+					current_line, prev_start);
 				int col_in_row = editor.preferred_column >= 0
-					? editor.preferred_column % text_cols
-					: render_col % text_cols;
+					? editor.preferred_column
+					: line_cell_to_render_column(
+						current_line,
+						editor.cursor_x) -
+					  line_cell_to_render_column(
+						current_line, row_start);
 				editor.preferred_column =
-					(visual_row - 1) * text_cols +
-					col_in_row;
+					render_at_start + col_in_row;
 				break;
 			}
 		}
@@ -7297,23 +7386,30 @@ void editor_move_cursor(struct input_event event)
 			int text_cols = editor.screen_columns -
 					editor.line_number_width;
 			if (text_cols < 1) text_cols = 1;
-			int render_col = line_cell_to_render_column(
-				current_line, editor.cursor_x);
-			int render_width_val = line_render_width(current_line);
-			int visual_row = render_col / text_cols;
-			int total_rows = (render_width_val + text_cols - 1) /
-					 text_cols;
-			if (total_rows < 1) total_rows = 1;
+			int row_start;
+			int visual_row = line_visual_row_for_cell(
+				current_line, editor.cursor_x,
+				text_cols, &row_start);
+			int total_rows = line_visual_row_count(
+				current_line, text_cols);
 			if (visual_row < total_rows - 1) {
 				/* Move down within the same wrapped line.
-				 * Set preferred_column to the target render
-				 * column so the post-switch restore puts
-				 * the cursor in the right place. */
+				 * Find where the next visual row starts
+				 * and position cursor at the same offset. */
+				int next_start = line_word_wrap_break(
+					current_line, row_start, text_cols);
+				int render_at_next = line_cell_to_render_column(
+					current_line, next_start);
 				int col_in_row = editor.preferred_column >= 0
-					? editor.preferred_column % text_cols
-					: render_col % text_cols;
-				int target = (visual_row + 1) * text_cols +
-					     col_in_row;
+					? editor.preferred_column
+					: line_cell_to_render_column(
+						current_line,
+						editor.cursor_x) -
+					  line_cell_to_render_column(
+						current_line, row_start);
+				int target = render_at_next + col_in_row;
+				int render_width_val =
+					line_render_width(current_line);
 				if (target > render_width_val)
 					target = render_width_val;
 				editor.preferred_column = target;
