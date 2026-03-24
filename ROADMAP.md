@@ -148,10 +148,11 @@
 - [ ] Comprehensive test suite (unit tests for cell/line ops, integration tests for workflows)
 - [ ] Package-ready for Homebrew, apt, AUR
 - [ ] Performance benchmarks published (mmap advantage quantified)
-- [ ] Clean error handling for all edge cases
-- [ ] Read-only file indicator
-- [ ] File locking (`flock`)
-- [ ] Documentation complete
+- [x] **Clean error handling** — line_to_bytes NULL checks at all 13 call sites
+- [x] **Read-only file indicator** — [RO] in status bar, access(W_OK) check
+- [x] **File locking** — flock(LOCK_EX|LOCK_NB), read-only fallback on EWOULDBLOCK
+- [x] **Documentation** — man page, updated README, help screen
+- [x] **Makefile install/uninstall** — PREFIX support, release build dependency
 
 ---
 
