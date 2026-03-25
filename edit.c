@@ -174,6 +174,26 @@ struct selection_state {
 	int finalized;  /* 1 = both endpoints fixed, cursor can move freely */
 };
 
+/* Holds a parsed line range for command arguments. start and end are
+ * 0-based line indices, both inclusive. When is_set is false, the
+ * command should use its default behavior (current line, selection,
+ * or entire file depending on the command). */
+struct command_range {
+	/* First line of the range (0-based, inclusive). */
+	int start;
+	/* Last line of the range (0-based, inclusive). */
+	int end;
+	/* True when a range was explicitly provided by the user. */
+	int is_set;
+};
+
+/* Maximum number of digits in a line number literal. Prevents
+ * overflow when parsing user input. */
+#define RANGE_MAX_DIGITS 10
+
+/* Maximum length of an auto-populated argument string. */
+#define AUTO_POPULATE_BUFFER_SIZE 64
+
 /* Internal clipboard storage for cut/copy/paste. */
 struct clipboard {
 	char **lines;
@@ -2905,6 +2925,56 @@ void clipboard_set_system(const char *text, size_t length)
 	write(STDOUT_FILENO, encoded, ei);
 	write(STDOUT_FILENO, "\x1b\\", 2);
 	free(encoded);
+}
+
+/* Copies lines from start_line through end_line (0-based, inclusive) to
+ * the internal clipboard in line-mode. Also pushes to the system
+ * clipboard via OSC 52. Returns 0 on success, -1 on failure. */
+int clipboard_copy_lines(int start_line, int end_line)
+{
+	if (start_line < 0 || end_line >= editor.line_count
+	    || start_line > end_line)
+		return -1;
+
+	/* Build a single string of all lines joined by newlines. */
+	size_t total = 0;
+	for (int i = start_line; i <= end_line; i++) {
+		size_t line_length;
+		char *bytes = line_to_bytes(&editor.lines[i],
+					    &line_length);
+		if (!bytes)
+			return -1;
+		total += line_length;
+		if (i < end_line)
+			total++;
+		free(bytes);
+	}
+
+	char *joined = malloc(total + 1);
+	if (!joined)
+		return -1;
+
+	size_t pos = 0;
+	for (int i = start_line; i <= end_line; i++) {
+		size_t line_length;
+		char *bytes = line_to_bytes(&editor.lines[i],
+					    &line_length);
+		if (!bytes) {
+			free(joined);
+			return -1;
+		}
+		memcpy(joined + pos, bytes, line_length);
+		pos += line_length;
+		if (i < end_line)
+			joined[pos++] = '\n';
+		free(bytes);
+	}
+	joined[pos] = '\0';
+
+	clipboard_store(joined, total, 1);
+	clipboard_set_system(joined, total);
+	free(joined);
+	return 0;
 }
 
 void editor_copy(void)
@@ -8476,12 +8546,22 @@ void command_set(const char *args)
 	editor_set_status_message("Unknown setting: %s", args);
 }
 
-/* Opens a search prompt, optionally pre-filled with the given query. */
+/* Opens a search prompt, optionally pre-filled with the given query.
+ * When a query is provided, also triggers the incremental search so
+ * the first match is highlighted immediately. */
 void command_find(const char *args)
 {
 	editor_find_start();
-	if (args[0] != '\0')
+	if (args[0] != '\0') {
 		prompt_set_buffer(args);
+		/* Trigger the find callback to execute the search. Using
+		 * ARROW_RIGHT tells the callback to search forward. */
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(
+				editor.prompt.buffer, ARROW_RIGHT);
+		editor_set_status_message(editor.prompt.format,
+					 editor.prompt.buffer);
+	}
 }
 
 /* Opens the find-and-replace flow. */
@@ -8505,6 +8585,1639 @@ void command_numbers(const char *args)
 	editor_toggle_line_numbers();
 }
 
+/* Parses a single range specifier (a number, '.', '^', or '$')
+ * at *pos in the string. Advances *pos past the consumed characters.
+ * Writes the resolved 0-based line number to *out. Returns 0 on
+ * success, -1 on parse error. */
+static int range_parse_specifier(const char *str, int *pos, int *out)
+{
+	int cursor_line = editor.cursor_y;
+	int last_line = editor.line_count > 0 ? editor.line_count - 1 : 0;
+
+	/* Skip whitespace before the specifier. */
+	while (str[*pos] == ' ')
+		(*pos)++;
+
+	if (str[*pos] == '.') {
+		(*pos)++;
+		*out = cursor_line;
+
+		/* Check for relative offset: .+N or .-N */
+		if (str[*pos] == '+' || str[*pos] == '-') {
+			int sign = (str[*pos] == '+') ? 1 : -1;
+			(*pos)++;
+			if (!isdigit((unsigned char)str[*pos]))
+				return -1;
+			int offset = 0;
+			int digits = 0;
+			while (isdigit((unsigned char)str[*pos])
+			       && digits < RANGE_MAX_DIGITS) {
+				offset = offset * 10
+					 + (str[*pos] - '0');
+				(*pos)++;
+				digits++;
+			}
+			*out = cursor_line + sign * offset;
+		}
+	} else if (str[*pos] == '^') {
+		(*pos)++;
+		*out = 0;
+	} else if (str[*pos] == '$') {
+		(*pos)++;
+		*out = last_line;
+	} else if (isdigit((unsigned char)str[*pos])) {
+		int value = 0;
+		int digits = 0;
+		while (isdigit((unsigned char)str[*pos])
+		       && digits < RANGE_MAX_DIGITS) {
+			value = value * 10 + (str[*pos] - '0');
+			(*pos)++;
+			digits++;
+		}
+		/* Convert 1-based user input to 0-based. */
+		*out = value - 1;
+	} else {
+		return -1;
+	}
+
+	/* Clamp to valid line range. */
+	if (*out < 0)
+		*out = 0;
+	if (*out > last_line)
+		*out = last_line;
+
+	return 0;
+}
+
+/* Parses a range string into start/end line numbers. Handles single
+ * values, dash ranges, plus-offset ranges, and comma-separated
+ * endpoints. Resolves '.', '^', and '$' relative to the current
+ * cursor position and file length. Returns 0 on success, -1 on
+ * parse error. When the input string is NULL or empty, out->is_set
+ * is set to false. */
+int range_parse(const char *str, struct command_range *out)
+{
+	*out = (struct command_range){0};
+
+	if (!str || str[0] == '\0')
+		return 0;
+
+	int pos = 0;
+
+	/* Skip leading whitespace. */
+	while (str[pos] == ' ')
+		pos++;
+
+	if (str[pos] == '\0')
+		return 0;
+
+	/* Parse the first specifier. */
+	int start;
+	if (range_parse_specifier(str, &pos, &start) < 0)
+		return -1;
+
+	/* Skip whitespace after first specifier. */
+	while (str[pos] == ' ')
+		pos++;
+
+	if (str[pos] == '\0') {
+		/* Single line. */
+		out->start = start;
+		out->end = start;
+		out->is_set = 1;
+		return 0;
+	}
+
+	if (str[pos] == '-' || str[pos] == ',') {
+		/* Dash range or comma-separated: start-end or start,end */
+		pos++;
+		int end;
+		if (range_parse_specifier(str, &pos, &end) < 0)
+			return -1;
+		out->start = start < end ? start : end;
+		out->end = start < end ? end : start;
+		out->is_set = 1;
+		return 0;
+	}
+
+	if (str[pos] == '+') {
+		/* Plus-offset: start+N means start through start+N */
+		pos++;
+		if (!isdigit((unsigned char)str[pos]))
+			return -1;
+		int offset = 0;
+		int digits = 0;
+		while (isdigit((unsigned char)str[pos])
+		       && digits < RANGE_MAX_DIGITS) {
+			offset = offset * 10 + (str[pos] - '0');
+			pos++;
+			digits++;
+		}
+		out->start = start;
+		out->end = start + offset;
+		int last_line = editor.line_count > 0
+				? editor.line_count - 1 : 0;
+		if (out->end > last_line)
+			out->end = last_line;
+		out->is_set = 1;
+		return 0;
+	}
+
+	/* Unexpected character after first specifier. */
+	return -1;
+}
+
+/* Resolves the effective line range for a command. If the range was
+ * explicitly set, uses it directly. Otherwise falls back in order:
+ * active selection, then the single fallback_line (usually cursor_y).
+ * Writes the resolved start/end to *start and *end (0-based, inclusive).
+ * Returns 1 if a range was resolved, 0 if the file is empty. */
+int range_resolve(struct command_range *range, int fallback_line, int *start, int *end)
+{
+	if (editor.line_count == 0)
+		return 0;
+
+	if (range->is_set) {
+		*start = range->start;
+		*end = range->end;
+	} else if (editor.selection.active) {
+		int sx, sy, ex, ey;
+		selection_get_range(&sy, &sx, &ey, &ex);
+		*start = sy;
+		*end = ey;
+	} else {
+		*start = fallback_line;
+		*end = fallback_line;
+	}
+
+	/* Clamp. */
+	if (*start < 0)
+		*start = 0;
+	if (*end >= editor.line_count)
+		*end = editor.line_count - 1;
+	if (*start > *end)
+		*start = *end;
+
+	return 1;
+}
+
+/* Finds the start and end cell indices of the word under the cursor.
+ * A "word" is a maximal run of cells sharing the same word_char_class()
+ * value (class 2 = word characters). If the cursor is on whitespace or
+ * punctuation, returns 0. On success, writes the inclusive start and
+ * exclusive end cell indices to *out_start and *out_end. */
+int cursor_get_word_bounds(struct line *line, int cell_index, int *out_start, int *out_end)
+{
+	line_ensure_warm(line);
+
+	if (cell_index >= (int)line->cell_count)
+		return 0;
+
+	int cls = word_char_class(line->cells[cell_index].codepoint);
+	if (cls != 2)
+		return 0;
+
+	/* Scan backward to find the start of the word. */
+	int start = cell_index;
+	while (start > 0
+	       && word_char_class(line->cells[start - 1].codepoint) == cls)
+		start--;
+
+	/* Scan forward to find the end of the word (exclusive). */
+	int end = cell_index + 1;
+	while (end < (int)line->cell_count
+	       && word_char_class(line->cells[end].codepoint) == cls)
+		end++;
+
+	*out_start = start;
+	*out_end = end;
+	return 1;
+}
+
+/* Extracts the word under the cursor as a malloc'd UTF-8 string.
+ * Returns NULL if the cursor is not on a word character. */
+char *cursor_get_word_string(void)
+{
+	if (editor.cursor_y >= editor.line_count)
+		return NULL;
+
+	struct line *line = &editor.lines[editor.cursor_y];
+	int start, end;
+	if (!cursor_get_word_bounds(line, editor.cursor_x, &start, &end))
+		return NULL;
+
+	/* Build a UTF-8 string from cells [start, end). */
+	size_t capacity = (end - start) * 4 + 1;
+	char *result = malloc(capacity);
+	if (!result)
+		return NULL;
+
+	size_t pos = 0;
+	for (int i = start; i < end; i++) {
+		char encoded[4];
+		int byte_count = utf8_encode(
+			line->cells[i].codepoint, encoded);
+		if (byte_count > 0) {
+			memcpy(result + pos, encoded, byte_count);
+			pos += byte_count;
+		}
+	}
+	result[pos] = '\0';
+	return result;
+}
+
+/* Writes the current line number (1-based) or selection range into the
+ * provided buffer. Returns the number of characters written, or 0 if
+ * no auto-population applies. The buffer must be at least
+ * AUTO_POPULATE_BUFFER_SIZE bytes. */
+int command_auto_populate_range(char *buffer)
+{
+	if (editor.selection.active) {
+		int start_y, start_x, end_y, end_x;
+		selection_get_range(&start_y, &start_x, &end_y, &end_x);
+		/* Convert to 1-based for display. */
+		return snprintf(buffer, AUTO_POPULATE_BUFFER_SIZE,
+				"%d-%d", start_y + 1, end_y + 1);
+	}
+
+	if (editor.cursor_y < editor.line_count) {
+		return snprintf(buffer, AUTO_POPULATE_BUFFER_SIZE,
+				"%d", editor.cursor_y + 1);
+	}
+
+	return 0;
+}
+
+/* Centers the viewport on the given 0-based line number and resets
+ * the horizontal scroll. Used by goto and other navigation commands. */
+static void editor_center_on_line(int line_index)
+{
+	editor.cursor_y = line_index;
+	editor.cursor_x = 0;
+
+	int new_row_offset = editor.cursor_y - (editor.screen_rows / 2);
+	if (new_row_offset < 0)
+		new_row_offset = 0;
+	int max_offset = editor.line_count - editor.screen_rows;
+	if (max_offset < 0)
+		max_offset = 0;
+	if (new_row_offset > max_offset)
+		new_row_offset = max_offset;
+	editor.row_offset = new_row_offset;
+	editor.column_offset = 0;
+}
+
+/* Jumps to a line number, or handles special keywords like "top",
+ * "bottom", and "match". Accepts a 1-based line number or range
+ * specifier as the argument. */
+void command_goto(const char *args)
+{
+	if (editor.line_count == 0) {
+		editor_set_status_message("No lines in file");
+		return;
+	}
+
+	if (args[0] == '\0') {
+		editor_set_status_message(
+			"Usage: goto <line|top|bottom|match>");
+		return;
+	}
+
+	if (strcmp(args, "top") == 0) {
+		editor_center_on_line(0);
+		editor_set_status_message("Line 1");
+		return;
+	}
+
+	if (strcmp(args, "bottom") == 0) {
+		editor_center_on_line(editor.line_count - 1);
+		editor_set_status_message("Line %d",
+					  editor.line_count);
+		return;
+	}
+
+	if (strcmp(args, "match") == 0) {
+		editor_jump_to_matching_bracket();
+		return;
+	}
+
+	/* Try parsing as a range specifier (number, ., ^, $). */
+	struct command_range range;
+	if (range_parse(args, &range) < 0 || !range.is_set) {
+		editor_set_status_message("Invalid line: %s", args);
+		return;
+	}
+
+	editor_center_on_line(range.start);
+	editor_set_status_message("Line %d", range.start + 1);
+}
+
+/* Selects the entire file contents from first to last character. */
+void command_select_all(const char *args)
+{
+	(void)args;
+	if (editor.line_count == 0) {
+		editor_set_status_message("No lines to select");
+		return;
+	}
+
+	selection_clear();
+	editor.selection.active = 1;
+	editor.selection.finalized = 0;
+	editor.selection.anchor_y = 0;
+	editor.selection.anchor_x = 0;
+
+	/* Move cursor to end of last line. */
+	int last_line = editor.line_count - 1;
+	struct line *ln = &editor.lines[last_line];
+	line_ensure_warm(ln);
+	editor.cursor_y = last_line;
+	editor.cursor_x = (int)ln->cell_count;
+
+	selection_update();
+	editor_set_status_message("Selected all (%d lines)",
+				  editor.line_count);
+}
+
+/* Selects one or more lines. With no argument, selects the current line.
+ * Accepts a range like "10-20" to select a span of lines. */
+void command_select_line(const char *args)
+{
+	if (editor.line_count == 0) {
+		editor_set_status_message("No lines to select");
+		return;
+	}
+
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	selection_clear();
+	editor.selection.active = 1;
+	editor.selection.finalized = 0;
+	editor.selection.anchor_y = start;
+	editor.selection.anchor_x = 0;
+
+	/* Move cursor to end of the last line in the range. */
+	struct line *ln = &editor.lines[end];
+	line_ensure_warm(ln);
+	editor.cursor_y = end;
+	editor.cursor_x = (int)ln->cell_count;
+
+	selection_update();
+
+	if (start == end)
+		editor_set_status_message("Selected line %d",
+					  start + 1);
+	else
+		editor_set_status_message("Selected lines %d-%d",
+					  start + 1, end + 1);
+}
+
+/* Selects the word under the cursor using word_char_class boundaries. */
+void command_select_word(const char *args)
+{
+	(void)args;
+	if (editor.cursor_y >= editor.line_count) {
+		editor_set_status_message("No word to select");
+		return;
+	}
+
+	struct line *line = &editor.lines[editor.cursor_y];
+	int start, end;
+	if (!cursor_get_word_bounds(line, editor.cursor_x,
+				    &start, &end)) {
+		editor_set_status_message("No word under cursor");
+		return;
+	}
+
+	selection_clear();
+	editor.selection.active = 1;
+	editor.selection.finalized = 0;
+	editor.selection.anchor_y = editor.cursor_y;
+	editor.selection.anchor_x = start;
+	editor.cursor_x = end;
+
+	selection_update();
+	editor_set_status_message("Selected word");
+}
+
+/* Selects from the current bracket to its matching bracket. */
+void command_select_block(const char *args)
+{
+	(void)args;
+	bracket_update_cursor_match();
+	if (editor.bracket_match_line < 0) {
+		editor_set_status_message("No matching bracket");
+		return;
+	}
+
+	int match_line = editor.bracket_match_line;
+	int match_cell = editor.bracket_match_cell;
+
+	selection_clear();
+	editor.selection.active = 1;
+	editor.selection.finalized = 0;
+	editor.selection.anchor_y = editor.cursor_y;
+	editor.selection.anchor_x = editor.cursor_x;
+	editor.cursor_y = match_line;
+	editor.cursor_x = match_cell;
+
+	selection_update();
+	editor_set_status_message("Selected block");
+}
+
+/* Dispatches select subcommands. Handles "all", "line", "word",
+ * and "block". With no argument, selects the current line. */
+void command_select(const char *args)
+{
+	if (args[0] == '\0') {
+		command_select_line("");
+		return;
+	}
+	editor_set_status_message(
+		"Unknown: select %s (try: all, line, word, block)",
+		args);
+}
+
+/* Copies text to the clipboard. If a selection is active and no range
+ * is given, copies the selection. If a range is given, copies those
+ * lines. If neither, copies the current line. */
+void command_copy(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	/* If a selection is active and no explicit range, copy selection. */
+	if (!range.is_set && editor.selection.active) {
+		editor_copy();
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	if (clipboard_copy_lines(start, end) < 0) {
+		editor_set_status_message("Copy failed");
+		return;
+	}
+
+	if (start == end)
+		editor_set_status_message("Copied line %d", start + 1);
+	else
+		editor_set_status_message("Copied lines %d-%d",
+					  start + 1, end + 1);
+}
+
+/* Copies one or more complete lines to the clipboard. Defaults to the
+ * current cursor line when no range is specified. Always operates in
+ * line mode regardless of selection state. */
+void command_copy_line(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	if (clipboard_copy_lines(start, end) < 0) {
+		editor_set_status_message("Copy failed");
+		return;
+	}
+
+	if (start == end)
+		editor_set_status_message("Copied line %d", start + 1);
+	else
+		editor_set_status_message("Copied %d lines",
+					  end - start + 1);
+}
+
+/* Copies the word under the cursor to the clipboard. Shows an error
+ * message if the cursor is not positioned on a word character. */
+void command_copy_word(const char *args)
+{
+	(void)args;
+	char *word = cursor_get_word_string();
+	if (!word) {
+		editor_set_status_message("No word under cursor");
+		return;
+	}
+
+	size_t length = strlen(word);
+	clipboard_store(word, length, 0);
+	clipboard_set_system(word, length);
+	editor_set_status_message("Copied: %s", word);
+	free(word);
+}
+
+/* Copies the entire file content to the clipboard as a single
+ * string. Uses editor_rows_to_string() for efficiency. */
+void command_copy_all(const char *args)
+{
+	(void)args;
+	if (editor.line_count == 0) {
+		editor_set_status_message("File is empty");
+		return;
+	}
+
+	size_t length;
+	char *text = editor_rows_to_string(&length);
+	if (!text) {
+		editor_set_status_message("Copy failed");
+		return;
+	}
+
+	clipboard_store(text, length, 0);
+	clipboard_set_system(text, length);
+	editor_set_status_message("Copied entire file (%zu bytes)",
+				  length);
+	free(text);
+}
+
+/* Copies the current filename to the system clipboard. Shows an error
+ * if no file is open (untitled buffer). */
+void command_copy_path(const char *args)
+{
+	(void)args;
+	if (!editor.filename) {
+		editor_set_status_message("No filename (untitled)");
+		return;
+	}
+
+	size_t length = strlen(editor.filename);
+	clipboard_store(editor.filename, length, 0);
+	clipboard_set_system(editor.filename, length);
+	editor_set_status_message("Copied path: %s", editor.filename);
+}
+
+/* Cuts text to the clipboard. Same resolution as /copy: active
+ * selection, explicit range, or current line. After copying, deletes
+ * the source text. */
+void command_cut(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	/* Active selection, no explicit range: use existing cut. */
+	if (!range.is_set && editor.selection.active) {
+		editor_cut();
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	if (clipboard_copy_lines(start, end) < 0) {
+		editor_set_status_message("Cut failed");
+		return;
+	}
+
+	/* Delete the lines from bottom to top to preserve indices. */
+	editor.force_full_redraw = 1;
+	for (int i = end; i >= start; i--)
+		editor_line_delete(i);
+
+	/* Reposition cursor. */
+	if (editor.cursor_y >= editor.line_count && editor.line_count > 0)
+		editor.cursor_y = editor.line_count - 1;
+	if (editor.cursor_y < start)
+		; /* cursor was above the cut range, unchanged */
+	else
+		editor.cursor_y = start < editor.line_count
+				  ? start : editor.line_count - 1;
+	editor.cursor_x = 0;
+	editor.dirty++;
+
+	int count = end - start + 1;
+	if (count == 1)
+		editor_set_status_message("Cut line %d", start + 1);
+	else
+		editor_set_status_message("Cut %d lines", count);
+}
+
+/* Cuts one or more complete lines. Identical to command_cut() with
+ * range resolution, but always operates in line mode. Defaults to
+ * the current cursor line. */
+void command_cut_line(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	if (clipboard_copy_lines(start, end) < 0) {
+		editor_set_status_message("Cut failed");
+		return;
+	}
+
+	editor.force_full_redraw = 1;
+	for (int i = end; i >= start; i--)
+		editor_line_delete(i);
+
+	if (editor.cursor_y >= editor.line_count && editor.line_count > 0)
+		editor.cursor_y = editor.line_count - 1;
+	editor.cursor_x = 0;
+	editor.dirty++;
+
+	int count = end - start + 1;
+	editor_set_status_message("Cut %d line%s",
+				  count, count == 1 ? "" : "s");
+}
+
+/* Cuts the word under the cursor. Copies it to the clipboard then
+ * deletes the cells from the line. */
+void command_cut_word(const char *args)
+{
+	(void)args;
+	if (editor.cursor_y >= editor.line_count)
+		return;
+
+	struct line *line = &editor.lines[editor.cursor_y];
+	int start, end;
+	if (!cursor_get_word_bounds(line, editor.cursor_x, &start, &end)) {
+		editor_set_status_message("No word under cursor");
+		return;
+	}
+
+	/* Copy the word text first. */
+	char *word = cursor_get_word_string();
+	if (!word)
+		return;
+	size_t length = strlen(word);
+	clipboard_store(word, length, 0);
+	clipboard_set_system(word, length);
+
+	/* Delete cells from end to start. */
+	editor.force_full_redraw = 1;
+	for (int i = end - 1; i >= start; i--)
+		line_delete_cell(line, i);
+	syntax_propagate(editor.cursor_y);
+
+	editor.cursor_x = start;
+	editor.dirty++;
+
+	editor_set_status_message("Cut: %s", word);
+	free(word);
+}
+
+/* Removes trailing whitespace (spaces and tabs) from every line in
+ * the file. Reports the number of lines modified. */
+void command_cut_trailing(const char *args)
+{
+	(void)args;
+	editor.force_full_redraw = 1;
+	int modified_count = 0;
+
+	for (int y = 0; y < editor.line_count; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		int original_count = (int)line->cell_count;
+		while (line->cell_count > 0) {
+			uint32_t last = line->cells[line->cell_count - 1]
+					.codepoint;
+			if (last != ' ' && last != '\t')
+				break;
+			line_delete_cell(line,
+					 (int)line->cell_count - 1);
+		}
+
+		if ((int)line->cell_count < original_count) {
+			modified_count++;
+			syntax_propagate(y);
+		}
+	}
+
+	if (modified_count > 0) {
+		editor.dirty++;
+		/* Clamp cursor if it's now past the end of its line. */
+		if (editor.cursor_y < editor.line_count) {
+			int max_x = (int)editor.lines[editor.cursor_y]
+					.cell_count;
+			if (editor.cursor_x > max_x)
+				editor.cursor_x = max_x;
+		}
+	}
+
+	editor_set_status_message("Trimmed %d line%s",
+				  modified_count,
+				  modified_count == 1 ? "" : "s");
+}
+
+/* Pastes clipboard contents at the current cursor position. Wraps
+ * the existing editor_paste() function. */
+void command_paste(const char *args)
+{
+	(void)args;
+	editor_paste();
+}
+
+/* Pastes clipboard contents as new lines above the current cursor
+ * line. Each clipboard line becomes a new editor line inserted
+ * before the cursor. The cursor moves to the first inserted line. */
+void command_paste_above(const char *args)
+{
+	(void)args;
+	if (editor.clipboard.line_count == 0) {
+		editor_set_status_message("Nothing to paste");
+		return;
+	}
+
+	editor.force_full_redraw = 1;
+	int insert_at = editor.cursor_y;
+
+	for (int i = 0; i < editor.clipboard.line_count; i++) {
+		editor_line_insert(insert_at + i,
+				   editor.clipboard.lines[i],
+				   editor.clipboard.line_lengths[i]);
+	}
+
+	editor.cursor_y = insert_at;
+	editor.cursor_x = 0;
+	editor.dirty++;
+	editor_set_status_message("Pasted %d line%s above",
+				  editor.clipboard.line_count,
+				  editor.clipboard.line_count == 1
+				  ? "" : "s");
+}
+
+/* Pastes clipboard contents as new lines below the current cursor
+ * line. Each clipboard line becomes a new editor line inserted
+ * after the cursor. The cursor moves to the first inserted line. */
+void command_paste_below(const char *args)
+{
+	(void)args;
+	if (editor.clipboard.line_count == 0) {
+		editor_set_status_message("Nothing to paste");
+		return;
+	}
+
+	editor.force_full_redraw = 1;
+	int insert_at = editor.cursor_y + 1;
+
+	for (int i = 0; i < editor.clipboard.line_count; i++) {
+		editor_line_insert(insert_at + i,
+				   editor.clipboard.lines[i],
+				   editor.clipboard.line_lengths[i]);
+	}
+
+	editor.cursor_y = insert_at;
+	editor.cursor_x = 0;
+	editor.dirty++;
+	editor_set_status_message("Pasted %d line%s below",
+				  editor.clipboard.line_count,
+				  editor.clipboard.line_count == 1
+				  ? "" : "s");
+}
+
+/* Duplicates the current selection or current line. If count is given,
+ * repeats the duplication that many times. Defaults to 1. When a
+ * selection is active, duplicates the selected text inline after the
+ * selection end. When no selection, duplicates the current line below. */
+void command_dup(const char *args)
+{
+	int count = 1;
+	if (args && args[0] != '\0') {
+		char *endptr;
+		long value = strtol(args, &endptr, 10);
+		if (*endptr == '\0' && value >= 1 && value <= 1000)
+			count = (int)value;
+	}
+
+	editor.force_full_redraw = 1;
+
+	if (editor.selection.active) {
+		size_t length;
+		char *text = selection_to_string(&length);
+		if (!text)
+			return;
+
+		/* Move cursor to end of selection, then insert. */
+		int sy, sx, ey, ex;
+		selection_get_range(&sy, &sx, &ey, &ex);
+		editor.cursor_y = ey;
+		editor.cursor_x = ex;
+		selection_clear();
+
+		for (int n = 0; n < count; n++) {
+			size_t pos = 0;
+			while (pos < length) {
+				if (text[pos] == '\n') {
+					editor_insert_newline();
+					pos++;
+					continue;
+				}
+				uint32_t codepoint;
+				int consumed = utf8_decode(
+					&text[pos],
+					(int)(length - pos),
+					&codepoint);
+				if (consumed <= 0) {
+					consumed = 1;
+					codepoint = '?';
+				}
+				editor_insert_char((int)codepoint);
+				pos += consumed;
+			}
+		}
+
+		free(text);
+		editor_set_status_message("Duplicated selection %d time%s",
+					  count, count == 1 ? "" : "s");
+	} else {
+		/* Line duplication. */
+		for (int n = 0; n < count; n++) {
+			if (editor.cursor_y >= editor.line_count)
+				break;
+			size_t length;
+			char *bytes = line_to_bytes(
+				&editor.lines[editor.cursor_y], &length);
+			if (!bytes)
+				break;
+			editor_line_insert(editor.cursor_y + 1,
+					   bytes, length);
+			free(bytes);
+			editor.cursor_y++;
+		}
+		editor.dirty++;
+		editor_set_status_message("Duplicated line %d time%s",
+					  count, count == 1 ? "" : "s");
+	}
+}
+
+/* Duplicates the current line count times. Always operates in line
+ * mode regardless of selection state. Defaults to 1 repetition. */
+void command_dup_line(const char *args)
+{
+	int count = 1;
+	if (args && args[0] != '\0') {
+		char *endptr;
+		long value = strtol(args, &endptr, 10);
+		if (*endptr == '\0' && value >= 1 && value <= 1000)
+			count = (int)value;
+	}
+
+	editor.force_full_redraw = 1;
+
+	for (int n = 0; n < count; n++) {
+		if (editor.cursor_y >= editor.line_count)
+			break;
+		size_t length;
+		char *bytes = line_to_bytes(
+			&editor.lines[editor.cursor_y], &length);
+		if (!bytes)
+			break;
+		editor_line_insert(editor.cursor_y + 1, bytes, length);
+		free(bytes);
+		editor.cursor_y++;
+	}
+
+	editor.dirty++;
+	editor_set_status_message("Duplicated line %d time%s",
+				  count, count == 1 ? "" : "s");
+}
+
+/* Generates auto-populated text for the /dup command. Includes the
+ * current line number and default count of 1. */
+int command_auto_populate_dup(char *buffer)
+{
+	if (editor.cursor_y < editor.line_count) {
+		return snprintf(buffer, AUTO_POPULATE_BUFFER_SIZE,
+				"%d 1", editor.cursor_y + 1);
+	}
+	return 0;
+}
+
+/* Converts all alphabetic characters in the affected lines to
+ * uppercase. Operates on each cell's codepoint using toupper()
+ * for ASCII. Non-ASCII codepoints are left unchanged. */
+void command_upper(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+	int changed = 0;
+
+	for (int y = start; y <= end; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		for (uint32_t i = 0; i < line->cell_count; i++) {
+			uint32_t cp = line->cells[i].codepoint;
+			if (cp < 128 && islower((int)cp)) {
+				line->cells[i].codepoint = toupper((int)cp);
+				changed++;
+			}
+		}
+		syntax_propagate(y);
+	}
+
+	if (changed > 0)
+		editor.dirty++;
+	editor_set_status_message("Uppercased %d character%s",
+				  changed, changed == 1 ? "" : "s");
+}
+
+/* Converts all alphabetic characters in the affected lines to
+ * lowercase. Mirror of command_upper() using tolower(). */
+void command_lower(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+	int changed = 0;
+
+	for (int y = start; y <= end; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		for (uint32_t i = 0; i < line->cell_count; i++) {
+			uint32_t cp = line->cells[i].codepoint;
+			if (cp < 128 && isupper((int)cp)) {
+				line->cells[i].codepoint = tolower((int)cp);
+				changed++;
+			}
+		}
+		syntax_propagate(y);
+	}
+
+	if (changed > 0)
+		editor.dirty++;
+	editor_set_status_message("Lowercased %d character%s",
+				  changed, changed == 1 ? "" : "s");
+}
+
+/* Converts text to title case: the first letter of each word is
+ * uppercased, the rest lowercased. Word boundaries are defined by
+ * whitespace and punctuation (word_char_class != 2). */
+void command_title(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+	int changed = 0;
+
+	for (int y = start; y <= end; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		int word_start = 1;
+		for (uint32_t i = 0; i < line->cell_count; i++) {
+			uint32_t cp = line->cells[i].codepoint;
+			int cls = word_char_class(cp);
+
+			if (cls != 2) {
+				word_start = 1;
+				continue;
+			}
+
+			if (cp < 128) {
+				if (word_start && islower((int)cp)) {
+					line->cells[i].codepoint =
+						toupper((int)cp);
+					changed++;
+				} else if (!word_start
+					   && isupper((int)cp)) {
+					line->cells[i].codepoint =
+						tolower((int)cp);
+					changed++;
+				}
+			}
+			word_start = 0;
+		}
+		syntax_propagate(y);
+	}
+
+	if (changed > 0)
+		editor.dirty++;
+	editor_set_status_message("Title-cased %d character%s",
+				  changed, changed == 1 ? "" : "s");
+}
+
+/* Comparison function for qsort: compares two lines by their UTF-8
+ * byte representation. Used by /sort. */
+int sort_compare_lines_ascending(const void *a, const void *b)
+{
+	const struct line *line_a = (const struct line *)a;
+	const struct line *line_b = (const struct line *)b;
+
+	/* Convert both to bytes for comparison. Cast away const because
+	 * line_to_bytes takes non-const (it may warm the line). */
+	size_t length_a, length_b;
+	char *bytes_a = line_to_bytes((struct line *)line_a, &length_a);
+	char *bytes_b = line_to_bytes((struct line *)line_b, &length_b);
+
+	if (!bytes_a || !bytes_b) {
+		free(bytes_a);
+		free(bytes_b);
+		return 0;
+	}
+
+	size_t min_length = length_a < length_b ? length_a : length_b;
+	int result = memcmp(bytes_a, bytes_b, min_length);
+	if (result == 0)
+		result = (length_a > length_b) - (length_a < length_b);
+
+	free(bytes_a);
+	free(bytes_b);
+	return result;
+}
+
+/* Comparison function for qsort: reverse alphabetical order. */
+int sort_compare_lines_descending(const void *a, const void *b)
+{
+	return sort_compare_lines_ascending(b, a);
+}
+
+/* Sorts lines in the given range alphabetically. If the argument
+ * starts with "reverse", sorts in descending order. The remaining
+ * argument text is parsed as a range. */
+void command_sort(const char *args)
+{
+	int reverse = 0;
+	const char *range_str = args;
+
+	/* Check for "reverse" prefix. */
+	if (args && strncmp(args, "reverse", 7) == 0) {
+		reverse = 1;
+		range_str = args + 7;
+		while (*range_str == ' ')
+			range_str++;
+	}
+
+	struct command_range range;
+	if (range_parse(range_str, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", range_str);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	if (start == end) {
+		editor_set_status_message("Need at least 2 lines to sort");
+		return;
+	}
+
+	editor.force_full_redraw = 1;
+
+	/* Warm all lines in the range before sorting. */
+	for (int y = start; y <= end; y++)
+		line_ensure_warm(&editor.lines[y]);
+
+	int count = end - start + 1;
+	qsort(&editor.lines[start], count, sizeof(struct line),
+	      reverse ? sort_compare_lines_descending
+		      : sort_compare_lines_ascending);
+
+	/* Fix line_index fields after reordering. */
+	for (int y = start; y <= end; y++) {
+		editor.lines[y].line_index = y;
+		editor.lines[y].gutter_marker = GUTTER_MODIFIED;
+		syntax_propagate(y);
+	}
+
+	editor.dirty++;
+	editor_set_status_message("Sorted %d lines%s",
+				  count, reverse ? " (reverse)" : "");
+}
+
+/* Wrapper for /sort reverse: prepends "reverse" to the argument so
+ * command_sort sees it and enables descending order. */
+void command_sort_reverse(const char *args)
+{
+	if (args[0] == '\0') {
+		command_sort("reverse");
+		return;
+	}
+	/* Build "reverse <args>" and forward to command_sort. */
+	size_t length = 8 + strlen(args) + 1;
+	char *combined = malloc(length);
+	if (!combined) {
+		command_sort("reverse");
+		return;
+	}
+	snprintf(combined, length, "reverse %s", args);
+	command_sort(combined);
+	free(combined);
+}
+
+/* Removes consecutive duplicate lines in the range. Two lines are
+ * considered duplicates if their byte representations are identical.
+ * Non-consecutive duplicates are preserved (like the Unix uniq command). */
+void command_uniq(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+	int removed = 0;
+
+	int y = start + 1;
+	while (y <= end - removed) {
+		size_t length_prev, length_curr;
+		char *bytes_prev = line_to_bytes(
+			&editor.lines[y - 1], &length_prev);
+		char *bytes_curr = line_to_bytes(
+			&editor.lines[y], &length_curr);
+
+		int is_duplicate = (bytes_prev && bytes_curr
+				    && length_prev == length_curr
+				    && memcmp(bytes_prev, bytes_curr,
+					      length_prev) == 0);
+
+		free(bytes_prev);
+		free(bytes_curr);
+
+		if (is_duplicate) {
+			editor_line_delete(y);
+			removed++;
+		} else {
+			y++;
+		}
+	}
+
+	if (removed > 0)
+		editor.dirty++;
+
+	if (editor.cursor_y >= editor.line_count && editor.line_count > 0)
+		editor.cursor_y = editor.line_count - 1;
+
+	editor_set_status_message("Removed %d duplicate line%s",
+				  removed, removed == 1 ? "" : "s");
+}
+
+/* Strips trailing whitespace (spaces and tabs) from lines in the
+ * range. Functionally identical to /cut trailing but respects the
+ * range argument instead of always operating on the whole file. */
+void command_trim(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+	int modified_count = 0;
+
+	for (int y = start; y <= end; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		int original_count = (int)line->cell_count;
+		while (line->cell_count > 0) {
+			uint32_t last = line->cells[line->cell_count - 1]
+					.codepoint;
+			if (last != ' ' && last != '\t')
+				break;
+			line_delete_cell(line,
+					 (int)line->cell_count - 1);
+		}
+
+		if ((int)line->cell_count < original_count) {
+			modified_count++;
+			syntax_propagate(y);
+		}
+	}
+
+	if (modified_count > 0)
+		editor.dirty++;
+
+	/* Clamp cursor if needed. */
+	if (editor.cursor_y < editor.line_count) {
+		int max_x = (int)editor.lines[editor.cursor_y].cell_count;
+		if (editor.cursor_x > max_x)
+			editor.cursor_x = max_x;
+	}
+
+	editor_set_status_message("Trimmed %d line%s",
+				  modified_count,
+				  modified_count == 1 ? "" : "s");
+}
+
+/* Collapses multiple consecutive blank lines into a single blank
+ * line. A line is considered blank if it has zero cells or contains
+ * only whitespace. */
+void command_collapse(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+	int removed = 0;
+	int in_blank_run = 0;
+
+	int y = start;
+	while (y <= end - removed) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		/* Check if the line is blank (empty or all whitespace). */
+		int is_blank = 1;
+		for (uint32_t i = 0; i < line->cell_count; i++) {
+			uint32_t cp = line->cells[i].codepoint;
+			if (cp != ' ' && cp != '\t') {
+				is_blank = 0;
+				break;
+			}
+		}
+
+		if (is_blank) {
+			if (in_blank_run) {
+				editor_line_delete(y);
+				removed++;
+				continue;
+			}
+			in_blank_run = 1;
+		} else {
+			in_blank_run = 0;
+		}
+		y++;
+	}
+
+	if (removed > 0)
+		editor.dirty++;
+
+	if (editor.cursor_y >= editor.line_count && editor.line_count > 0)
+		editor.cursor_y = editor.line_count - 1;
+
+	editor_set_status_message("Collapsed %d blank line%s",
+				  removed, removed == 1 ? "" : "s");
+}
+
+/* Maximum indentation levels in a single /indent command. */
+#define INDENT_MAX_LEVELS 32
+
+/* Indents lines by inserting count tab characters at the start of
+ * each non-empty line. Defaults to 1 level. Skips empty lines. */
+void command_indent(const char *args)
+{
+	int count = 1;
+
+	/* The argument may be "range count" or just "range" or just
+	 * "count" or empty. We try parsing the range first, then look
+	 * for a trailing count. */
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	/* If a range was parsed, check for a trailing count after it. */
+	if (range.is_set && args) {
+		/* Skip past the range text to find a trailing number. */
+		const char *rest = args;
+		while (*rest && *rest != ' ')
+			rest++;
+		while (*rest == ' ')
+			rest++;
+		if (*rest) {
+			char *endptr;
+			long value = strtol(rest, &endptr, 10);
+			if (*endptr == '\0' && value >= 1
+			    && value <= INDENT_MAX_LEVELS)
+				count = (int)value;
+		}
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+
+	struct cell tab_cell = {
+		.codepoint = '\t',
+		.syntax = HL_NORMAL,
+		.neighbor = 0,
+		.flags = 0,
+		.context = 0,
+	};
+
+	for (int y = start; y <= end; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		if (line->cell_count == 0)
+			continue;
+
+		for (int n = 0; n < count; n++)
+			line_insert_cell(line, 0, tab_cell);
+		syntax_propagate(y);
+	}
+
+	/* Adjust cursor if it's in the indented range. */
+	if (editor.cursor_y >= start && editor.cursor_y <= end)
+		editor.cursor_x += count;
+
+	editor.dirty++;
+	editor_set_status_message("Indented %d line%s by %d level%s",
+				  end - start + 1,
+				  (end - start + 1) == 1 ? "" : "s",
+				  count, count == 1 ? "" : "s");
+}
+
+/* Removes count levels of indentation from lines. Each level removes
+ * one leading tab or up to EDIT_TAB_STOP leading spaces. Defaults to
+ * 1 level. Skips empty lines. */
+void command_outdent(const char *args)
+{
+	int count = 1;
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	/* Check for trailing count (same parsing as /indent). */
+	if (range.is_set && args) {
+		const char *rest = args;
+		while (*rest && *rest != ' ')
+			rest++;
+		while (*rest == ' ')
+			rest++;
+		if (*rest) {
+			char *endptr;
+			long value = strtol(rest, &endptr, 10);
+			if (*endptr == '\0' && value >= 1
+			    && value <= INDENT_MAX_LEVELS)
+				count = (int)value;
+		}
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+	int total_removed = 0;
+
+	for (int y = start; y <= end; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		if (line->cell_count == 0)
+			continue;
+
+		int removed_this_line = 0;
+		for (int n = 0; n < count; n++) {
+			if (line->cell_count == 0)
+				break;
+
+			if (line->cells[0].codepoint == '\t') {
+				line_delete_cell(line, 0);
+				removed_this_line++;
+			} else {
+				/* Remove up to tab_stop leading spaces. */
+				int spaces = 0;
+				while (spaces < editor.tab_stop
+				       && spaces < (int)line->cell_count
+				       && line->cells[spaces].codepoint
+					  == ' ')
+					spaces++;
+				if (spaces == 0)
+					break;
+				for (int s = 0; s < spaces; s++)
+					line_delete_cell(line, 0);
+				removed_this_line += spaces;
+			}
+		}
+
+		if (removed_this_line > 0) {
+			syntax_propagate(y);
+			total_removed += removed_this_line;
+
+			/* Adjust cursor on this line. */
+			if (y == editor.cursor_y) {
+				editor.cursor_x -= removed_this_line;
+				if (editor.cursor_x < 0)
+					editor.cursor_x = 0;
+			}
+		}
+	}
+
+	if (total_removed > 0)
+		editor.dirty++;
+	editor_set_status_message("Outdented %d line%s",
+				  end - start + 1,
+				  (end - start + 1) == 1 ? "" : "s");
+}
+
+/* Toggles line comments on the specified range. If all non-empty lines
+ * in the range already have the comment prefix, removes it. Otherwise
+ * adds it. When no range is given, falls back to the selection or
+ * current line. */
+void command_comment(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	/* If a range was explicitly provided, temporarily set the
+	 * selection to that range, delegate to editor_toggle_comment(),
+	 * then restore. This reuses all existing comment toggle logic. */
+	if (range.is_set) {
+		int had_selection = editor.selection.active;
+		int saved_anchor_y = editor.selection.anchor_y;
+		int saved_anchor_x = editor.selection.anchor_x;
+		int saved_cursor_y = editor.cursor_y;
+		int saved_cursor_x = editor.cursor_x;
+
+		editor.selection.active = 1;
+		editor.selection.anchor_y = range.start;
+		editor.selection.anchor_x = 0;
+		editor.cursor_y = range.end;
+		struct line *end_line = &editor.lines[range.end];
+		line_ensure_warm(end_line);
+		editor.cursor_x = (int)end_line->cell_count;
+
+		editor_toggle_comment();
+
+		/* Restore cursor. Selection was consumed by toggle. */
+		editor.cursor_y = saved_cursor_y;
+		editor.cursor_x = saved_cursor_x;
+		if (had_selection) {
+			editor.selection.active = 1;
+			editor.selection.anchor_y = saved_anchor_y;
+			editor.selection.anchor_x = saved_anchor_x;
+		}
+	} else {
+		/* No explicit range: use existing behavior (selection or
+		 * current line). */
+		editor_toggle_comment();
+	}
+}
+
+/* Prefixes each line in the range with its line number (1-based)
+ * followed by a colon and space. Useful for adding line references
+ * to copied code. */
+void command_number(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	editor.force_full_redraw = 1;
+
+	/* Determine the width needed for the largest line number. */
+	char number_buffer[RANGE_MAX_DIGITS + 4];
+
+	for (int y = start; y <= end; y++) {
+		struct line *line = &editor.lines[y];
+		line_ensure_warm(line);
+
+		int prefix_length = snprintf(number_buffer,
+					     sizeof(number_buffer),
+					     "%d: ", y + 1);
+
+		/* Insert prefix cells at the start of the line. */
+		for (int i = prefix_length - 1; i >= 0; i--) {
+			struct cell c = {
+				.codepoint = (uint32_t)number_buffer[i],
+				.syntax = HL_NORMAL,
+				.neighbor = 0,
+				.flags = 0,
+				.context = 0,
+			};
+			line_insert_cell(line, 0, c);
+		}
+		syntax_propagate(y);
+	}
+
+	/* Adjust cursor if it's in the numbered range. */
+	if (editor.cursor_y >= start && editor.cursor_y <= end) {
+		int prefix_length = snprintf(number_buffer,
+					     sizeof(number_buffer),
+					     "%d: ",
+					     editor.cursor_y + 1);
+		editor.cursor_x += prefix_length;
+	}
+
+	editor.dirty++;
+	editor_set_status_message("Numbered %d line%s",
+				  end - start + 1,
+				  (end - start + 1) == 1 ? "" : "s");
+}
+
+/* Reverses the order of lines in the range. Line 1 becomes the last,
+ * line N becomes the first. */
+void command_reverse(const char *args)
+{
+	struct command_range range;
+	if (range_parse(args, &range) < 0) {
+		editor_set_status_message("Invalid range: %s", args);
+		return;
+	}
+
+	int start, end;
+	if (!range_resolve(&range, editor.cursor_y, &start, &end))
+		return;
+
+	if (start == end) {
+		editor_set_status_message("Need at least 2 lines to reverse");
+		return;
+	}
+
+	editor.force_full_redraw = 1;
+
+	/* Swap lines from outside in. */
+	int low = start;
+	int high = end;
+	while (low < high) {
+		struct line temporary = editor.lines[low];
+		editor.lines[low] = editor.lines[high];
+		editor.lines[high] = temporary;
+		low++;
+		high--;
+	}
+
+	/* Fix line_index fields and mark as modified. */
+	for (int y = start; y <= end; y++) {
+		editor.lines[y].line_index = y;
+		editor.lines[y].gutter_marker = GUTTER_MODIFIED;
+		syntax_propagate(y);
+	}
+
+	editor.dirty++;
+	editor_set_status_message("Reversed %d lines",
+				  end - start + 1);
+}
+
 /* A single entry in the command table mapping a name to its handler. */
 struct command {
 	/* The command name typed by the user (e.g., "save", "quit!"). */
@@ -8518,8 +10231,45 @@ struct command {
 /* Flat table of all recognized commands. Sorted longest-first for
  * multi-word commands so "save as" matches before "save". */
 struct command command_table[] = {
+	/* Phase 2: Navigation and Selection (longest match first) */
+	{"select all", "Select entire file", command_select_all},
+	{"select block", "Select to matching bracket", command_select_block},
+	{"select line", "Select current or given line(s)", command_select_line},
+	{"select word", "Select word under cursor", command_select_word},
+	{"select", "Select current line", command_select},
+	/* Phase 3: Clipboard (longest match first) */
+	{"copy line", "Copy line(s)", command_copy_line},
+	{"copy path", "Copy filename", command_copy_path},
+	{"copy word", "Copy word under cursor", command_copy_word},
+	{"copy all", "Copy entire file", command_copy_all},
+	{"copy", "Copy selection or range", command_copy},
+	{"cut trailing", "Remove trailing whitespace", command_cut_trailing},
+	{"cut line", "Cut line(s)", command_cut_line},
+	{"cut word", "Cut word under cursor", command_cut_word},
+	{"cut", "Cut selection or range", command_cut},
+	{"paste above", "Paste above cursor line", command_paste_above},
+	{"paste below", "Paste below cursor line", command_paste_below},
+	{"paste", "Paste at cursor", command_paste},
+	{"dup line", "Duplicate line N times", command_dup_line},
+	{"dup", "Duplicate selection or line", command_dup},
+	/* Phase 4: Text Transforms (longest match first) */
+	{"sort reverse", "Sort lines descending", command_sort_reverse},
+	{"sort", "Sort lines ascending", command_sort},
+	{"upper", "Uppercase", command_upper},
+	{"lower", "Lowercase", command_lower},
+	{"title", "Title case", command_title},
+	{"trim", "Strip trailing whitespace", command_trim},
+	{"collapse", "Collapse blank lines", command_collapse},
+	{"indent", "Indent lines", command_indent},
+	{"outdent", "Outdent lines", command_outdent},
+	{"comment", "Toggle comments", command_comment},
+	{"number", "Number lines", command_number},
+	{"reverse", "Reverse line order", command_reverse},
+	{"uniq", "Remove duplicate lines", command_uniq},
+	/* Core commands */
 	{"save as", "Save with a new filename", command_save_as},
 	{"save", "Save the current file", command_save},
+	{"goto", "Jump to a line (top, bottom, match)", command_goto},
 	{"quit!", "Quit without saving", command_quit_force},
 	{"quit", "Quit the editor", command_quit},
 	{"undo", "Undo the last change", command_undo},
