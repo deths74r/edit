@@ -157,7 +157,8 @@ struct line {
 
 /* Bit flags stored in struct cell.flags for rendering state. */
 enum cell_flag {
-	CELL_FLAG_SELECTED = (1 << 0)
+	CELL_FLAG_SELECTED = (1 << 0),
+	CELL_FLAG_PREVIEW  = (1 << 1)
 };
 
 /* Tracks the current text selection region. When the selection is
@@ -201,6 +202,41 @@ struct clipboard {
 	int line_count;
 	int is_line_mode;
 };
+
+/* Maximum number of named bookmarks (one per lowercase letter). */
+#define BOOKMARK_MAX 26
+
+/* A named bookmark storing a cursor position in the file. Bookmarks
+ * are identified by a lowercase letter (a-z), mapped to index 0-25. */
+struct bookmark {
+	/* Zero-based line number of the bookmarked position. */
+	int line;
+	/* Zero-based cell index (column) within the line. */
+	int column;
+	/* Whether this bookmark slot holds a valid position. */
+	int active;
+};
+
+/* Snapshot of editor settings that smart argument commands may
+ * temporarily modify during preview. Captured when the smart
+ * argument prompt opens, restored on ESC (revert). */
+struct smart_arg_snapshot {
+	/* Tab display width before preview started. */
+	int tab_stop;
+	/* Ruler column position before preview started. */
+	int ruler_column;
+	/* Theme index before preview started. */
+	int theme_index;
+	/* Cursor line before preview started (for /goto). */
+	int cursor_y;
+	/* Viewport row offset before preview started. */
+	int row_offset;
+	/* Whether a smart argument session is currently active. */
+	int active;
+};
+
+/* Maximum repeat count to prevent accidental runaway loops. */
+#define COMMAND_REPEAT_MAX 10000
 
 /* Maximum size in bytes for OSC 52 clipboard payloads. */
 #define OSC52_MAX_PAYLOAD_BYTES 74994
@@ -444,6 +480,27 @@ struct input_event {
 	int mouse_y;
 };
 
+/* Maximum number of input events that can be recorded in a macro. */
+#define MACRO_MAX_EVENTS 1024
+
+/* Keystroke macro state for recording and playback. Only one macro
+ * can be recorded at a time (no named macro slots in v1). */
+struct macro_state {
+	/* Recorded input events, in order. */
+	struct input_event events[MACRO_MAX_EVENTS];
+	/* Number of events currently stored. */
+	int event_count;
+	/* Whether recording is in progress (1 = recording). */
+	int recording;
+	/* Whether playback is in progress (1 = playing). */
+	int playing;
+	/* Current playback position during replay. */
+	int playback_position;
+	/* Event index when the current "/" prompt session started.
+	 * Used by /record stop to trim prompt keystrokes from the macro. */
+	int prompt_start_index;
+};
+
 /* Buffered input from stdin. Filled with a single non-blocking read()
  * and drained byte-by-byte during key decoding. */
 struct input_buffer {
@@ -670,6 +727,24 @@ struct editor_state {
 	/* File descriptor holding a LOCK_EX flock on the opened file, or
 	 * -1 when no lock is held. Prevents concurrent editing. */
 	int lock_file_descriptor;
+
+	/* --- Phase 5 additions --- */
+
+	/* Range of lines highlighted for command preview (-1 = inactive). */
+	int preview_start_line;
+	/* End of the preview range (-1 = inactive). */
+	int preview_end_line;
+
+	/* Saved state for reverting smart argument previews. */
+	struct smart_arg_snapshot smart_arg;
+
+	/* --- Phase 6 additions --- */
+
+	/* Named bookmarks indexed by letter (0='a', 25='z'). */
+	struct bookmark bookmarks[BOOKMARK_MAX];
+
+	/* Keystroke macro for record/replay. */
+	struct macro_state macro;
 };
 
 /* Global editor state. */
@@ -717,6 +792,12 @@ void editor_check_read_only(void);
 void file_acquire_lock(void);
 void file_release_lock(void);
 static int config_mkdir_parents(const char *path);
+void preview_set_range(int start_line, int end_line);
+void preview_clear(void);
+void smart_arg_begin(void);
+void smart_arg_preview(const char *command, const char *args);
+void smart_arg_revert(void);
+void smart_arg_commit(void);
 
 /*** Filetypes ***/
 
@@ -6645,6 +6726,12 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								append_buffer,
 								editor.theme.line_number);
 						}
+						/* Preview range background tint for
+						 * command preview highlighting. Selection
+						 * wins when both are active. */
+						int previewed = (editor.preview_start_line >= 0
+							&& file_row >= editor.preview_start_line
+							&& file_row <= editor.preview_end_line);
 						/* Selection: compute from range, not cell flags.
 						 * This handles lines that were warmed after the
 						 * selection was made (scrolling into view). */
@@ -6662,6 +6749,15 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 								else if (file_row == sel_ey)
 									selected = ((int)ci < sel_ex);
 							}
+						}
+						/* Apply preview tint when not selected
+						 * and not already match-highlighted. */
+						if (previewed && !selected
+						    && !in_trailing
+						    && hl != HL_MATCH) {
+							append_buffer_write_background(
+								append_buffer,
+								editor.theme.match_background);
 						}
 						if (selected) {
 							append_buffer_write(append_buffer,
@@ -6831,6 +6927,45 @@ void editor_draw_rows(struct append_buffer *append_buffer)
 							editor.theme
 							.background);
 				}
+			}
+
+			/* Empty-line preview indicator: when a line with no
+			 * cells falls within the preview range and was not
+			 * already selection-highlighted, show the tint. */
+			int preview_empty = (ln->cell_count == 0
+				&& editor.preview_start_line >= 0
+				&& file_row >= editor.preview_start_line
+				&& file_row <= editor.preview_end_line);
+			if (preview_empty) {
+				/* Skip if the selection indicator already
+				 * rendered this empty line. */
+				int sel_handled = 0;
+				if (editor.selection.active) {
+					int psy, psx, pey, pex;
+					if (selection_get_range(&psy, &psx,
+							       &pey, &pex)
+					    && file_row >= psy
+					    && file_row <= pey)
+						sel_handled = 1;
+				}
+				preview_empty = !sel_handled;
+			}
+			if (preview_empty) {
+				append_buffer_write_background(
+					append_buffer,
+					editor.theme.match_background);
+				append_buffer_write(append_buffer, " ", 1);
+				/* Re-establish line background. */
+				if (file_row == editor.cursor_y)
+					append_buffer_write_background(
+						append_buffer,
+						editor.theme
+						.highlight_background);
+				else
+					append_buffer_write_background(
+						append_buffer,
+						editor.theme
+						.background);
 			}
 
 			/* Advance to next line or continue wrapping */
@@ -7316,6 +7451,28 @@ void prompt_handle_key(struct input_event event)
 {
 	int key = event.key;
 	int is_search = (editor.prompt.per_key_callback == editor_find_callback);
+
+	/* When smart arguments are active, intercept Up/Down arrows
+	 * and Tab/Shift+Tab before normal prompt handling. The per-key
+	 * callback adjusts the value live. */
+	if (editor.smart_arg.active
+	    && (key == ARROW_UP || key == ARROW_DOWN)) {
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(
+				editor.prompt.buffer, key);
+		editor_set_status_message(editor.prompt.format,
+					  editor.prompt.buffer);
+		return;
+	}
+	if (editor.smart_arg.active
+	    && (key == '\t' || key == SHIFT_TAB)) {
+		if (editor.prompt.per_key_callback)
+			editor.prompt.per_key_callback(
+				editor.prompt.buffer, key);
+		editor_set_status_message(editor.prompt.format,
+					  editor.prompt.buffer);
+		return;
+	}
 
 	/* Ctrl+C cancels the prompt, same as ESC. */
 	if (key == CTRL_KEY('c')) {
@@ -10218,6 +10375,652 @@ void command_reverse(const char *args)
 				  end - start + 1);
 }
 
+/*** Live Preview ***/
+
+/* Clears CELL_FLAG_PREVIEW from all cells that were flagged in the
+ * previous preview_set_range() call. Uses editor.preview_start_line
+ * and editor.preview_end_line to limit the scan. Resets both to -1. */
+void preview_clear(void)
+{
+	if (editor.preview_start_line == -1)
+		return;
+
+	for (int y = editor.preview_start_line;
+	     y <= editor.preview_end_line && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		if (ln->temperature == LINE_COLD)
+			continue;
+		for (uint32_t i = 0; i < ln->cell_count; i++)
+			ln->cells[i].flags &= ~CELL_FLAG_PREVIEW;
+	}
+
+	editor.preview_start_line = -1;
+	editor.preview_end_line = -1;
+	editor.force_full_redraw = 1;
+}
+
+/* Highlights all cells on lines from start_line to end_line (inclusive,
+ * 0-based) with CELL_FLAG_PREVIEW. Clears any previous preview first.
+ * Warms cold lines in the range so they have cells to flag. Scrolls
+ * the viewport to show the start of the previewed range if it is
+ * entirely off-screen. */
+void preview_set_range(int start_line, int end_line)
+{
+	preview_clear();
+
+	/* Clamp to valid range. */
+	if (editor.line_count == 0)
+		return;
+	if (start_line < 0)
+		start_line = 0;
+	if (end_line >= editor.line_count)
+		end_line = editor.line_count - 1;
+	if (start_line > end_line)
+		return;
+
+	for (int y = start_line; y <= end_line; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+		for (uint32_t i = 0; i < ln->cell_count; i++)
+			ln->cells[i].flags |= CELL_FLAG_PREVIEW;
+	}
+
+	editor.preview_start_line = start_line;
+	editor.preview_end_line = end_line;
+
+	/* Scroll viewport to show the preview range if it's off-screen. */
+	if (start_line < editor.row_offset)
+		editor.row_offset = start_line;
+	else if (start_line > editor.row_offset + editor.screen_rows - 1) {
+		int new_offset = start_line - (editor.screen_rows / 2);
+		if (new_offset < 0)
+			new_offset = 0;
+		editor.row_offset = new_offset;
+	}
+
+	editor.force_full_redraw = 1;
+}
+
+/*** Smart Arguments ***/
+
+/* Saves the current values of all smart-argument-sensitive fields
+ * into editor.smart_arg and marks the session as active. */
+void smart_arg_begin(void)
+{
+	editor.smart_arg.tab_stop = editor.tab_stop;
+	editor.smart_arg.ruler_column = editor.ruler_column;
+	editor.smart_arg.theme_index = current_theme_index;
+	editor.smart_arg.cursor_y = editor.cursor_y;
+	editor.smart_arg.row_offset = editor.row_offset;
+	editor.smart_arg.active = 1;
+}
+
+/* Applies the current argument value as a temporary preview. The
+ * command parameter identifies which setting to preview, and args
+ * is the current prompt buffer text. */
+void smart_arg_preview(const char *command, const char *args)
+{
+	if (!editor.smart_arg.active)
+		return;
+
+	if (strncmp(command, "set tabstop", 11) == 0) {
+		int value = atoi(args);
+		if (value >= TAB_STOP_MIN && value <= TAB_STOP_MAX) {
+			editor.tab_stop = value;
+			for (int i = 0; i < editor.line_count; i++)
+				editor.lines[i].cached_render_width = -1;
+			editor.force_full_redraw = 1;
+		}
+	} else if (strncmp(command, "set ruler", 9) == 0) {
+		int value = atoi(args);
+		if (value >= 0 && value <= RULER_COLUMN_MAX) {
+			editor.ruler_column = value;
+			editor.force_full_redraw = 1;
+		}
+	} else if (strncmp(command, "goto", 4) == 0) {
+		struct command_range range;
+		if (range_parse(args, &range) == 0 && range.is_set) {
+			editor_center_on_line(range.start);
+			editor.force_full_redraw = 1;
+		}
+	}
+}
+
+/* Restores all fields from the snapshot and marks the session as
+ * inactive. Called on ESC to discard the preview. */
+void smart_arg_revert(void)
+{
+	if (!editor.smart_arg.active)
+		return;
+
+	/* Revert tab stop if changed. */
+	if (editor.tab_stop != editor.smart_arg.tab_stop) {
+		editor.tab_stop = editor.smart_arg.tab_stop;
+		for (int i = 0; i < editor.line_count; i++)
+			editor.lines[i].cached_render_width = -1;
+	}
+
+	editor.ruler_column = editor.smart_arg.ruler_column;
+
+	/* Revert theme if changed. */
+	if (current_theme_index != editor.smart_arg.theme_index) {
+		current_theme_index = editor.smart_arg.theme_index;
+		editor_set_theme(current_theme_index);
+	}
+
+	/* Revert cursor and viewport for goto. */
+	editor.cursor_y = editor.smart_arg.cursor_y;
+	editor.row_offset = editor.smart_arg.row_offset;
+
+	editor.smart_arg.active = 0;
+	editor.force_full_redraw = 1;
+}
+
+/* Marks the session as inactive without restoring any fields,
+ * accepting the current preview values as permanent. For theme
+ * changes, also persists the selection. */
+void smart_arg_commit(void)
+{
+	if (!editor.smart_arg.active)
+		return;
+
+	/* Persist theme choice if it changed. */
+	if (current_theme_index != editor.smart_arg.theme_index)
+		config_save_theme(editor.theme.name);
+
+	editor.smart_arg.active = 0;
+}
+
+/*** Stats ***/
+
+/* Computes file statistics and displays them in the status message.
+ * Counts lines, words, characters, bytes, and on-disk file size.
+ * Word boundaries are detected by transitions between whitespace
+ * and non-whitespace codepoints. */
+void stats_show(void)
+{
+	int word_count = 0;
+	int char_count = 0;
+	int byte_count = 0;
+
+	for (int y = 0; y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+
+		int in_word = 0;
+		for (uint32_t i = 0; i < ln->cell_count; i++) {
+			uint32_t cp = ln->cells[i].codepoint;
+			char_count++;
+
+			/* Count bytes for this codepoint's UTF-8 encoding. */
+			char encoded[4];
+			int encoded_length = utf8_encode(cp, encoded);
+			if (encoded_length > 0)
+				byte_count += encoded_length;
+
+			/* Word boundary detection. */
+			int is_space = (cp == ' ' || cp == '\t'
+					|| cp == '\r' || cp == '\n');
+			if (!is_space && !in_word) {
+				word_count++;
+				in_word = 1;
+			} else if (is_space) {
+				in_word = 0;
+			}
+		}
+		/* Count the newline byte between lines. */
+		if (y < editor.line_count - 1)
+			byte_count++;
+	}
+
+	if (editor.filename) {
+		struct stat file_stat;
+		if (stat(editor.filename, &file_stat) == 0) {
+			double size_kb = (double)file_stat.st_size / 1024.0;
+			editor_set_status_message(
+				"%d lines, %d words, %d chars, "
+				"%d bytes, %.1f KB on disk",
+				editor.line_count, word_count,
+				char_count, byte_count, size_kb);
+			return;
+		}
+	}
+
+	editor_set_status_message(
+		"%d lines, %d words, %d chars, %d bytes",
+		editor.line_count, word_count, char_count, byte_count);
+}
+
+/* Counts all occurrences of the given text across the entire buffer
+ * and displays the result in the status message. */
+void stats_count_occurrences(const char *text)
+{
+	if (!text || text[0] == '\0') {
+		editor_set_status_message("Usage: count <text>");
+		return;
+	}
+
+	int total = 0;
+	size_t query_length = strlen(text);
+	int case_flag = editor.search_case_insensitive;
+
+	for (int y = 0; y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+
+		/* Convert line to bytes for searching. */
+		size_t line_byte_length;
+		char *line_bytes = line_to_bytes(ln, &line_byte_length);
+		if (!line_bytes)
+			continue;
+
+		/* Count all non-overlapping matches on this line. */
+		int start_byte = 0;
+		while (start_byte < (int)line_byte_length) {
+			size_t match_length;
+			char *match = editor_find_on_line(
+				line_bytes, line_byte_length,
+				text, query_length,
+				1, start_byte, case_flag,
+				&match_length);
+			if (!match)
+				break;
+			total++;
+			start_byte = (int)(match - line_bytes)
+				     + (int)match_length;
+			if ((int)match_length == 0)
+				start_byte++;
+		}
+		free(line_bytes);
+	}
+
+	editor_set_status_message("%d occurrence%s of \"%s\"",
+				  total, total == 1 ? "" : "s", text);
+}
+
+/* Displays detailed cursor position: line number, column, byte
+ * offset from the start of the file, and character offset. */
+void stats_show_position(void)
+{
+	int byte_offset = 0;
+	int char_offset = 0;
+
+	for (int y = 0; y < editor.cursor_y && y < editor.line_count; y++) {
+		struct line *ln = &editor.lines[y];
+		line_ensure_warm(ln);
+		for (uint32_t i = 0; i < ln->cell_count; i++) {
+			char encoded[4];
+			int encoded_length = utf8_encode(
+				ln->cells[i].codepoint, encoded);
+			if (encoded_length > 0)
+				byte_offset += encoded_length;
+		}
+		/* Count the newline byte. */
+		byte_offset++;
+		char_offset += (int)ln->cell_count + 1;
+	}
+
+	/* Add the current line up to the cursor. */
+	if (editor.cursor_y < editor.line_count) {
+		struct line *ln = &editor.lines[editor.cursor_y];
+		line_ensure_warm(ln);
+		int limit = editor.cursor_x;
+		if (limit > (int)ln->cell_count)
+			limit = (int)ln->cell_count;
+		for (int i = 0; i < limit; i++) {
+			char encoded[4];
+			int encoded_length = utf8_encode(
+				ln->cells[i].codepoint, encoded);
+			if (encoded_length > 0)
+				byte_offset += encoded_length;
+		}
+		char_offset += limit;
+	}
+
+	editor_set_status_message("Line %d, Col %d, Byte %d, Char %d",
+				  editor.cursor_y + 1,
+				  editor.cursor_x + 1,
+				  byte_offset, char_offset);
+}
+
+/* Stats command handler for the command table. */
+void command_stats(const char *args)
+{
+	(void)args;
+	stats_show();
+}
+
+/* Count command handler for the command table. */
+void command_count(const char *args)
+{
+	stats_count_occurrences(args);
+}
+
+/* Position command handler for the command table. */
+void command_pos(const char *args)
+{
+	(void)args;
+	stats_show_position();
+}
+
+/*** Bookmarks ***/
+
+/* Sets the bookmark identified by the given single-letter name to
+ * the current cursor position. The name must be a lowercase letter
+ * a-z. Shows a confirmation in the status message. */
+void bookmark_set(char name)
+{
+	if (name < 'a' || name > 'z') {
+		editor_set_status_message(
+			"Bookmark name must be a-z");
+		return;
+	}
+
+	int index = name - 'a';
+	editor.bookmarks[index].line = editor.cursor_y;
+	editor.bookmarks[index].column = editor.cursor_x;
+	editor.bookmarks[index].active = 1;
+	editor_set_status_message("Bookmark '%c' set at line %d",
+				  name, editor.cursor_y + 1);
+}
+
+/* Moves the cursor to the position saved in the named bookmark.
+ * Clamps to valid positions if the file has changed since the
+ * bookmark was set. Shows an error if the bookmark is not set. */
+void bookmark_jump(char name)
+{
+	if (name < 'a' || name > 'z') {
+		editor_set_status_message(
+			"Bookmark name must be a-z");
+		return;
+	}
+
+	int index = name - 'a';
+	if (!editor.bookmarks[index].active) {
+		editor_set_status_message("Bookmark '%c' not set",
+					  name);
+		return;
+	}
+
+	int target_line = editor.bookmarks[index].line;
+	int target_col = editor.bookmarks[index].column;
+
+	/* Clamp to valid range. */
+	if (target_line >= editor.line_count)
+		target_line = editor.line_count > 0
+			      ? editor.line_count - 1 : 0;
+
+	struct line *ln = &editor.lines[target_line];
+	line_ensure_warm(ln);
+	if (target_col > (int)ln->cell_count)
+		target_col = (int)ln->cell_count;
+
+	editor_center_on_line(target_line);
+	editor.cursor_x = target_col;
+	editor_set_status_message("Jumped to bookmark '%c'", name);
+}
+
+/* Lists all active bookmarks in the status message. Each entry
+ * shows the letter, line number (1-based), and column (1-based). */
+void bookmark_list(void)
+{
+	char message[STATUS_MESSAGE_SIZE];
+	int pos = 0;
+	int count = 0;
+
+	pos += snprintf(message + pos,
+			(size_t)(STATUS_MESSAGE_SIZE - pos),
+			"Bookmarks: ");
+
+	for (int i = 0; i < BOOKMARK_MAX; i++) {
+		if (!editor.bookmarks[i].active)
+			continue;
+
+		int needed = snprintf(NULL, 0, "%c:%d:%d ",
+				      'a' + i,
+				      editor.bookmarks[i].line + 1,
+				      editor.bookmarks[i].column + 1);
+		if (pos + needed >= STATUS_MESSAGE_SIZE - 4) {
+			snprintf(message + pos,
+				 (size_t)(STATUS_MESSAGE_SIZE - pos),
+				 "...");
+			break;
+		}
+
+		pos += snprintf(message + pos,
+				(size_t)(STATUS_MESSAGE_SIZE - pos),
+				"%c:%d:%d ",
+				'a' + i,
+				editor.bookmarks[i].line + 1,
+				editor.bookmarks[i].column + 1);
+		count++;
+	}
+
+	if (count == 0)
+		editor_set_status_message("No bookmarks set");
+	else
+		editor_set_status_message("%s", message);
+}
+
+/* Clears all bookmark slots by setting active to 0. */
+void bookmark_clear_all(void)
+{
+	memset(editor.bookmarks, 0, sizeof(editor.bookmarks));
+	editor_set_status_message("All bookmarks cleared");
+}
+
+/* Command handler for /mark. Handles "clear" to clear all bookmarks,
+ * or a single letter to set a bookmark. */
+void command_mark(const char *args)
+{
+	if (args[0] == '\0') {
+		editor_set_status_message(
+			"Usage: mark <a-z|clear>");
+		return;
+	}
+
+	if (strcmp(args, "clear") == 0) {
+		bookmark_clear_all();
+		return;
+	}
+
+	if (args[0] >= 'a' && args[0] <= 'z'
+	    && (args[1] == '\0' || args[1] == ' ')) {
+		bookmark_set(args[0]);
+		return;
+	}
+
+	editor_set_status_message("Invalid bookmark name: %s", args);
+}
+
+/* Command handler for /jump. Jumps to the named bookmark. */
+void command_jump(const char *args)
+{
+	if (args[0] == '\0') {
+		editor_set_status_message("Usage: jump <a-z>");
+		return;
+	}
+
+	if (args[0] >= 'a' && args[0] <= 'z'
+	    && (args[1] == '\0' || args[1] == ' ')) {
+		bookmark_jump(args[0]);
+		return;
+	}
+
+	editor_set_status_message("Invalid bookmark name: %s", args);
+}
+
+/* Command handler for /marks. Lists all bookmarks. */
+void command_marks(const char *args)
+{
+	(void)args;
+	bookmark_list();
+}
+
+/* Command handler for /mark clear. Clears all bookmarks. */
+void command_marks_clear(const char *args)
+{
+	(void)args;
+	bookmark_clear_all();
+}
+
+/*** Macros ***/
+
+/* Begins recording input events into the macro buffer. Clears any
+ * previously recorded macro. Shows an error if already recording. */
+void macro_record_start(void)
+{
+	if (editor.macro.recording) {
+		editor_set_status_message("Already recording");
+		return;
+	}
+	editor.macro.event_count = 0;
+	editor.macro.recording = 1;
+	editor_set_status_message(
+		"Recording... (/record stop to finish)");
+}
+
+/* Stops recording input events. Shows the count of recorded events.
+ * Shows an error if not currently recording. */
+void macro_record_stop(void)
+{
+	if (!editor.macro.recording) {
+		editor_set_status_message("Not recording");
+		return;
+	}
+
+	/* Trim the keystrokes from the /record stop prompt session. */
+	if (editor.macro.prompt_start_index >= 0
+	    && editor.macro.prompt_start_index
+	       <= editor.macro.event_count) {
+		editor.macro.event_count =
+			editor.macro.prompt_start_index;
+	}
+
+	editor.macro.recording = 0;
+	editor_set_status_message("Recorded %d keystrokes",
+				  editor.macro.event_count);
+}
+
+/* Replays the recorded macro the given number of times. If count
+ * is 0 or negative, defaults to 1. Shows an error if no macro
+ * has been recorded. */
+void macro_play(int count)
+{
+	if (editor.macro.event_count == 0) {
+		editor_set_status_message("No macro recorded");
+		return;
+	}
+	if (editor.macro.playing) {
+		editor_set_status_message("Already playing");
+		return;
+	}
+	if (count < 1)
+		count = 1;
+
+	editor.macro.playing = 1;
+
+	for (int iteration = 0; iteration < count; iteration++) {
+		for (int i = 0; i < editor.macro.event_count; i++) {
+			struct input_event event =
+				editor.macro.events[i];
+			switch (editor.mode) {
+			case MODE_NORMAL:
+				editor_process_keypress(event);
+				break;
+			case MODE_PROMPT:
+				prompt_handle_key(event);
+				break;
+			case MODE_CONFIRM:
+				editor_handle_confirm(event);
+				break;
+			}
+			editor_refresh_screen();
+		}
+	}
+
+	editor.macro.playing = 0;
+	editor_set_status_message("Macro played %d time%s",
+				  count, count == 1 ? "" : "s");
+}
+
+/* Command handler for /record subcommands. */
+void command_record(const char *args)
+{
+	if (strcmp(args, "start") == 0) {
+		macro_record_start();
+		return;
+	}
+	if (strcmp(args, "stop") == 0) {
+		macro_record_stop();
+		return;
+	}
+	if (strncmp(args, "play", 4) == 0) {
+		int count = 1;
+		const char *rest = args + 4;
+		while (*rest == ' ')
+			rest++;
+		if (*rest != '\0') {
+			char *endptr;
+			long value = strtol(rest, &endptr, 10);
+			if (*endptr == '\0' || *endptr == ' ')
+				count = (int)value;
+		}
+		if (count < 1)
+			count = 1;
+		macro_play(count);
+		return;
+	}
+	editor_set_status_message(
+		"Usage: record <start|stop|play [N]>");
+}
+
+/*** Repeat Prefix ***/
+
+/* Parses a repeat prefix from the command string. If the first
+ * whitespace-delimited token is a positive integer, stores it in
+ * *repeat_count and returns a pointer to the rest of the command
+ * string (after the number and any whitespace). If no numeric
+ * prefix is found, sets *repeat_count to 1 and returns the
+ * original string unchanged. */
+const char *command_parse_repeat(const char *input, int *repeat_count)
+{
+	*repeat_count = 1;
+
+	/* Skip leading whitespace. */
+	const char *pos = input;
+	while (*pos == ' ')
+		pos++;
+
+	/* Check if the first character is a digit. */
+	if (!isdigit((unsigned char)*pos))
+		return input;
+
+	/* Parse the integer. */
+	char *endptr;
+	long value = strtol(pos, &endptr, 10);
+
+	/* The integer must be followed by whitespace (standalone token)
+	 * to be treated as a repeat prefix, not part of a command name. */
+	if (*endptr != ' ' && *endptr != '\0')
+		return input;
+
+	/* Clamp to valid range. */
+	if (value < 1)
+		value = 1;
+	if (value > COMMAND_REPEAT_MAX)
+		value = COMMAND_REPEAT_MAX;
+
+	*repeat_count = (int)value;
+
+	/* Skip past trailing whitespace after the number. */
+	const char *rest = endptr;
+	while (*rest == ' ')
+		rest++;
+
+	return rest;
+}
+
 /* A single entry in the command table mapping a name to its handler. */
 struct command {
 	/* The command name typed by the user (e.g., "save", "quit!"). */
@@ -10266,6 +11069,15 @@ struct command command_table[] = {
 	{"number", "Number lines", command_number},
 	{"reverse", "Reverse line order", command_reverse},
 	{"uniq", "Remove duplicate lines", command_uniq},
+	/* Phase 5 & 6: Advanced features (longest match first) */
+	{"record", "Macro record/play (start|stop|play)", command_record},
+	{"mark clear", "Clear all bookmarks", command_marks_clear},
+	{"marks", "List all bookmarks", command_marks},
+	{"mark", "Set bookmark at cursor", command_mark},
+	{"jump", "Jump to bookmark", command_jump},
+	{"stats", "Show file statistics", command_stats},
+	{"count", "Count occurrences of text", command_count},
+	{"pos", "Show cursor position info", command_pos},
 	/* Core commands */
 	{"save as", "Save with a new filename", command_save_as},
 	{"save", "Save the current file", command_save},
@@ -10306,26 +11118,58 @@ int command_dispatch(const char *input)
 	if (length == 0)
 		return 0;
 
+	/* Check for a repeat prefix (leading number). */
+	int repeat_count;
+	const char *remaining = command_parse_repeat(input, &repeat_count);
+
+	/* If only a number was given with no command after it, error. */
+	if (repeat_count > 1 && (*remaining == '\0')) {
+		editor_set_status_message(
+			"No command after repeat count");
+		return 1;
+	}
+
+	/* Use remaining (after repeat prefix) for command lookup. */
+	const char *cmd_input = remaining;
+	size_t cmd_length = strlen(cmd_input);
+	while (cmd_length > 0 && (cmd_input[cmd_length - 1] == ' '
+				  || cmd_input[cmd_length - 1] == '\t'))
+		cmd_length--;
+
+	if (cmd_length == 0)
+		return 0;
+
 	/* Try each command entry. The table is ordered with multi-word
 	 * commands first, so "save as" is tried before "save". */
 	for (int i = 0; i < COMMAND_TABLE_SIZE; i++) {
 		size_t name_length = strlen(command_table[i].name);
-		if (length < name_length)
+		if (cmd_length < name_length)
 			continue;
-		if (strncmp(input, command_table[i].name, name_length) != 0)
+		if (strncmp(cmd_input, command_table[i].name,
+			    name_length) != 0)
 			continue;
 
 		/* After the command name there must be end-of-input,
 		 * a space (args follow), or exact length match. */
-		if (length == name_length) {
-			command_table[i].handler("");
+		if (cmd_length == name_length) {
+			for (int r = 0; r < repeat_count; r++)
+				command_table[i].handler("");
+			if (repeat_count > 1)
+				editor_set_status_message(
+					"Repeated %d times",
+					repeat_count);
 			return 1;
 		}
-		if (input[name_length] == ' ') {
-			const char *args = input + name_length + 1;
+		if (cmd_input[name_length] == ' ') {
+			const char *args = cmd_input + name_length + 1;
 			while (*args == ' ')
 				args++;
-			command_table[i].handler(args);
+			for (int r = 0; r < repeat_count; r++)
+				command_table[i].handler(args);
+			if (repeat_count > 1)
+				editor_set_status_message(
+					"Repeated %d times",
+					repeat_count);
 			return 1;
 		}
 	}
@@ -10375,6 +11219,12 @@ void command_prompt_accept(char *input)
 	/* Clear the saved theme — user committed the choice */
 	command_saved_theme_index = -1;
 
+	/* Clear any live preview highlighting. */
+	preview_clear();
+
+	/* Commit smart arg session (accept the previewed values). */
+	smart_arg_commit();
+
 	if (command_dispatch(input)) {
 		free(input);
 		return;
@@ -10403,6 +11253,12 @@ void command_prompt_accept(char *input)
  * any live preview (e.g., theme cycling). */
 void command_prompt_cancel(void)
 {
+	/* Clear any live preview highlighting. */
+	preview_clear();
+
+	/* Revert smart arg session (restore original values). */
+	smart_arg_revert();
+
 	/* Revert theme if we were cycling through themes */
 	if (command_saved_theme_index >= 0) {
 		current_theme_index = command_saved_theme_index;
@@ -10417,8 +11273,109 @@ void command_prompt_cancel(void)
 
 /* Per-key callback for the command prompt. Handles Tab for command name
  * and argument completion, and resets cycling on other keys. */
+/* Detects whether the current buffer is a smart-arg-capable command
+ * and returns a pointer to the command prefix, or NULL. Also writes
+ * the numeric argument portion to *arg_value if found. */
+static const char *smart_arg_detect_command(const char *buffer, int *arg_value)
+{
+	*arg_value = 0;
+	if (strncmp(buffer, "set tabstop ", 12) == 0) {
+		*arg_value = atoi(buffer + 12);
+		return "set tabstop";
+	}
+	if (strncmp(buffer, "set ruler ", 10) == 0) {
+		*arg_value = atoi(buffer + 10);
+		return "set ruler";
+	}
+	if (strncmp(buffer, "goto ", 5) == 0) {
+		*arg_value = atoi(buffer + 5);
+		return "goto";
+	}
+	if (strcmp(buffer, "set tabstop") == 0) return "set tabstop";
+	if (strcmp(buffer, "set ruler") == 0) return "set ruler";
+	if (strcmp(buffer, "goto") == 0) return "goto";
+	return NULL;
+}
+
+/* Updates the numeric value in the prompt buffer for smart arg
+ * Up/Down arrow adjustment. Finds the last space-separated token
+ * and replaces it with the new value. */
+static void smart_arg_update_buffer(const char *prefix, int new_value)
+{
+	char new_buffer[COMMAND_INPUT_MAX];
+	snprintf(new_buffer, sizeof(new_buffer), "%s %d",
+		 prefix, new_value);
+	prompt_set_buffer(new_buffer);
+}
+
 void command_prompt_per_key(char *buffer, int key)
 {
+	/* Handle smart arg Up/Down arrow adjustment. */
+	if (editor.smart_arg.active
+	    && (key == ARROW_UP || key == ARROW_DOWN)) {
+		int arg_value;
+		const char *command = smart_arg_detect_command(
+			buffer, &arg_value);
+		if (command) {
+			int delta = (key == ARROW_UP) ? 1 : -1;
+			arg_value += delta;
+
+			if (strcmp(command, "set tabstop") == 0) {
+				if (arg_value < TAB_STOP_MIN)
+					arg_value = TAB_STOP_MIN;
+				if (arg_value > TAB_STOP_MAX)
+					arg_value = TAB_STOP_MAX;
+			} else if (strcmp(command, "set ruler") == 0) {
+				if (arg_value < 0)
+					arg_value = 0;
+				if (arg_value > RULER_COLUMN_MAX)
+					arg_value = RULER_COLUMN_MAX;
+			} else if (strcmp(command, "goto") == 0) {
+				if (arg_value < 1)
+					arg_value = 1;
+				if (arg_value > editor.line_count)
+					arg_value = editor.line_count;
+			}
+
+			smart_arg_update_buffer(command, arg_value);
+			/* Apply live preview. Figure out the args portion. */
+			char value_str[16];
+			snprintf(value_str, sizeof(value_str),
+				 "%d", arg_value);
+			smart_arg_preview(command, value_str);
+			editor_set_status_message("> %s",
+						  editor.prompt.buffer);
+		}
+		return;
+	}
+
+	/* Handle Tab/Shift+Tab for theme cycling during smart arg. */
+	if (editor.smart_arg.active
+	    && (key == '\t' || key == SHIFT_TAB)) {
+		if (strncmp(buffer, "theme", 5) == 0) {
+			int theme_count = THEME_COUNT;
+			if (key == '\t') {
+				current_theme_index =
+					(current_theme_index + 1)
+					% theme_count;
+			} else {
+				current_theme_index =
+					(current_theme_index
+					 - 1 + theme_count)
+					% theme_count;
+			}
+			editor_set_theme(current_theme_index);
+			char theme_cmd[COMMAND_INPUT_MAX];
+			snprintf(theme_cmd, sizeof(theme_cmd),
+				 "theme %s",
+				 editor_themes[current_theme_index].name);
+			prompt_set_buffer(theme_cmd);
+			editor_set_status_message("> %s", theme_cmd);
+			editor.force_full_redraw = 1;
+		}
+		return;
+	}
+
 	if (key == '\t') {
 		/* Save the original prefix on the first Tab press. */
 		if (command_completion_index == -1)
@@ -10467,6 +11424,43 @@ void command_prompt_per_key(char *buffer, int key)
 
 	/* Reset completion on any non-Tab key. */
 	command_completion_index = -1;
+
+	/* Start smart arg session when a smart-arg command is detected. */
+	if (!editor.smart_arg.active) {
+		int arg_value;
+		const char *cmd = smart_arg_detect_command(
+			buffer, &arg_value);
+		if (cmd) {
+			smart_arg_begin();
+		} else if (strncmp(buffer, "theme", 5) == 0) {
+			smart_arg_begin();
+		}
+	}
+
+	/* Live preview: if a smart arg session is active, apply the
+	 * current buffer value as a temporary preview. */
+	if (editor.smart_arg.active) {
+		int arg_value;
+		const char *cmd = smart_arg_detect_command(
+			buffer, &arg_value);
+		if (cmd && arg_value != 0) {
+			char value_str[16];
+			snprintf(value_str, sizeof(value_str),
+				 "%d", arg_value);
+			smart_arg_preview(cmd, value_str);
+		}
+	}
+
+	/* Live preview: try to parse a range from the buffer and
+	 * highlight the affected lines. */
+	preview_clear();
+	if (buffer[0] != '\0') {
+		/* Try parsing a leading range from the buffer. */
+		struct command_range range;
+		if (range_parse(buffer, &range) == 0 && range.is_set)
+			preview_set_range(range.start, range.end);
+	}
+
 	editor_set_status_message("> %s", buffer);
 }
 
@@ -10475,6 +11469,13 @@ void command_prompt_per_key(char *buffer, int key)
 void command_prompt_open(void)
 {
 	command_completion_index = -1;
+
+	/* Save the current macro event count so /record stop can trim
+	 * the prompt keystrokes from the recording buffer. */
+	if (editor.macro.recording)
+		editor.macro.prompt_start_index =
+			editor.macro.event_count;
+
 	prompt_open("> %s", command_prompt_per_key,
 		    command_prompt_accept, command_prompt_cancel);
 }
@@ -10604,6 +11605,15 @@ void editor_init(void)
 	editor.file_inode = 0;
 	editor.read_only = 0;
 	editor.lock_file_descriptor = -1;
+
+	/* Phase 5: Live preview and smart arguments. */
+	editor.preview_start_line = -1;
+	editor.preview_end_line = -1;
+	editor.smart_arg = (struct smart_arg_snapshot){0};
+
+	/* Phase 6: Bookmarks and macros. */
+	memset(editor.bookmarks, 0, sizeof(editor.bookmarks));
+	editor.macro = (struct macro_state){0};
 }
 
 /* Reads all data from stdin into a malloc'd buffer. Used when stdin is
@@ -10768,6 +11778,23 @@ int main(int argc, char *argv[])
 
 		struct input_event event;
 		while ((event = terminal_decode_key()).key != -1) {
+			/* Record events for macro playback. Events during
+			 * playback are not re-recorded. */
+			if (editor.macro.recording
+			    && !editor.macro.playing) {
+				if (editor.macro.event_count
+				    < MACRO_MAX_EVENTS) {
+					editor.macro.events[
+						editor.macro.event_count++
+					] = event;
+				} else {
+					editor.macro.recording = 0;
+					editor_set_status_message(
+						"Macro buffer full, "
+						"recording stopped");
+				}
+			}
+
 			switch (editor.mode) {
 			case MODE_NORMAL:
 				editor_process_keypress(event);
