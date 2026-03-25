@@ -12,7 +12,7 @@
  *    Don't worry about saving -- you can always revert with:
  *        git checkout test_features.c
  *
- *    There are 40 lessons covering every feature from v0.2.0 through v1.0.0.
+ *    There are 40 lessons covering every feature of the editor.
  *    Take your time. The cursor position, line number, and percentage are
  *    always visible in the status bar at the bottom of the screen.
  *
@@ -21,7 +21,38 @@
 
 
 /* ===========================================================================
- * LESSON 1: Basic Navigation
+ *
+ *    BASICS (Lessons 1-5)
+ *
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 1: Opening the Command Prompt
+ *
+ * The editor has a command prompt for executing commands by name.
+ * There are two ways to open it:
+ *
+ * 1. Press ESC (when no selection is active and help is not showing).
+ *    EXPECT: The message bar shows "> " and waits for your command.
+ *
+ * 2. Press Ctrl+Space (works in any context, always).
+ *    EXPECT: Same "> " prompt appears.
+ *
+ * 3. To close the prompt without doing anything, press ESC again.
+ *    EXPECT: Prompt disappears, back to normal editing.
+ *
+ * 4. Ctrl+C also cancels the prompt, just like ESC.
+ *
+ * Try both methods now. Open the prompt, then close it with ESC.
+ * You will use the command prompt throughout this tutorial.
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 2: Basic Navigation
  *
  * Let's start with the fundamentals of moving around.
  *
@@ -40,45 +71,16 @@
  * 5. Press Page Up.
  *    EXPECT: The viewport scrolls back up by one screenful.
  *
- * 6. Press Alt+G (or Ctrl+G). Type "1" and press Enter.
+ * 6. Press Ctrl+G. Type "1" and press Enter.
  *    EXPECT: The cursor jumps to the very first line of this file.
  *
- * 7. Press Alt+G again. Type "100" and press Enter.
+ * 7. Press Ctrl+G again. Type "100" and press Enter.
  *    EXPECT: The cursor jumps to line 100.
- *
- * Good work! You can also use Alt+H/J/K/L for vim-style movement.
  * ===========================================================================
  */
 
 >>> Navigate to the start and end of this line using Home and End.
->>> Then try Alt+G to jump to a specific line number.
-
-
-/* ===========================================================================
- * LESSON 2: Mouse Navigation
- *
- * Your mouse works too! The editor supports SGR mouse reporting.
- *
- * 1. Click anywhere on the >>> line below.
- *    EXPECT: The cursor jumps to exactly where you clicked.
- *
- * 2. Click on different lines and columns.
- *    EXPECT: The cursor follows your clicks precisely.
- *
- * 3. Use the scroll wheel to scroll up and down.
- *    EXPECT: The viewport scrolls. Try scrolling fast --
- *    the scroll speed accelerates when you scroll quickly
- *    and decelerates when you slow down.
- *
- * Scroll speed ramps from 1 line up to 10 lines per tick based on
- * how fast you're scrolling. Events within 50ms go faster; events
- * more than 200ms apart reset to speed 1.
- * ===========================================================================
- */
-
->>> Click here with your mouse to position the cursor.
->>> Try clicking at different positions on this line too.
->>> Now scroll up and down with the scroll wheel. Try fast and slow.
+>>> Then try Ctrl+G to jump to a specific line number.
 
 
 /* ===========================================================================
@@ -98,6 +100,7 @@
  *
  * 4. Place cursor in the middle of the second >>> line and press Enter.
  *    EXPECT: The line splits in two at the cursor position.
+ *    The new line inherits the indentation of the original (auto-indent).
  *
  * 5. Press Backspace at column 0 of the new second half.
  *    EXPECT: The two lines rejoin into one.
@@ -109,133 +112,225 @@
 
 
 /* ===========================================================================
- * LESSON 4: Auto-Indent
+ * LESSON 4: Undo / Redo
  *
- * When you press Enter, the new line inherits the leading whitespace
- * from the current line. This keeps your code properly indented.
+ * The undo system uses 256 groups with time-based coalescing.
+ * Characters typed quickly together are grouped into one undo step.
+ * A pause of ~500ms starts a new group. Enter always starts a new group.
  *
- * 1. Place your cursor at the end of the printf line below (it has
- *    two levels of tab indentation).
- * 2. Press Enter.
- *    EXPECT: The new line has two tabs of indentation already present.
- *    Your cursor is positioned after the tabs, ready to type.
+ * 1. Place cursor at the end of the first >>> line below.
+ * 2. Type: THIS IS A TEST
+ * 3. Press Ctrl+Z.
+ *    EXPECT: Your typed text disappears (undone as one group).
  *
- * 3. Press Ctrl+U to undo and try it again on the single-indent line.
- *    EXPECT: New line has one tab of indentation.
+ * 4. Press Ctrl+Y.
+ *    EXPECT: The text reappears (redone).
  *
- * 4. Now go to column 0 of any line and press Enter.
- *    EXPECT: A blank line with NO indentation (the cursor was at the
- *    beginning, so there was no leading whitespace to copy).
+ * 5. Press Ctrl+Z to undo, then type something NEW.
+ * 6. Press Ctrl+Y.
+ *    EXPECT: "Nothing to redo" -- new edits discard the redo history.
+ *
+ * 7. On the second >>> line, type "hello" quickly, wait 1 second,
+ *    then type "world" quickly.
+ * 8. Press Ctrl+Z once.
+ *    EXPECT: Only "world" disappears (it was a separate undo group).
+ * 9. Press Ctrl+Z again.
+ *    EXPECT: "hello" disappears too.
  * ===========================================================================
  */
 
-void auto_indent_demo(void)
+>>> Type here then undo with Ctrl+Z:
+>>> Type with pauses to test undo grouping:
+
+
+/* ===========================================================================
+ * LESSON 5: Save and Quit
+ *
+ * SAVE:
+ * 1. Press Ctrl+S.
+ *    EXPECT: The file is saved. Status bar shows bytes written.
+ *
+ * 2. Or open the command prompt (ESC), type: save
+ *    Press Enter. Same result.
+ *
+ * 3. For save-as: ESC, type: save as /tmp/test_backup.c
+ *    Press Enter. File is saved to the new path.
+ *
+ * QUIT:
+ * 1. Make an edit on the >>> line below, then press Ctrl+Q.
+ *    EXPECT: "Unsaved changes. Save before quitting? (y/n/ESC)"
+ *    Press ESC to cancel and stay in the editor.
+ *
+ * 2. Or use the command prompt: ESC, type: quit
+ *    Same behavior as Ctrl+Q.
+ *
+ * 3. Force quit: ESC, type: quit!
+ *    This exits immediately with no save check. Use with caution!
+ * ===========================================================================
+ */
+
+>>> Type something here then try quitting with Ctrl+Q:
+
+
+/* ===========================================================================
+ *
+ *    COMMANDS (Lessons 6-10)
+ *
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 6: Tab Completion
+ *
+ * You don't have to type full command names. Tab completes them.
+ *
+ * 1. Press ESC to open the command prompt.
+ * 2. Type: sa
+ * 3. Press Tab.
+ *    EXPECT: Completes to "save".
+ *
+ * 4. Press Tab again.
+ *    EXPECT: Cycles to "save as".
+ *
+ * 5. Press Tab again.
+ *    EXPECT: Cycles back to "save".
+ *
+ * 6. Press Enter to execute, or ESC to cancel.
+ *
+ * Try with other prefixes:
+ *   th + Tab  -->  theme
+ *   qu + Tab  -->  quit  -->  quit!
+ *   se + Tab  -->  select  -->  select all  -->  ...
+ *   fi + Tab  -->  find
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 7: Search Fallback
+ *
+ * When your input doesn't match any command, it becomes a search.
+ *
+ * 1. Press ESC to open the command prompt.
+ * 2. Type: printf
+ * 3. Press Enter.
+ *    EXPECT: Since "printf" isn't a command, edit searches for "printf"
+ *    in the file. The cursor jumps to the first match.
+ *
+ * This means the command prompt doubles as a quick search:
+ *   ESC --> type what you're looking for --> Enter
+ *
+ * Keyboard shortcut equivalent: Ctrl+F (find)
+ * ===========================================================================
+ */
+
+int main(void)
 {
-	if (1) {
-		printf("press Enter at the end of this line\n");
-	}
-	printf("one level of indent here\n");
+	printf("This line has printf for the search fallback test\n");
+	return 0;
 }
 
 
 /* ===========================================================================
- * LESSON 5: Undo / Redo
+ * LESSON 8: Theme Cycling with Live Preview
  *
- * The undo system uses 256 groups with time-based coalescing.
+ * The command prompt offers live preview for themes via Tab.
  *
- * PART A: Basic undo/redo
- * 1. Place cursor at the end of the first >>> line below.
- * 2. Type: THIS IS A TEST
- * 3. Press Ctrl+U.
- *    EXPECT: Your typed text disappears (undone as one group).
- * 4. Press Ctrl+R.
- *    EXPECT: The text reappears (redone).
- * 5. Press Ctrl+U to undo, then type something NEW.
- * 6. Press Ctrl+R.
- *    EXPECT: "Nothing to redo" -- new edits discard redo history.
+ * 1. Press ESC, type: theme
+ * 2. Press Tab.
+ *    EXPECT: The prompt fills "theme Cyberpunk" and the entire editor
+ *    redraws with that theme -- live preview!
  *
- * PART B: Time-based grouping
- * 7. Place cursor at the end of the second >>> line.
- * 8. Type "hello" quickly (no pauses).
- * 9. Wait about 1 second.
- * 10. Type "world" quickly.
- * 11. Press Ctrl+U once.
- *     EXPECT: Only "world" disappears (separate undo group).
- * 12. Press Ctrl+U again.
- *     EXPECT: "hello" disappears (it was its own group).
+ * 3. Press Tab again.
+ *    EXPECT: Cycles to "theme Nightwatch" with live preview.
  *
- * PART C: Structural boundaries
- * 13. Place cursor at the | in the third >>> line.
- * 14. Press Enter to split the line.
- * 15. Press Ctrl+U.
- *     EXPECT: Lines rejoin -- Enter is always its own undo group.
+ * 4. Keep pressing Tab to cycle through all 7 themes:
+ *      Cyberpunk, Nightwatch, Daywatch, Tokyo Night,
+ *      Akira, Tokyo Cyberpunk, Clarity
+ *
+ * 5. When you see one you like, press Enter to keep it.
+ *    Or press ESC to revert to the original theme.
+ *
+ * You can also set a theme directly:
+ *   ESC --> theme Tokyo Night --> Enter
+ *
+ * The selected theme is saved to ~/.config/edit/config automatically.
  * ===========================================================================
  */
 
->>> Type here then undo with Ctrl+U:
->>> Type with pauses to test grouping:
->>> first_half|second_half
-
 
 /* ===========================================================================
- * LESSON 6: Scroll Margin
+ * LESSON 9: Editor Settings
  *
- * The editor keeps 5 lines of context visible above and below your cursor.
- * You should never feel like you're typing at the very edge of the screen.
+ * The "set" command changes editor settings on the fly.
  *
- * 1. Hold the Down arrow and scroll through this file.
- *    EXPECT: The viewport begins scrolling BEFORE the cursor reaches
- *    the bottom row. You always see about 5 lines below the cursor.
+ * TAB WIDTH:
+ * 1. ESC, type: set tabstop 4
+ *    EXPECT: All tabs display as 4 spaces wide instead of 8.
+ * 2. ESC, type: set tabstop 8
+ *    EXPECT: Back to 8-wide tabs.
  *
- * 2. Hold the Up arrow going back.
- *    EXPECT: Same behavior -- the viewport scrolls before the cursor
- *    reaches the top row.
+ * COLUMN RULER:
+ * 1. ESC, type: set ruler 80
+ *    EXPECT: A subtle vertical line appears at column 80.
+ * 2. ESC, type: set ruler 0
+ *    EXPECT: Ruler disappears.
  *
- * Here are some padding lines so you can see the effect clearly:
+ * WORD WRAP:
+ * 1. ESC, type: wrap  (or: set wrap)
+ *    EXPECT: "Word wrap: on" -- long lines wrap at the screen edge.
+ * 2. ESC, type: wrap
+ *    EXPECT: "Word wrap: off" -- back to horizontal scrolling.
+ *
+ * LINE NUMBERS:
+ * 1. ESC, type: numbers  (or: set numbers)
+ *    EXPECT: Line numbers disappear from the gutter.
+ * 2. ESC, type: numbers
+ *    EXPECT: Line numbers reappear.
+ *
+ * These settings take effect immediately with live preview as you type.
+ * Try: ESC, type "set tabstop " then type digits -- watch tabs change live!
+ *
+ * Look at the ruler on this long line:
  * ===========================================================================
  */
 
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
-/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+>>> This is a long line for testing the column ruler. It goes past 80 columns so you can see where the ruler appears. Keep going... and going... and going all the way past the ruler position.
 
 
 /* ===========================================================================
- * LESSON 7: Virtual Column Preservation
+ * LESSON 10: Suspend and Help
  *
- * When you move vertically through lines of different lengths, the editor
- * remembers your desired column. When you reach a longer line again, the
- * cursor returns to that column.
+ * SUSPEND:
+ * 1. ESC, type: suspend
+ *    EXPECT: The editor disappears and you see your shell prompt.
+ * 2. Type: fg
+ *    EXPECT: The editor reappears exactly as you left it.
  *
- * 1. Press End on the first >>> line below (it's long).
- * 2. Press Down through the two short lines.
- *    EXPECT: Cursor snaps to the end of each short line.
- * 3. Press Down one more time to reach the second long line.
- *    EXPECT: Cursor jumps back to the original far-right column.
- * 4. Press Left or Right once (resets the preferred column).
- * 5. Move up through the short lines again.
- *    EXPECT: The new "preferred column" is where you last pressed
- *    Left/Right, not the original far-right position.
+ * This is useful for running a quick shell command without quitting.
+ *
+ * HELP:
+ * 1. Press F1 (or F11, or ESC then type: help).
+ *    EXPECT: A help screen loads with all keybindings and commands.
+ *    Scroll through it to see the full reference.
+ * 2. Press ESC or Ctrl+Q to return to this file.
+ *    EXPECT: Your file reappears with cursor exactly where you left it.
+ *    Any unsaved edits are still present.
  * ===========================================================================
  */
 
->>> int this_is_a_very_long_variable_name_that_extends_far_right_on_the_line = 100;
->>> short = 1;
->>> x = 2;
->>> int another_very_long_variable_name_matching_the_first_line_exactly = 200;
+
+/* ===========================================================================
+ *
+ *    NAVIGATION (Lessons 11-14)
+ *
+ * ===========================================================================
+ */
 
 
 /* ===========================================================================
- * LESSON 8: Word Movement
+ * LESSON 11: Word Movement
  *
  * Ctrl+Right jumps forward by word. Ctrl+Left jumps backward.
  * The editor uses a three-class model:
@@ -266,7 +361,111 @@ void auto_indent_demo(void)
 
 
 /* ===========================================================================
- * LESSON 9: Keyboard Selection
+ * LESSON 12: Goto Commands
+ *
+ * The goto command offers several ways to jump around:
+ *
+ * 1. ESC, type: goto 42
+ *    EXPECT: Cursor jumps to line 42, centered on screen.
+ *
+ * 2. ESC, type: goto top
+ *    EXPECT: Cursor jumps to the first line.
+ *
+ * 3. ESC, type: goto bottom
+ *    EXPECT: Cursor jumps to the last line.
+ *
+ * 4. Place cursor on a bracket, then: ESC, type: goto match
+ *    EXPECT: Cursor jumps to the matching bracket.
+ *
+ * 5. Ctrl+G also opens the go-to-line prompt directly.
+ *
+ * The goto command supports range syntax too:
+ *   goto .     Jump to current line (no-op, but useful in ranges)
+ *   goto ^     Jump to line 1 (same as goto top)
+ *   goto $     Jump to last line (same as goto bottom)
+ *
+ * Try jumping to a few line numbers to get comfortable with navigation.
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 13: Scroll Behavior
+ *
+ * The editor keeps about 5 lines of context visible above and below your
+ * cursor. You should never feel like you're typing at the very edge.
+ *
+ * 1. Hold the Down arrow and scroll through this file.
+ *    EXPECT: The viewport begins scrolling BEFORE the cursor reaches
+ *    the bottom row. You always see lines below the cursor.
+ *
+ * 2. Hold the Up arrow going back.
+ *    EXPECT: Same behavior at the top.
+ *
+ * 3. Use the mouse scroll wheel quickly.
+ *    EXPECT: Scroll speed accelerates when you scroll fast (up to 10x).
+ *    Events within 50ms apart go faster; events more than 200ms
+ *    apart reset to speed 1.
+ *
+ * 4. Slow down your scroll wheel.
+ *    EXPECT: Speed decelerates back to 1 line per tick.
+ *
+ * Here are some padding lines so you can see the effect clearly:
+ * ===========================================================================
+ */
+
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+/* padding */ /* padding */ /* padding */ /* padding */ /* padding */
+
+
+/* ===========================================================================
+ * LESSON 14: Virtual Column Preservation
+ *
+ * When you move vertically through lines of different lengths, the editor
+ * remembers your desired column. When you reach a longer line again, the
+ * cursor returns to that column.
+ *
+ * 1. Press End on the first >>> line below (it's long).
+ * 2. Press Down through the two short lines.
+ *    EXPECT: Cursor snaps to the end of each short line.
+ * 3. Press Down one more time to reach the second long line.
+ *    EXPECT: Cursor jumps back to the original far-right column.
+ * 4. Press Left or Right once (resets the preferred column).
+ * 5. Move up through the short lines again.
+ *    EXPECT: The new "preferred column" is where you last pressed
+ *    Left/Right, not the original far-right position.
+ * ===========================================================================
+ */
+
+>>> int this_is_a_very_long_variable_name_that_extends_far_right_on_the_line = 100;
+>>> short_var = 1;
+>>> x = 2;
+>>> int another_very_long_variable_name_matching_the_first_line_exactly = 200;
+
+
+/* ===========================================================================
+ *
+ *    SELECTION (Lessons 15-18)
+ *
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 15: Keyboard Selection
  *
  * Hold Shift with arrow keys to select text. Selected text renders
  * with inverted colors (reverse video).
@@ -292,6 +491,7 @@ void auto_indent_demo(void)
  *
  * 8. Try Alt+A to select from cursor to line start.
  *    Try Alt+E to select from cursor to line end.
+ *    (These extend the selection, they don't just move.)
  *
  * 9. Press ESC to clear any selection.
  * ===========================================================================
@@ -304,7 +504,7 @@ void auto_indent_demo(void)
 
 
 /* ===========================================================================
- * LESSON 10: Word Selection
+ * LESSON 16: Word Selection
  *
  * Shift+Ctrl+Left and Shift+Ctrl+Right select entire words at a time.
  *
@@ -317,6 +517,8 @@ void auto_indent_demo(void)
  *
  * 4. Press Shift+Ctrl+Left.
  *    EXPECT: Selection shrinks by one word.
+ *
+ * 5. Press ESC to clear.
  * ===========================================================================
  */
 
@@ -325,7 +527,7 @@ void auto_indent_demo(void)
 
 
 /* ===========================================================================
- * LESSON 11: Mouse Selection
+ * LESSON 17: Mouse Selection
  *
  * Click and drag to select text with your mouse.
  *
@@ -334,7 +536,8 @@ void auto_indent_demo(void)
  *    EXPECT: Text highlights between the click point and the drag point.
  *
  * 3. Release the button.
- *    EXPECT: Selection stays highlighted.
+ *    EXPECT: Selection stays highlighted (finalized on release).
+ *    After release, moving the cursor does not change the selection.
  *
  * 4. Click somewhere else without dragging.
  *    EXPECT: Selection clears, cursor moves to click point.
@@ -350,28 +553,75 @@ void auto_indent_demo(void)
 
 
 /* ===========================================================================
- * LESSON 12: Copy / Paste
+ * LESSON 18: Select Commands
  *
- * Alt+C copies, Alt+X cuts, Alt+V pastes.
+ * The command prompt offers selection commands for precision:
+ *
+ * 1. ESC, type: select all
+ *    EXPECT: The entire file is selected (highlighted).
+ *    Press ESC to clear.
+ *
+ * 2. ESC, type: select line
+ *    EXPECT: The current line is selected.
+ *
+ * 3. ESC, type: select word
+ *    EXPECT: The word under the cursor is selected.
+ *
+ * 4. Place cursor on a bracket in the code below, then:
+ *    ESC, type: select block
+ *    EXPECT: Everything between the matching brackets is selected.
+ *
+ * 5. You can also select a range of lines:
+ *    ESC, type: select line 1,10
+ *    EXPECT: Lines 1 through 10 are selected.
+ * ===========================================================================
+ */
+
+int select_demo(int x)
+{
+	if (x > 0) {
+		return (x * 2) + 1;
+	}
+	return 0;
+}
+
+
+/* ===========================================================================
+ *
+ *    CLIPBOARD (Lessons 19-22)
+ *
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 19: Copy / Cut / Paste
+ *
+ * Ctrl+C copies, Ctrl+X cuts, Ctrl+V pastes.
  * The editor also pushes to system clipboard via OSC 52.
  *
+ * WITH A SELECTION:
  * 1. Select "COPY_THIS" on the first >>> line (Shift+Arrow or mouse).
- * 2. Press Alt+C.
+ * 2. Press Ctrl+C.
  *    EXPECT: Status bar shows "Copied N bytes".
- *
  * 3. Move cursor to the blank >>> line.
- * 4. Press Alt+V.
+ * 4. Press Ctrl+V.
  *    EXPECT: "COPY_THIS" appears at cursor position.
  *
  * 5. Select "CUT_THIS" on the third >>> line.
- * 6. Press Alt+X.
+ * 6. Press Ctrl+X.
  *    EXPECT: "CUT_THIS" disappears (cut to clipboard).
- *
- * 7. Move to the second blank line and press Alt+V.
+ * 7. Move to the second blank line and press Ctrl+V.
  *    EXPECT: "CUT_THIS" appears.
  *
- * 8. Press Alt+V again without copying anything new.
- *    EXPECT: Pastes the same clipboard content again.
+ * WITHOUT A SELECTION (VS Code convention):
+ * 8. Place cursor on any line, don't select anything.
+ * 9. Press Ctrl+C.
+ *    EXPECT: "Line copied" -- the entire line was copied.
+ * 10. Press Ctrl+V on an empty line.
+ *     EXPECT: The whole line is pasted.
+ *
+ * 11. With no selection, Ctrl+X cuts the entire line too.
  * ===========================================================================
  */
 
@@ -382,76 +632,117 @@ void auto_indent_demo(void)
 
 
 /* ===========================================================================
- * LESSON 13: Selection + Typing (Replace)
+ * LESSON 20: Clipboard Commands
  *
- * When text is selected, typing replaces the selection. Backspace
- * and Delete also remove the entire selection.
+ * The command prompt offers fine-grained clipboard operations:
  *
- * 1. Select "REPLACE_ME" on the first >>> line below.
- * 2. Type "done".
- *    EXPECT: "REPLACE_ME" vanishes and "done" takes its place.
+ * 1. ESC, type: copy line
+ *    EXPECT: The current line is copied (same as Ctrl+C with no selection).
  *
- * 3. Press Ctrl+U to undo.
- *    EXPECT: "REPLACE_ME" is fully restored.
+ * 2. ESC, type: copy word
+ *    EXPECT: The word under the cursor is copied.
  *
- * 4. Select "DELETE_ME" on the second >>> line.
- * 5. Press Backspace (or Delete).
- *    EXPECT: "DELETE_ME" is removed entirely.
+ * 3. ESC, type: copy all
+ *    EXPECT: The entire file contents are copied to the clipboard.
+ *
+ * 4. ESC, type: copy path
+ *    EXPECT: The filename of the current file is copied to the clipboard.
+ *
+ * Try each one and check the status bar message for confirmation.
  * ===========================================================================
  */
 
->>> int result = REPLACE_ME + 100;
->>> char *name = "DELETE_ME";
+
+/* ===========================================================================
+ * LESSON 21: Cut and Paste Commands
+ *
+ * CUT commands remove text AND copy it to the clipboard:
+ *
+ * 1. Place cursor on the first >>> line below.
+ *    ESC, type: cut line
+ *    EXPECT: The line vanishes. It's in the clipboard.
+ *
+ * 2. ESC, type: cut word
+ *    EXPECT: The word under the cursor is removed and copied.
+ *
+ * 3. ESC, type: cut trailing
+ *    EXPECT: Trailing whitespace is removed from all lines.
+ *
+ * PASTE commands control where text is inserted:
+ *
+ * 4. ESC, type: paste above
+ *    EXPECT: Clipboard contents are pasted ABOVE the current line.
+ *
+ * 5. ESC, type: paste below
+ *    EXPECT: Clipboard contents are pasted BELOW the current line.
+ *
+ * 6. ESC, type: paste
+ *    EXPECT: Same as Ctrl+V -- paste at cursor position.
+ * ===========================================================================
+ */
+
+>>> CUT THIS LINE -- it should vanish with "cut line"
+>>> Cut the word CUTWORD from this line with "cut word"
+>>> This line has trailing spaces to test "cut trailing"   
 
 
 /* ===========================================================================
- * LESSON 14: Cut Line / Duplicate Line
+ * LESSON 22: Duplicate
  *
- * Alt+Shift+K cuts an entire line. Alt+D duplicates a line.
+ * Ctrl+D duplicates the current line.
  *
- * 1. Place cursor anywhere on the "CUT THIS LINE" >>> line below.
- * 2. Press Alt+Shift+K.
- *    EXPECT: The entire line vanishes. It's now in your clipboard.
- *
- * 3. Move to a blank area and press Alt+V.
- *    EXPECT: The cut line is pasted.
- *
- * 4. Place cursor on the "DUPLICATE ME" >>> line.
- * 5. Press Alt+D.
+ * 1. Place cursor on the >>> line below.
+ * 2. Press Ctrl+D.
  *    EXPECT: An identical copy appears immediately below,
  *    and your cursor moves to the new copy.
  *
- * 6. Press Ctrl+U to undo the duplicate.
+ * 3. Press Ctrl+Z to undo.
+ *
+ * The "dup" command supports repeat prefixes:
+ * 4. ESC, type: 3 dup line
+ *    EXPECT: Three copies of the current line appear below it.
+ *
+ * 5. ESC, type: dup
+ *    EXPECT: Duplicates the selection if one is active, or the current
+ *    line if nothing is selected.
  * ===========================================================================
  */
 
->>> CUT THIS LINE -- it should vanish with Alt+Shift+K
-
->>> DUPLICATE ME -- press Alt+D to clone this line
+>>> DUPLICATE ME -- press Ctrl+D to clone this line
 
 
 /* ===========================================================================
- * LESSON 15: Incremental Search
  *
- * Alt+F (or Ctrl+F) opens the search prompt. Results update live
- * as you type. Arrow keys navigate between matches.
+ *    SEARCH (Lessons 23-26)
  *
- * 1. Press Alt+F.
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 23: Incremental Search
+ *
+ * Ctrl+F opens the search prompt. Results update live as you type.
+ *
+ * 1. Press Ctrl+F.
  *    EXPECT: A "Search:" prompt appears in the message bar.
  *
  * 2. Type "TODO" slowly, one letter at a time.
  *    EXPECT: The cursor jumps to the first match as you type.
  *    The matched text is highlighted with the match color.
  *
- * 3. Press Right arrow (or just keep typing characters to refine).
- *    EXPECT: Jumps to the next match.
+ * 3. Press Right arrow to jump to the next match.
+ *    EXPECT: Cursor moves forward to the next "TODO".
  *
- * 4. Press Left arrow.
- *    EXPECT: Jumps back to the previous match.
+ * 4. Press Left arrow to jump to the previous match.
+ *    EXPECT: Cursor moves backward.
  *
- * 5. Press Enter to accept the search (cursor stays at match).
+ * 5. Press Up/Down arrows to browse search history.
+ *    EXPECT: Previous search queries fill the search field.
  *
- * 6. Press ESC during a different search.
+ * 6. Press Enter to accept the search (cursor stays at match).
+ *
+ * 7. Press ESC or Ctrl+C during a search.
  *    EXPECT: Cursor returns to where it was before the search.
  *
  * Here are some markers to search for:
@@ -473,96 +764,25 @@ int zeta = 5;
 
 
 /* ===========================================================================
- * LESSON 16: Case-Insensitive Search
+ * LESSON 24: Case and Regex Toggles
  *
- * During a search, Alt+C toggles case sensitivity.
+ * During a search, special keys toggle search modes:
  *
- * 1. Press Alt+F to start a search.
- * 2. Type "todo" (lowercase).
+ * CASE SENSITIVITY:
+ * 1. Press Ctrl+F, type "todo" (lowercase).
  *    EXPECT: No matches -- the markers above use uppercase "TODO".
+ * 2. Press Alt+C to toggle case sensitivity off.
+ *    EXPECT: Status shows "[case off]". Now it finds "TODO".
+ * 3. Press Alt+C again to restore case sensitivity.
  *
- * 3. Press Alt+C.
- *    EXPECT: Status bar shows "[case off]". The search re-runs.
- *    Now it finds "TODO" even though you typed "todo".
- *
- * 4. Press Alt+C again.
- *    EXPECT: Case sensitivity returns to normal ("[case on]").
- *
- * 5. Press ESC to cancel.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 17: Regex Search
- *
- * During a search, Alt+X toggles regex mode (POSIX ERE).
- *
- * 1. Press Alt+F to start a search.
- * 2. Type "TODO|FIXME" (literal text).
- *    EXPECT: No match (it's looking for the literal string "TODO|FIXME").
- *
- * 3. Press Alt+X to enable regex mode.
- *    EXPECT: Status bar shows "[regex on]". The pattern is now treated
- *    as a regular expression. It matches both "TODO" and "FIXME".
- *
- * 4. Try the regex pattern: "[a-z]_[a-z]"
- *    EXPECT: Matches two-character sequences around underscores in
- *    variable names like foo_bar, next_line, etc.
- *
- * 5. Press Alt+X to disable regex mode and ESC to cancel.
- *
- * Note: This uses POSIX Extended Regular Expressions (ERE), so you
- * get | for alternation, + for one-or-more, () for grouping, etc.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 18: All-Match Highlighting and Match Count
- *
- * During incremental search, ALL matches in the visible area are
- * highlighted, not just the current one. The status bar shows a count.
- *
- * 1. Press Alt+F and type "int".
- *    EXPECT: Every "int" on screen is highlighted in the match color.
- *    The status bar shows "Match N of M" (e.g., "Match 1 of 15").
- *
- * 2. Press Right arrow to navigate to the next match.
- *    EXPECT: The match counter updates: "Match 2 of 15", etc.
- *
- * 3. Keep pressing Right until the search wraps around.
- *    EXPECT: Status bar shows "[Wrapped] Match 1 of 15".
- *
- * 4. Press ESC to cancel.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 19: Search History
- *
- * The editor remembers your last 50 search queries. Use Up/Down
- * arrows during a search to browse through them.
- *
- * 1. Press Alt+F, type "alpha", and press Enter.
- *    (This performs a search and records "alpha" in history.)
- *
- * 2. Press Alt+F, type "beta", and press Enter.
- *    (This records "beta" in history.)
- *
- * 3. Press Alt+F to start a new search. Don't type anything yet.
- * 4. Press Up arrow.
- *    EXPECT: The search field fills with "beta" (most recent).
- *
- * 5. Press Up arrow again.
- *    EXPECT: The search field fills with "alpha" (older).
- *
- * 6. Press Down arrow.
- *    EXPECT: Back to "beta".
- *
- * 7. Press Down arrow again.
- *    EXPECT: Back to whatever you typed before browsing (empty).
+ * REGEX MODE:
+ * 4. Press Ctrl+F, type "TODO|FIXME" (literal text).
+ *    EXPECT: No match (looking for the literal string "TODO|FIXME").
+ * 5. Press Alt+X to enable regex mode (POSIX ERE).
+ *    EXPECT: Status shows "[regex on]". Pattern matches both TODO and FIXME.
+ * 6. Try the regex pattern: "[a-z]_[a-z]"
+ *    EXPECT: Matches around underscores in variable names.
+ * 7. Press Alt+X to disable regex mode.
  *
  * 8. Press ESC to cancel.
  * ===========================================================================
@@ -570,13 +790,32 @@ int zeta = 5;
 
 
 /* ===========================================================================
- * LESSON 20: Find and Replace
+ * LESSON 25: All-Match Highlighting and Match Count
  *
- * Alt+R opens find-and-replace. It prompts for a search string,
- * then a replacement, then walks through each match asking for
- * confirmation.
+ * During incremental search, ALL matches in the visible area are
+ * highlighted, not just the current one. The status bar shows a count.
  *
- * 1. Press Alt+R.
+ * 1. Press Ctrl+F and type "int".
+ *    EXPECT: Every "int" on screen is highlighted in the match color.
+ *    The status bar shows "Match N of M" (e.g., "Match 1 of 42").
+ *
+ * 2. Press Right arrow to navigate to the next match.
+ *    EXPECT: The match counter updates: "Match 2 of 42", etc.
+ *
+ * 3. Keep pressing Right until the search wraps around.
+ *    EXPECT: Status bar shows "[Wrapped] Match 1 of 42".
+ *
+ * 4. Press ESC to cancel.
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 26: Find and Replace
+ *
+ * Ctrl+H opens find-and-replace.
+ *
+ * 1. Press Ctrl+H.
  *    EXPECT: Prompt says "Replace:".
  *
  * 2. Type "PLACEHOLDER" and press Enter.
@@ -596,6 +835,8 @@ int zeta = 5;
  *    EXPECT: Status bar shows total replacements made.
  *
  * (Or press ESC at any point to cancel and stop replacing.)
+ *
+ * You can also use the command: ESC, type: replace
  * ===========================================================================
  */
 
@@ -606,7 +847,197 @@ int zeta = 5;
 
 
 /* ===========================================================================
- * LESSON 21: Syntax Highlighting
+ *
+ *    CODE EDITING (Lessons 27-30)
+ *
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 27: Comment Toggle
+ *
+ * Ctrl+/ toggles line comments. Works on single lines and selections.
+ * Uses the filetype's comment style (// for C, # for Python, etc.).
+ *
+ * 1. Place cursor on the first >>> line below. Press Ctrl+/.
+ *    EXPECT: "// " is prepended to the line (commented out).
+ *
+ * 2. Press Ctrl+/ again on the same line.
+ *    EXPECT: The "// " prefix is removed (uncommented).
+ *
+ * 3. Select multiple lines (the three >>> lines below) using
+ *    Shift+Down, then press Ctrl+/.
+ *    EXPECT: All three lines get "// " prepended.
+ *
+ * 4. With the same lines still selected, press Ctrl+/ again.
+ *    EXPECT: All three lines have "// " removed.
+ *
+ * The toggle is smart: if ALL selected lines are commented, it
+ * uncomments. If any line is NOT commented, it comments all of them.
+ *
+ * Command equivalent: ESC, type: comment
+ * ===========================================================================
+ */
+
+>>> int comment_me = 1;
+>>> int comment_me_too = 2;
+>>> int and_me = 3;
+
+
+/* ===========================================================================
+ * LESSON 28: Indent / Dedent Block
+ *
+ * With text selected, Tab indents and Shift+Tab dedents.
+ * A tab character is inserted/removed at the start of each line.
+ *
+ * 1. Select all four >>> lines below (Shift+Down or mouse drag).
+ * 2. Press Tab.
+ *    EXPECT: Each line gains one tab of indentation.
+ *
+ * 3. Press Tab again.
+ *    EXPECT: Each line gains another tab (now two levels deep).
+ *
+ * 4. Press Shift+Tab.
+ *    EXPECT: One level of indentation removed from each line.
+ *
+ * 5. Press Shift+Tab again.
+ *    EXPECT: Back to original indentation.
+ *
+ * Note: Without a selection, Tab inserts a normal tab character.
+ * Command equivalents: indent, outdent
+ * ===========================================================================
+ */
+
+>>> if (condition) {
+>>> 	nested_call();
+>>> 	another_call();
+>>> }
+
+
+/* ===========================================================================
+ * LESSON 29: Bracket Matching
+ *
+ * Press Ctrl+] when the cursor is on a bracket to jump to its match.
+ * Brackets are colorized by nesting depth (bracket pair colorization).
+ *
+ * 1. Place cursor on the opening '{' of the function below.
+ *    EXPECT: The matching closing '}' is subtly highlighted.
+ *
+ * 2. Press Ctrl+].
+ *    EXPECT: Cursor jumps to the matching closing '}'.
+ *
+ * 3. Press Ctrl+] again.
+ *    EXPECT: Cursor jumps back to the opening '{'.
+ *
+ * 4. Try with parentheses '(' and ')'.
+ * 5. Try with square brackets '[' and ']'.
+ *
+ * 6. Place cursor on a character that is NOT a bracket.
+ * 7. Press Ctrl+].
+ *    EXPECT: Status bar says "No matching bracket".
+ *
+ * BRACKET PAIR COLORIZATION:
+ * Look at the deeply nested code below. Each nesting level gets
+ * a different color, cycling through 4 colors. Brackets inside
+ * strings and comments keep their string/comment color.
+ * ===========================================================================
+ */
+
+int bracket_demo(int x, int y)
+{
+	if (x > 0) {
+		int array[10] = {0};
+		for (int i = 0; i < 10; i++) {
+			array[i] = (x + y) * (i + 1);
+			if (array[i] > 100) {
+				printf("big: %d\n", array[i]);
+			}
+		}
+		return array[0];
+	}
+	/* Brackets in strings don't count: "({[]})" */
+	return (x < 0) ? (-x) : (x);
+}
+
+int deeply_nested(int a, int b, int c)
+{
+	if (a > 0) {
+		if (b > 0) {
+			if (c > 0) {
+				return ((a + (b * (c + 1))) * ((a - b) + (c * 2)));
+			} else {
+				return (a * (b + (c - (a % (b + 1)))));
+			}
+		}
+	}
+	int matrix[4][4] = {{1,2,3,4},{5,6,7,8},{9,10,11,12},{13,14,15,16}};
+	return matrix[a % 4][b % 4];
+}
+
+
+/* ===========================================================================
+ * LESSON 30: Text Transforms
+ *
+ * The command prompt has powerful text transformation commands.
+ * These operate on the selection, a line range, or the current line.
+ *
+ * CASE TRANSFORMS:
+ * 1. Select "transform me" on the first >>> line below.
+ *    ESC, type: upper
+ *    EXPECT: "transform me" becomes "TRANSFORM ME".
+ *
+ * 2. ESC, type: lower
+ *    EXPECT: "TRANSFORM ME" becomes "transform me".
+ *
+ * 3. ESC, type: title
+ *    EXPECT: "transform me" becomes "Transform Me".
+ *
+ * LINE TRANSFORMS (select the block of >>> lines below):
+ * 4. ESC, type: sort
+ *    EXPECT: Lines are sorted alphabetically ascending.
+ *
+ * 5. ESC, type: sort reverse
+ *    EXPECT: Lines are sorted descending.
+ *
+ * 6. ESC, type: reverse
+ *    EXPECT: Line order is reversed (not sorted, just flipped).
+ *
+ * 7. ESC, type: uniq
+ *    EXPECT: Adjacent duplicate lines are removed.
+ *
+ * 8. ESC, type: trim
+ *    EXPECT: Trailing whitespace is stripped from each line.
+ *
+ * 9. ESC, type: number
+ *    EXPECT: Each line gets a number prefix (1. 2. 3. etc.).
+ *
+ * 10. ESC, type: collapse
+ *     EXPECT: Multiple consecutive blank lines collapse to one.
+ *
+ * All transforms support ranges: ESC, type: 5,10 upper
+ * ===========================================================================
+ */
+
+>>> transform me to see case changes
+>>> cherry
+>>> apple
+>>> banana
+>>> date
+>>> apple
+>>> banana
+
+
+/* ===========================================================================
+ *
+ *    DISPLAY (Lessons 31-34)
+ *
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 31: Syntax Highlighting
  *
  * The editor highlights 9 languages based on file extension:
  *   C/C++ (.c .h .cpp)    Python (.py)       JavaScript (.js .jsx .mjs)
@@ -621,13 +1052,7 @@ int zeta = 5;
  * - String literals "like this" in a third color
  * - Numbers like 42 and 3.14 in yet another color
  * - Comments (like this one) in a muted color
- * - Multi-line comments too
- *
- * To test other languages, try:
- *   ./edit example.py      (Python highlighting)
- *   ./edit example.js      (JavaScript highlighting)
- *   ./edit example.go      (Go highlighting)
- *   ./edit example.rs      (Rust highlighting)
+ * - Multi-line comments spanning lines correctly
  *
  * The filetype is shown in the status bar (bottom left: "c").
  * ===========================================================================
@@ -663,18 +1088,8 @@ int syntax_demo(void)
 	// Single-line comment
 	unsigned long big_number = 0xDEADBEEF;
 	double scientific = 1.23e-4;
-
-	typedef struct {
-		int x;
-		int y;
-	} point;
-
+	typedef struct { int x; int y; } point;
 	enum color { RED, GREEN, BLUE };
-
-	while (number > 0) {
-		number--;
-	}
-
 	static const char *names[] = {"alpha", "beta", "gamma"};
 
 	return number;
@@ -682,153 +1097,11 @@ int syntax_demo(void)
 
 
 /* ===========================================================================
- * LESSON 22: Bracket Matching
- *
- * Press Alt+] when the cursor is on a bracket to jump to its match.
- * The matching bracket is highlighted even without jumping.
- *
- * 1. Place cursor on the opening '{' of the function below.
- *    EXPECT: The matching closing '}' is highlighted in the match color.
- *
- * 2. Press Alt+].
- *    EXPECT: Cursor jumps to the matching closing '}'.
- *
- * 3. Press Alt+] again.
- *    EXPECT: Cursor jumps back to the opening '{'.
- *
- * 4. Try with parentheses '(' and ')'.
- * 5. Try with square brackets '[' and ']'.
- *
- * 6. Place cursor on a character that is NOT a bracket.
- * 7. Press Alt+].
- *    EXPECT: Status bar says "No matching bracket".
- *
- * Note: Brackets inside strings and comments are ignored by the
- * matching algorithm (they don't count as real brackets).
- * ===========================================================================
- */
-
-int bracket_demo(int x, int y)
-{
-	if (x > 0) {
-		int array[10] = {0};
-		for (int i = 0; i < 10; i++) {
-			array[i] = (x + y) * (i + 1);
-			if (array[i] > 100) {
-				printf("big: %d\n", array[i]);
-			}
-		}
-		return array[0];
-	}
-	/* Brackets in strings don't count: "({[]})" */
-	return (x < 0) ? (-x) : (x);
-}
-
-
-/* ===========================================================================
- * LESSON 23: Bracket Pair Colorization
- *
- * Nested brackets are colored by depth using cycling colors. Each
- * nesting level gets a different color from the theme, cycling through
- * 4 colors (keyword1, keyword2, string, number).
- *
- * Look at the deeply nested code below. You should see:
- * - Outermost brackets in one color
- * - Second level in another color
- * - Third level in a third color
- * - Fourth level in a fourth color
- * - Fifth level cycles back to the first color
- *
- * Brackets inside strings and comments keep their string/comment color
- * instead of getting bracket colorization.
- * ===========================================================================
- */
-
-int deeply_nested(int a, int b, int c)
-{
-	if (a > 0) {
-		if (b > 0) {
-			if (c > 0) {
-				return ((a + (b * (c + 1))) * ((a - b) + (c * 2)));
-			} else {
-				return (a * (b + (c - (a % (b + 1)))));
-			}
-		}
-	}
-	int matrix[4][4] = {{1,2,3,4},{5,6,7,8},{9,10,11,12},{13,14,15,16}};
-	return matrix[a % 4][b % 4];
-}
-
-/* More bracket depth for practice: */
-int combo(int n) { return (((n + 1) * (n + 2)) / ((n + 3) * (n + 4))); }
-
-
-/* ===========================================================================
- * LESSON 24: Comment Toggle
- *
- * Alt+/ toggles line comments. Works on single lines and selections.
- * Uses the filetype's comment style (// for C, # for Python, etc.).
- *
- * 1. Place cursor on the first >>> line below. Press Alt+/.
- *    EXPECT: "// " is prepended to the line (commented out).
- *
- * 2. Press Alt+/ again on the same line.
- *    EXPECT: The "// " prefix is removed (uncommented).
- *
- * 3. Select multiple lines (the three >>> lines below) using
- *    Shift+Down, then press Alt+/.
- *    EXPECT: All three lines get "// " prepended.
- *
- * 4. With the same lines still selected, press Alt+/ again.
- *    EXPECT: All three lines have "// " removed.
- *
- * The toggle is smart: if ALL selected lines are commented, it
- * uncomments. If any line is NOT commented, it comments all of them.
- * ===========================================================================
- */
-
->>> int comment_me = 1;
->>> int comment_me_too = 2;
->>> int and_me = 3;
-
-
-/* ===========================================================================
- * LESSON 25: Indent / Dedent Block
- *
- * With text selected, Tab indents and Shift+Tab dedents.
- * A tab character is inserted/removed at the start of each line.
- *
- * 1. Select all four >>> lines below (Shift+Down or mouse drag).
- * 2. Press Tab.
- *    EXPECT: Each line gains one tab of indentation.
- *
- * 3. Press Tab again.
- *    EXPECT: Each line gains another tab (now two levels deep).
- *
- * 4. Press Shift+Tab.
- *    EXPECT: One level of indentation removed from each line.
- *
- * 5. Press Shift+Tab again.
- *    EXPECT: Back to original indentation.
- *
- * Note: Without a selection, Tab inserts a normal tab character.
- * ===========================================================================
- */
-
->>> int indent_me = 1;
->>> int indent_me_too = 2;
->>> int keep_going = 3;
->>> int last_one = 4;
-
-
-/* ===========================================================================
- * LESSON 26: Git Gutter Markers
+ * LESSON 32: Git Gutter Markers
  *
  * When line numbers are visible, the gutter shows change markers:
- *   + (in keyword2 color) = added line
- *   ~ (in number color)   = modified line
- *
- * If line numbers are off, press Alt+N first to turn them on.
+ *   + (green)  = added line (new line that didn't exist before)
+ *   ~ (yellow) = modified line (existing line that was changed)
  *
  * 1. Look at the gutter (left column, next to line numbers).
  *    EXPECT: No markers on unmodified lines.
@@ -840,7 +1113,7 @@ int combo(int n) { return (((n + 1) * (n + 2)) / ((n + 3) * (n + 4))); }
  *    EXPECT: A "+" appears in the gutter for the new line.
  *
  * 4. If you save the file (Ctrl+S), all markers reset to none.
- *    (But don't save if you want to keep testing other lessons!)
+ *    The gutter tracks changes since last save, not since last commit.
  * ===========================================================================
  */
 
@@ -848,14 +1121,12 @@ int combo(int n) { return (((n + 1) * (n + 2)) / ((n + 3) * (n + 4))); }
 
 
 /* ===========================================================================
- * LESSON 27: Trailing Whitespace Visualization
+ * LESSON 33: Trailing Whitespace and Scroll Indicators
  *
+ * TRAILING WHITESPACE:
  * The editor highlights trailing whitespace with a subtle background
- * tint (using the line_number color as background). This makes it
- * easy to spot and clean up trailing spaces and tabs.
- *
- * Look at the lines below -- some have trailing whitespace that
- * should be visible with a different background color:
+ * tint. This makes it easy to spot and clean up trailing spaces/tabs.
+ * Look at the lines below -- some have trailing whitespace:
  * ===========================================================================
  */
 
@@ -865,26 +1136,19 @@ int combo(int n) { return (((n + 1) * (n + 2)) / ((n + 3) * (n + 4))); }
 >>> Mix of content then spaces.   
 >>> Clean line, no trailing.
 
-
 /* ===========================================================================
- * LESSON 28: Horizontal Scroll Indicators
+ * (Lesson 33 continued)
  *
+ * HORIZONTAL SCROLL INDICATORS:
  * When a line extends beyond the right edge of your terminal, a ">"
- * indicator appears at the rightmost column. When you've scrolled
- * right past the start of a line, a "<" indicator appears at the
- * leftmost column.
+ * appears at the rightmost column. When you've scrolled right past
+ * the start, a "<" appears at the leftmost column.
  *
  * 1. Place cursor on the very long >>> line below.
  * 2. Press End to go to the end of the line.
- *    EXPECT: The viewport scrolls right. A "<" appears on the left
- *    edge of that line to show content is hidden to the left.
- *
- * 3. Press Home to go back to the beginning.
- *    EXPECT: A ">" appears on the right edge to show content
- *    continues beyond the screen.
- *
- * 4. Try scrolling right with Right arrow to watch the indicators
- *    appear and disappear.
+ *    EXPECT: A "<" appears on the left edge (content hidden to the left).
+ * 3. Press Home to go back.
+ *    EXPECT: A ">" appears on the right edge (content extends rightward).
  *
  * Note: Indicators only appear when word wrap is OFF (the default).
  * ===========================================================================
@@ -894,311 +1158,197 @@ int combo(int n) { return (((n + 1) * (n + 2)) / ((n + 3) * (n + 4))); }
 
 
 /* ===========================================================================
- * LESSON 29: Status Bar
+ * LESSON 34: Word Wrap
  *
- * The status bar at the bottom of the screen shows useful information.
- * Take a look right now and identify:
+ * ESC, type: wrap  (toggles soft word wrap)
  *
- * LEFT SIDE:
- *   - Filename (or "[No Name]" for new files)
- *   - [RO] if the file is read-only
- *   - [+] if the file has unsaved modifications (dirty flag)
- *   - Filetype (e.g., "c", "python", "text")
+ * 1. ESC, type: wrap
+ *    EXPECT: Status says "Word wrap: on".
+ *    The very long line above and the >>> line below now wrap to
+ *    multiple screen rows. No horizontal scrolling needed.
  *
- * RIGHT SIDE:
- *   - Line:Column (e.g., "42:15")
- *   - Position indicator (Top / Bot / percentage like "25%")
+ * 2. Look at the gutter on continuation rows.
+ *    EXPECT: Continuation rows show ".." in the gutter instead of
+ *    a line number, so you know they're part of the same line.
  *
- * 1. Make an edit to see [+] appear.
- * 2. Navigate to the top of the file.
- *    EXPECT: Position shows "Top".
- * 3. Navigate to the bottom.
- *    EXPECT: Position shows "Bot".
- * 4. Navigate to the middle.
- *    EXPECT: Position shows a percentage like "50%".
+ * 3. Move cursor through the wrapped line with Up/Down arrows.
+ *    EXPECT: The cursor moves through visual rows, not file lines.
+ *    This feels natural -- each visible row is one step.
  *
- * Long filenames are truncated with "..." to fit the available space.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 30: Color Themes
- *
- * Press Alt+T to cycle through all 7 themes. The theme name appears
- * briefly in the status message bar.
- *
- * Available themes:
- *   1. Cyberpunk      -- Dark neon (magenta, cyan, green)
- *   2. Nightwatch     -- Monochrome dark (shades of gray)
- *   3. Daywatch       -- Monochrome light (dark text on white)
- *   4. Tokyo Night    -- Deep indigo with soft purple and blue
- *   5. Akira          -- Neo-Tokyo (red and cyan on dark)
- *   6. Tokyo Cyberpunk -- Indigo base with neon accents
- *   7. Clarity        -- Colorblind-accessible (blue/orange/yellow)
- *
- * 1. Press Alt+T.
- *    EXPECT: Colors change. Status message shows the theme name.
- *
- * 2. Press Alt+T repeatedly to cycle through all 7 themes.
- *    EXPECT: Each theme has a distinct look. Notice how syntax
- *    highlighting colors, background, and status bar all change.
- *
- * 3. After 7 presses, you're back to the original theme.
- *
- * The selected theme is automatically saved to your config file
- * (~/.config/edit/config) so it persists across sessions.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 31: Help Screen
- *
- * F11 (or Alt+?) opens a built-in help reference. The help screen
- * temporarily replaces your file -- no state is lost.
- *
- * 1. Press F11 (or Alt+?).
- *    EXPECT: The file disappears. A help reference loads in its place.
- *    Status bar says "HELP -- Press ESC or Alt+Q to return".
- *
- * 2. Scroll through the help with arrow keys, Page Down, mouse wheel.
- *    EXPECT: All navigation works normally.
- *
- * 3. Try typing a character.
- *    EXPECT: "Help is read-only" message. No text is inserted.
- *
- * 4. Try Alt+F to search within help.
- *    EXPECT: Search works normally (read-only browsing).
- *
- * 5. Press ESC (or Alt+Q).
- *    EXPECT: This file reappears with your cursor exactly where
- *    you left it. Any unsaved edits are still present. The editor
- *    state is fully preserved through the snapshot/restore system.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 32: Suspend / Resume
- *
- * Ctrl+Z suspends the editor and drops you back to your shell.
- * Use "fg" to resume. This is the standard UNIX job control.
- *
- * 1. Press Ctrl+Z.
- *    EXPECT: The editor disappears. Your shell prompt appears.
- *    The terminal is restored to normal mode.
- *
- * 2. Type: fg
- *    EXPECT: The editor reappears with everything intact.
- *    Raw mode and mouse reporting are re-enabled.
- *
- * This is useful for running shell commands (git, make, etc.)
- * without quitting the editor.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 33: Soft Word Wrap
- *
- * Alt+W toggles soft word wrap. When enabled, long lines wrap at
- * the screen edge instead of scrolling horizontally.
- *
- * 1. Press Alt+W.
- *    EXPECT: Status message says "Word wrap: on".
- *    The very long line from Lesson 28 (and the one below) now
- *    wraps to multiple screen rows. No horizontal scrolling needed.
- *    Continuation rows have a blank gutter (no line number).
- *
- * 2. Notice the horizontal scroll indicators (< and >) are gone.
- *    Word wrap and horizontal scroll are mutually exclusive.
- *
- * 3. Press Alt+W again.
+ * 4. ESC, type: wrap
  *    EXPECT: "Word wrap: off". Lines go back to single-row display
  *    with horizontal scrolling.
  * ===========================================================================
  */
 
->>> This is another very long line that is specifically here for testing word wrap mode. When Alt+W is active, this line should wrap to multiple visual rows on your screen. Each continuation row gets a blank gutter area where the line number would normally appear. The cursor should still navigate correctly through the wrapped text. Word wrap makes it much easier to read long lines without horizontal scrolling.
+>>> This is another very long line that is specifically here for testing word wrap mode. When wrap is active, this line should wrap to multiple visual rows on your screen. Each continuation row gets a ".." marker in the gutter area where the line number would normally appear. The cursor should still navigate correctly through the wrapped text. Word wrap makes it much easier to read long lines without horizontal scrolling.
 
 
 /* ===========================================================================
- * LESSON 34: Column Ruler
  *
- * A vertical ruler line can be displayed at a specific column position.
- * This is useful for enforcing line length limits (80 or 120 columns).
+ *    ADVANCED (Lessons 35-38)
  *
- * The ruler is set in the config file. If no ruler is configured, the
- * column is 0 (disabled).
- *
- * To enable a ruler at column 80, add this to your config file:
- *   ruler = 80
- *
- * The ruler appears as a subtle background tint on the specified column,
- * similar to how trailing whitespace is visualized. It uses the
- * line_number theme color as the background tint.
- *
- * See Lesson 35 for how to set this up.
  * ===========================================================================
  */
 
 
 /* ===========================================================================
- * LESSON 35: Config File
+ * LESSON 35: Bookmarks
  *
+ * Bookmarks let you save cursor positions and jump back to them.
+ * Each bookmark is named with a single lowercase letter (a-z).
+ *
+ * 1. Place cursor somewhere memorable (like this line).
+ *    ESC, type: mark a
+ *    EXPECT: "Bookmark 'a' set at line N".
+ *
+ * 2. Navigate far away (Ctrl+G to jump to line 1).
+ *
+ * 3. ESC, type: jump a
+ *    EXPECT: Cursor jumps back to where you set bookmark 'a'.
+ *
+ * 4. Set a few more bookmarks:
+ *    ESC, type: mark b  (at some other location)
+ *    ESC, type: mark c  (at yet another location)
+ *
+ * 5. ESC, type: marks
+ *    EXPECT: Status bar lists all active bookmarks with their positions.
+ *
+ * 6. ESC, type: mark clear
+ *    EXPECT: All bookmarks are cleared.
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 36: Macros
+ *
+ * Record a sequence of keystrokes and replay them.
+ *
+ * 1. ESC, type: record start
+ *    EXPECT: Status bar shows "Recording..." -- every keystroke is captured.
+ *
+ * 2. Perform some edits:
+ *    - Go to the first >>> line below
+ *    - Press Home, then type "// " to comment it
+ *    - Press Down arrow to move to the next line
+ *
+ * 3. ESC, type: record stop
+ *    EXPECT: "Macro recorded (N events)".
+ *
+ * 4. ESC, type: record play
+ *    EXPECT: The same sequence replays -- the next line gets commented.
+ *
+ * 5. ESC, type: record play 3
+ *    EXPECT: The macro replays 3 more times, commenting 3 more lines.
+ *
+ * The macro buffer holds up to 1024 events.
+ * ===========================================================================
+ */
+
+>>> Line one for macro practice
+>>> Line two for macro practice
+>>> Line three for macro practice
+>>> Line four for macro practice
+>>> Line five for macro practice
+>>> Line six for macro practice
+
+
+/* ===========================================================================
+ * LESSON 37: Stats and Info
+ *
+ * Several commands show information about the file and cursor:
+ *
+ * 1. ESC, type: stats
+ *    EXPECT: Status bar shows file statistics:
+ *    lines, words, characters, and file size.
+ *
+ * 2. ESC, type: count TODO
+ *    EXPECT: Shows the number of occurrences of "TODO" in the file.
+ *
+ * 3. ESC, type: pos
+ *    EXPECT: Shows detailed cursor position info:
+ *    line, column, byte offset, percentage through file.
+ *
+ * These are read-only -- they just display information.
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 38: Live Preview and Smart Arguments
+ *
+ * Several commands show live preview as you type their arguments:
+ *
+ * SETTINGS PREVIEW:
+ * 1. ESC, type: set tabstop
+ *    Now type a space and then digits (e.g., "set tabstop 2").
+ *    EXPECT: Tab widths change live as you type each digit!
+ *    Press ESC to revert, or Enter to keep the new value.
+ *
+ * 2. Same works for: set ruler 80  (ruler appears as you type 80)
+ *
+ * THEME PREVIEW:
+ * 3. ESC, type: theme
+ *    As you Tab through themes, each one previews live.
+ *    ESC reverts to the original theme.
+ *
+ * GOTO PREVIEW:
+ * 4. ESC, type: goto
+ *    As you type a line number, the cursor moves there in real time.
+ *    ESC returns to where you started.
+ *
+ * RANGE HIGHLIGHTING:
+ * 5. ESC, type a line range like: 1,10
+ *    EXPECT: Lines 1-10 are highlighted with a preview tint as you
+ *    type, showing which lines will be affected by your command.
+ *
+ * The live preview makes it safe to explore -- ESC always reverts.
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ *
+ *    FILES (Lessons 39-40)
+ *
+ * ===========================================================================
+ */
+
+
+/* ===========================================================================
+ * LESSON 39: Config File, Stdin Pipe, File Locking
+ *
+ * CONFIG FILE:
  * The editor reads settings from ~/.config/edit/config on startup.
- * The config file uses a simple key = value format with # comments.
+ * Format: key = value, one per line, # for comments.
  *
  * Supported settings:
+ *   tabstop = 4          Tab display width (1-32)
+ *   theme = Tokyo Night  Color theme name
+ *   line_numbers = true   Show/hide line numbers
+ *   ruler = 80           Column ruler position (0 = off)
  *
- *   # Tab display width (2-16)
- *   tabstop = 4
+ * To create:
+ *   mkdir -p ~/.config/edit
+ *   echo "tabstop = 4" > ~/.config/edit/config
+ *   echo "ruler = 80" >> ~/.config/edit/config
  *
- *   # Color theme (must match a theme name exactly)
- *   theme = Tokyo Night
- *
- *   # Show/hide line numbers
- *   line_numbers = true
- *
- *   # Column ruler position (0 = disabled, max 500)
- *   ruler = 80
- *
- * To test:
- * 1. Create the config directory:
- *      mkdir -p ~/.config/edit
- *
- * 2. Create/edit the config file:
- *      echo "tabstop = 4" > ~/.config/edit/config
- *      echo "ruler = 80" >> ~/.config/edit/config
- *      echo "theme = Cyberpunk" >> ~/.config/edit/config
- *
- * 3. Restart the editor and open this file again.
- *    EXPECT: Tab stops display at 4-space width instead of 8.
- *    A ruler line appears at column 80.
- *    The Cyberpunk theme is active (or whichever you set).
- *
- * Note: The theme setting is automatically updated when you
- * cycle themes with Alt+T. Other settings require manual editing.
- *
- * Unknown keys are silently ignored. Parse errors show in the
- * status bar at startup (e.g., "Config error line 3: missing '='").
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 36: Ctrl Key Aliases
- *
- * Many Alt+key bindings have Ctrl+key aliases for convenience.
- *
- * 1. Press Ctrl+S.
- *    EXPECT: Same as Alt+S (save).
- *
- * 2. Press Ctrl+F.
- *    EXPECT: Same as Alt+F (search prompt opens). Press ESC to cancel.
- *
- * 3. Press Ctrl+G.
- *    EXPECT: Same as Alt+G (go-to-line prompt). Press ESC to cancel.
- *
- * 4. Press Ctrl+Q.
- *    EXPECT: Same as Alt+Q (quit -- answer the prompt if dirty).
- *
- * Here's the full alias table:
- *   Ctrl+S  =  Alt+S   (save)
- *   Ctrl+Q  =  Alt+Q   (quit)
- *   Ctrl+F  =  Alt+F   (find)
- *   Ctrl+G  =  Alt+G   (go to line)
- *   Ctrl+A  =  Home    (start of line)
- *   Ctrl+E  =  End     (end of line)
- *   Ctrl+U  =  Undo
- *   Ctrl+R  =  Redo
- *   Ctrl+Z  =  Suspend
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 37: Atomic Saves and File Safety
- *
- * The editor has several layers of file safety:
- *
- * ATOMIC SAVES:
- *   When you save, the editor writes to a temporary file first,
- *   then renames it over the original. This means the original file
- *   is never corrupted, even if the write fails halfway through.
- *   An fsync() is called before rename for durability.
- *
- * SWAP FILES:
- *   Every 30 seconds, if there are unsaved changes, the editor
- *   writes a swap file (filename.edit.swp). If the editor crashes,
- *   you can recover your work. The swap file is automatically removed
- *   on clean exit or successful save.
- *
- * FILE CHANGE DETECTION:
- *   Before saving, the editor checks if the file's modification time
- *   or inode has changed since it was opened. If another program
- *   modified the file, you get a warning: "File changed on disk.
- *   Save anyway?" This prevents accidentally overwriting changes
- *   made by another editor or tool.
- *
- * EMERGENCY SAVE:
- *   If the editor receives SIGTERM or SIGHUP, it attempts to save
- *   unsaved work to a .edit_recovery_PID file before exiting.
- *
- * (No practice steps here -- just know these features are protecting
- * your work behind the scenes.)
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 38: Stdin Pipe Support
- *
- * The editor can read from stdin when piped, letting you use it as
- * a viewer or editor for command output.
- *
- * Try these in your shell (not inside the editor!):
- *
+ * STDIN PIPE:
+ * The editor reads from stdin when piped:
  *   echo "hello world" | ./edit
- *   cat /etc/hosts | ./edit
- *   ls -la | ./edit
  *   git diff | ./edit
- *
- * EXPECT: The editor opens with the piped content in the buffer.
- * The file shows as "[No Name]" since it came from stdin.
- * You can edit, search, and save to a new filename.
- *
- * When stdin is a pipe, the editor reads all data, then reopens
- * /dev/tty for terminal input so keyboard interaction works normally.
- * ===========================================================================
- */
-
-
-/* ===========================================================================
- * LESSON 39: File Locking and Read-Only Detection
+ * Opens with piped content as "[No Name]". Keyboard works normally.
  *
  * FILE LOCKING:
- *   When the editor opens a file, it acquires an exclusive flock().
- *   If another instance of the editor has the same file open, the
- *   new instance opens it in read-only mode.
+ * The editor acquires an exclusive flock() on the file.
+ * A second instance opens the same file as read-only with [RO].
  *
- * READ-ONLY DETECTION:
- *   If the file is not writable (permissions), the editor detects
- *   this on open and shows "[RO]" in the status bar.
- *
- * To test file locking:
- * 1. Open this file in the editor: ./edit test_features.c
- * 2. Open a second terminal and try: ./edit test_features.c
- *    EXPECT: The second instance shows "[RO]" and a message about
- *    the file being locked by another process.
- *
- * To test read-only detection:
- * 1. Create a read-only file:
- *      echo "read only" > /tmp/test_ro.txt
- *      chmod 444 /tmp/test_ro.txt
- * 2. Open it: ./edit /tmp/test_ro.txt
- *    EXPECT: "[RO]" appears in the status bar.
+ * FILE SAFETY:
+ * - Atomic saves: writes to temp file, then renames (never corrupts)
+ * - Swap files: auto-saved every 30 seconds (filename.edit.swp)
+ * - File change detection: warns if file was modified externally
+ * - Emergency save: SIGTERM/SIGHUP saves to .edit_recovery_PID
  * ===========================================================================
  */
 
@@ -1206,134 +1356,116 @@ int combo(int n) { return (((n + 1) * (n + 2)) / ((n + 3) * (n + 4))); }
 /* ===========================================================================
  * LESSON 40: Unicode Stress Test
  *
- * The editor uses the gstr library for grapheme-aware editing. Every
- * cursor movement, insertion, and deletion operates on grapheme cluster
- * boundaries (not raw bytes or codepoints).
+ * The editor uses grapheme-aware cursor movement via the gstr library.
+ * The cursor never lands in the middle of a grapheme cluster -- ZWJ
+ * sequences, flag emoji, combining marks, and wide characters are
+ * all handled correctly.
  *
- * 1. Arrow through each line below character by character.
- *    EXPECT: The cursor never lands in the middle of an emoji or
- *    grapheme cluster. Each arrow press moves past one complete
- *    visual character.
+ * Navigate through the lines below with arrow keys. Each emoji or
+ * combined character should be ONE cursor step, not multiple.
  *
- * 2. Try selecting emoji and CJK characters with Shift+Right.
- *    EXPECT: Selection highlights one visual character at a time.
- *
- * 3. Try Ctrl+Right word movement across the CJK text.
- *    EXPECT: Word boundaries are detected correctly.
- *
- * 4. Try typing between emoji -- place cursor between two emoji
- *    and type a character.
- *    EXPECT: The character inserts cleanly without corrupting
- *    the surrounding emoji.
- *
- * 5. Try deleting emoji with Backspace and Delete.
- *    EXPECT: The entire grapheme cluster is removed, not just
- *    one byte or codepoint.
+ * Press Ctrl+Left and Ctrl+Right to word-jump through them.
+ * Try selecting them with Shift+Arrow.
  * ===========================================================================
  */
 
->>> Simple emoji: 🌍🌎🌏 and 😀😎🤖🎉🚀💡
->>> Flag sequences: 🇺🇸🇬🇧🇯🇵🇩🇪🇫🇷🇧🇷🇨🇦🇦🇺
->>> CJK wide chars: 日本語テスト 中文测试 한국어
->>> ZWJ families: 👨‍👩‍👧‍👦 👩‍👩‍👦‍👦 👨‍👨‍👧‍👧
->>> Skin tones: 👋🏻👋🏽👋🏿 🤝🏻 🤝🏿
->>> Fullwidth text: Ｆｕｌｌｗｉｄｔｈ　ｔｅｘｔ
->>> Mixed: Hello🌍World こんにちは🎌세계 🇺🇸USA
->>> Combining marks: é (e + combining acute) ñ (n + combining tilde)
->>> Math symbols: ∀x∈ℝ: x² ≥ 0 ∧ √(x²) = |x|
->>> Box drawing: ┌──────┬──────┐
->>>              │ cell │ cell │
->>>              └──────┴──────┘
+>>> ASCII:   Hello World 1234567890 ~!@#$%^&*()
+>>> Latin:   Straße Ärger Ñoño résumé naïve Ångström
+>>> CJK:     漢字テスト 中文测试 한국어 テスト
+>>> Emoji:   😀 🎉 🚀 ❤️ 🌍 🎵 🔥 ✨ 💡 🧑‍💻
+>>> ZWJ:     👨‍👩‍👧‍👦 👩‍🔬 🏳️‍🌈 👨‍❤️‍👨 🧑‍🤝‍🧑
+>>> Flags:   🇺🇸 🇬🇧 🇯🇵 🇩🇪 🇫🇷 🇧🇷 🇰🇷 🇮🇳
+>>> Wide:    ＡＢＣ １２３ ！＠＃
+>>> Combine: é = e + ◌́     ñ = n + ◌̃     ü = u + ◌̈
+>>> Arabic:  مرحبا بالعالم
+>>> Thai:    สวัสดีครับ
+>>> Mixed:   Hello世界🌍مرحبا🚀résumé👨‍👩‍👧‍👦
 
 
 /* ===========================================================================
  *
- *    ╔══════════════════════════════════════════════════════════════════╗
- *    ║                                                                ║
- *    ║              CONGRATULATIONS! You've completed                 ║
- *    ║              all 40 lessons of the edit tutorial.              ║
- *    ║                                                                ║
- *    ╚══════════════════════════════════════════════════════════════════╝
+ *    CONGRATULATIONS!
  *
- *    Here's a summary of everything you tested:
+ *    You have completed all 40 lessons of the edit tutorial.
+ *    You now know every feature of the editor.
  *
- *    NAVIGATION (Lessons 1-2)
- *      - Arrow keys, Home/End, Ctrl+A/E, PgUp/PgDn
- *      - Alt+G / Ctrl+G go-to-line
- *      - Mouse click to position, scroll wheel with acceleration
- *      - Alt+H/J/K/L vim-style movement
+ *    QUICK REFERENCE -- KEYBOARD SHORTCUTS:
  *
- *    EDITING (Lessons 3-5)
- *      - Insert characters, Backspace, Delete, Enter
- *      - Auto-indent (leading whitespace preservation)
- *      - Undo / Redo with time-based grouping
+ *    File:
+ *      Ctrl+S               Save
+ *      Ctrl+Q               Quit (prompts if unsaved)
  *
- *    VIEWPORT (Lessons 6-7)
- *      - 5-line scroll margin
- *      - Virtual column preservation across short lines
+ *    Navigation:
+ *      Arrow keys            Move cursor
+ *      Home / End            Start / end of line
+ *      Ctrl+A / Ctrl+E       Start / end of line
+ *      Ctrl+Left/Right       Jump by word
+ *      PgUp / PgDn           Scroll by screen
+ *      Ctrl+G                Go to line number
+ *      Ctrl+]                Jump to matching bracket
+ *      Mouse click           Position cursor
+ *      Mouse scroll          Scroll with acceleration
  *
- *    WORD MOVEMENT (Lesson 8)
- *      - Ctrl+Left/Right with three-class model
+ *    Search:
+ *      Ctrl+F                Find (incremental)
+ *                              Left/Right navigate matches
+ *                              Up/Down browse search history
+ *                              Alt+C toggle case sensitivity
+ *                              Alt+X toggle regex mode
+ *                              Enter to accept, ESC to cancel
+ *      Ctrl+H                Find and replace (y/n/a/ESC)
  *
- *    SELECTION (Lessons 9-11)
- *      - Shift+Arrow keyboard selection
- *      - Shift+Home/End, Alt+A/E select-to-boundary
- *      - Shift+Ctrl+Arrow word selection
- *      - Mouse click-and-drag selection
+ *    Selection:
+ *      Shift+Arrow           Select by character/line
+ *      Shift+Home/End        Select to line start/end
+ *      Shift+Ctrl+Left/Right Select by word
+ *      Alt+A / Alt+E         Select to line start / end
+ *      Mouse drag            Select with mouse
+ *      ESC                   Clear selection
  *
- *    CLIPBOARD (Lessons 12-14)
- *      - Alt+C copy, Alt+X cut, Alt+V paste, OSC 52
- *      - Selection + typing replaces selected text
- *      - Alt+Shift+K cut line, Alt+D duplicate line
+ *    Clipboard:
+ *      Ctrl+C                Copy (whole line if no selection)
+ *      Ctrl+X                Cut (whole line if no selection)
+ *      Ctrl+V                Paste
+ *      Ctrl+D                Duplicate line
  *
- *    SEARCH (Lessons 15-20)
- *      - Incremental search (Alt+F / Ctrl+F)
- *      - Case-insensitive toggle (Alt+C during search)
- *      - Regex toggle (Alt+X during search, POSIX ERE)
- *      - All-match highlighting and match count
- *      - Search history (Up/Down arrows, 50-entry ring)
- *      - Find and replace (Alt+R, y/n/a/ESC)
+ *    Editing:
+ *      Ctrl+Z                Undo
+ *      Ctrl+Y                Redo
+ *      Ctrl+/                Toggle line comment
+ *      Tab (with selection)  Indent block
+ *      Shift+Tab (w/ sel)    Dedent block
  *
- *    SYNTAX & BRACKETS (Lessons 21-23)
- *      - Syntax highlighting for 9 languages
- *      - Bracket matching (Alt+])
- *      - Bracket pair colorization by depth
+ *    Display:
+ *      F1 / F11              Help screen
+ *      ESC                   Open command prompt
+ *      Ctrl+Space            Open command prompt (always)
  *
- *    CODE EDITING (Lessons 24-25)
- *      - Comment toggle (Alt+/)
- *      - Block indent/dedent (Tab / Shift+Tab with selection)
+ *    QUICK REFERENCE -- COMMANDS:
  *
- *    VISUAL FEATURES (Lessons 26-30)
- *      - Git gutter markers (+ added, ~ modified)
- *      - Trailing whitespace visualization
- *      - Horizontal scroll indicators (< and >)
- *      - Status bar (filename, [RO], [+], filetype, position)
- *      - 7 color themes with Alt+T (persisted to config)
+ *    Core:      save, save as, quit, quit!, undo, redo
+ *    Navigate:  goto <line|top|bottom|match>, find, replace
+ *    Display:   theme, set tabstop, set ruler, wrap, numbers, help
+ *    Select:    select all, select line, select word, select block
+ *    Clipboard: copy, copy line, copy word, copy all, copy path
+ *               cut, cut line, cut word, cut trailing
+ *               paste, paste above, paste below
+ *               dup, dup line
+ *    Transform: upper, lower, title, sort, sort reverse, reverse
+ *               uniq, trim, collapse, number, indent, outdent, comment
+ *    Advanced:  mark <a-z>, jump <a-z>, marks, mark clear
+ *               record start, record stop, record play [N]
+ *               stats, count <text>, pos
+ *    System:    suspend
  *
- *    DISPLAY & HELP (Lessons 31-34)
- *      - Help screen (F11 / Alt+?)
- *      - Suspend/resume (Ctrl+Z / fg)
- *      - Soft word wrap (Alt+W)
- *      - Column ruler (via config file)
+ *    Themes: Cyberpunk, Nightwatch, Daywatch, Tokyo Night,
+ *            Akira, Tokyo Cyberpunk, Clarity
  *
- *    CONFIG & SAFETY (Lessons 35-39)
- *      - Config file (~/.config/edit/config)
- *      - Ctrl key aliases for common operations
- *      - Atomic saves (temp file + rename + fsync)
- *      - Swap files for crash recovery
- *      - File change detection on save
- *      - Stdin pipe support (echo "hello" | ./edit)
- *      - File locking and read-only detection
+ *    Languages: C/C++, Python, JavaScript, Go, Rust, Bash,
+ *               JSON, YAML, Markdown
  *
- *    UNICODE (Lesson 40)
- *      - Emoji, flags, CJK, ZWJ sequences
- *      - Grapheme-aware cursor movement and editing
- *      - Combining marks and fullwidth characters
- *
- *    To discard all changes:  git checkout test_features.c
- *    To quit without saving:  Alt+Q (or Ctrl+Q), then 'n'
+ *    To discard changes:  git checkout test_features.c
+ *    To quit:             Ctrl+Q  or  ESC --> quit
  *
  * ===========================================================================
  */
-
-int main(void) { return 0; }

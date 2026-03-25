@@ -2,11 +2,13 @@
 
 A terminal text editor written in C23. Single file. Zero dependencies beyond libc.
 
-**v1.0.0** | C23 | MIT License | ~8000 lines
+**v0.9.0** | C23 | MIT License | ~11,800 lines
 
 ## What is edit?
 
 `edit` is a terminal text editor that sits between nano and micro in complexity. It has everything you need for comfortable daily editing -- syntax highlighting, undo/redo, search and replace, mouse support, themes -- without the learning curve of vim or the plugin ecosystem of micro. You open a file, edit it, save it, and move on.
+
+The biggest feature is the **command prompt**. Press ESC or Ctrl+Space to open it, then type what you want: `save`, `theme tokyo night`, `sort`, `copy word`, `goto 42`. Over 50 commands cover navigation, selection, clipboard, text transforms, macros, and bookmarks. If what you type does not match a command, it becomes a search -- so the prompt doubles as a quick-find.
 
 Under the hood, `edit` is built on two ideas. First, a **cell-based architecture** where every codepoint carries its own inline syntax and rendering metadata, so there is no separate highlight buffer and no synchronization to worry about. Second, **mmap lazy loading** with a three-level temperature system (COLD/WARM/HOT) that makes files open instantly regardless of size -- only lines that scroll into view pay the decode cost.
 
@@ -20,12 +22,13 @@ The entire editor is a single C file (`edit.c`) plus a header-only Unicode libra
 - Auto-indent (Enter copies leading whitespace)
 - Text selection via keyboard (Shift+Arrow) and mouse drag
 - Word selection (Shift+Ctrl+Arrow) and select to start/end of line
-- Internal clipboard with copy, cut, paste, cut-line, and duplicate-line
+- Internal clipboard with copy, cut, paste, and duplicate line
 - OSC 52 system clipboard integration (works in xterm, kitty, alacritty, WezTerm, foot, iTerm2, Windows Terminal)
 - Word movement (Ctrl+Left/Right) with three-class boundary detection
 - Block indent/dedent with Tab/Shift+Tab on selections
 - Toggle line comment (filetype-aware)
 - Bracket jump to matching pair
+- Text transforms: uppercase, lowercase, title case, sort, reverse, trim, collapse, unique
 
 ### Search
 
@@ -33,7 +36,7 @@ The entire editor is a single C file (`edit.c`) plus a header-only Unicode libra
 - All-match highlighting across visible lines with match counter
 - Regex search mode (POSIX ERE), toggled with Alt+X during search
 - Case-insensitive toggle (Alt+C during search)
-- Find and replace (Alt+R) with single and replace-all modes
+- Find and replace with single and replace-all modes
 - Search history (Up/Down arrows during search, 50 entries)
 - Arrow keys navigate between matches with wrap-around
 
@@ -53,23 +56,22 @@ The entire editor is a single C file (`edit.c`) plus a header-only Unicode libra
 
 ### Display
 
-- 7 color themes (24-bit RGB), cycled with Alt+T
+- 7 color themes (24-bit RGB), cycled with Tab in the command prompt or the `theme` command
 - Bracket pair colorization with 4 cycling depth colors
 - Git-style gutter markers (added/modified lines since last save)
 - Trailing whitespace visualization
 - Horizontal scroll indicators (`<` / `>` at screen edges)
 - Column ruler (configurable position)
-- Soft word wrap (Alt+W)
-- Line numbers (toggleable with Alt+N)
+- Soft word wrap
+- Line numbers (toggleable)
 
 ### Navigation
 
 - 5-line scroll margin keeps context visible
 - Virtual column preservation across vertical movement through short lines
-- Bracket jump (Alt+]) to matching `()`, `{}`, `[]`
-- Go to line number (Alt+G)
+- Bracket jump (Ctrl+]) to matching `()`, `{}`, `[]`
+- Go to line number (Ctrl+G)
 - Mouse click to position, scroll wheel with acceleration
-- Vim-style movement (Alt+H/J/K/L)
 - Page Up/Down scrolls by one screenful
 
 ### Files
@@ -89,7 +91,7 @@ The entire editor is a single C file (`edit.c`) plus a header-only Unicode libra
 - Config file at `~/.config/edit/config` (XDG-compliant)
 - Configurable tab width, theme, line numbers, column ruler
 - CLI flags (`--tabstop=N`, `--ruler=N`)
-- Theme persisted automatically when cycled
+- Theme persisted automatically when changed
 
 ## Installation
 
@@ -131,37 +133,158 @@ git submodule update --init
 edit myfile.c
 ```
 
-The essentials:
+Five things to know:
 
-- **Type** to insert text. Arrow keys to move. Mouse works too.
-- **Alt+S** to save, **Alt+Q** to quit.
-- **Alt+F** to search, **Alt+R** to find and replace.
-- **Ctrl+U** to undo, **Ctrl+R** to redo.
-- **F11** or **Alt+?** for the full help screen.
+1. **Type** to insert text. Arrow keys to move. Mouse works too.
+2. **Ctrl+S** to save, **Ctrl+Q** to quit.
+3. **Ctrl+F** to search, **Ctrl+H** to find and replace.
+4. **Ctrl+Z** to undo, **Ctrl+Y** to redo.
+5. **ESC** to open the command prompt -- type any command or search term.
 
-## Keybindings
+## Command Prompt
+
+Press **ESC** to open the command prompt (if a selection is active, the first ESC clears it; press ESC again to open the prompt). **Ctrl+Space** always opens the prompt regardless of selection state.
+
+At the prompt, type a command name and press Enter. Commands do not use a leading slash -- just type `save`, not `/save`. Tab completes and cycles through matching commands. If your input does not match any command, it is treated as a search query.
+
+Commands can take arguments: `goto 42`, `theme Tokyo Night`, `set tabstop 4`. Many commands accept a repeat prefix: `3 dup line` duplicates the current line 3 times.
+
+### File
+
+| Command | Description |
+|---------|-------------|
+| `save` | Save the current file |
+| `save [file]` | Save to a specific file |
+| `save as <file>` | Save with a new filename (always prompts) |
+| `quit` | Quit (prompts if unsaved changes) |
+| `quit!` | Quit immediately without saving |
+
+### Navigation
+
+| Command | Description |
+|---------|-------------|
+| `goto <N>` | Jump to line N |
+| `goto top` | Jump to first line |
+| `goto bottom` | Jump to last line |
+| `goto match` | Jump to matching bracket |
+
+### Selection
+
+| Command | Description |
+|---------|-------------|
+| `select` | Select current line |
+| `select all` | Select entire file |
+| `select line` | Select current or given line(s) |
+| `select word` | Select word under cursor |
+| `select block` | Select to matching bracket |
+
+### Clipboard
+
+| Command | Description |
+|---------|-------------|
+| `copy` | Copy selection or range |
+| `copy line` | Copy line(s) |
+| `copy word` | Copy word under cursor |
+| `copy all` | Copy entire file |
+| `copy path` | Copy filename to clipboard |
+| `cut` | Cut selection or range |
+| `cut line` | Cut line(s) |
+| `cut word` | Cut word under cursor |
+| `cut trailing` | Remove trailing whitespace |
+| `paste` | Paste at cursor |
+| `paste above` | Paste above cursor line |
+| `paste below` | Paste below cursor line |
+| `dup` | Duplicate selection or line |
+| `dup line` | Duplicate line N times |
+
+### Text Transforms
+
+| Command | Description |
+|---------|-------------|
+| `upper` | Convert to uppercase |
+| `lower` | Convert to lowercase |
+| `title` | Convert to title case |
+| `sort` | Sort lines ascending |
+| `sort reverse` | Sort lines descending |
+| `trim` | Strip trailing whitespace |
+| `reverse` | Reverse line order |
+| `uniq` | Remove duplicate lines |
+| `collapse` | Collapse blank lines |
+| `indent` | Indent lines |
+| `outdent` | Outdent lines |
+| `comment` | Toggle line comments |
+| `number` | Number lines |
+
+### Search
+
+| Command | Description |
+|---------|-------------|
+| `find` | Open incremental search |
+| `find [text]` | Search with pre-filled query |
+| `replace` | Open find and replace |
+
+### Display
+
+| Command | Description |
+|---------|-------------|
+| `theme` | Cycle to next theme |
+| `theme <name>` | Set theme by name |
+| `wrap` | Toggle word wrap |
+| `numbers` | Toggle line numbers |
+| `help` | Show help screen |
+
+### Settings
+
+| Command | Description |
+|---------|-------------|
+| `set tabstop <N>` | Set tab display width (1-32) |
+| `set ruler <N>` | Set column ruler position (0 to disable) |
+| `set wrap` | Toggle word wrap |
+| `set numbers` | Toggle line numbers |
+
+### Session
+
+| Command | Description |
+|---------|-------------|
+| `suspend` | Suspend to shell (`fg` to resume) |
+| `record start` | Start recording a macro |
+| `record stop` | Stop recording |
+| `record play` | Play back the recorded macro |
+| `mark` | Set a bookmark at cursor |
+| `jump` | Jump to a bookmark |
+| `marks` | List all bookmarks |
+| `mark clear` | Clear all bookmarks |
+
+### Info
+
+| Command | Description |
+|---------|-------------|
+| `stats` | Show file statistics |
+| `count <text>` | Count occurrences of text |
+| `pos` | Show cursor position info |
+| `undo` | Undo the last change |
+| `redo` | Redo the last undone change |
+
+## Keyboard Shortcuts
 
 ### File
 
 | Key | Action |
 |-----|--------|
-| Alt+S / Ctrl+S | Save |
-| Alt+Shift+S | Save as (always prompts for filename) |
-| Alt+Q / Ctrl+Q | Quit (prompts if unsaved) |
-| Ctrl+Z | Suspend to shell (`fg` to resume) |
+| Ctrl+S | Save |
+| Ctrl+Q | Quit (prompts if unsaved) |
 
 ### Navigation
 
 | Key | Action |
 |-----|--------|
 | Arrow keys | Move cursor (grapheme-aware) |
-| Alt+H / J / K / L | Move cursor (vim-style) |
 | Home / End | Start / end of line |
 | Ctrl+A / Ctrl+E | Start / end of line |
 | Ctrl+Left / Ctrl+Right | Jump by word |
 | Page Up / Page Down | Scroll by one screenful |
-| Alt+G / Ctrl+G | Go to line number |
-| Alt+] | Jump to matching bracket |
+| Ctrl+G | Go to line number |
+| Ctrl+] | Jump to matching bracket |
 | Mouse click | Position cursor |
 | Scroll wheel | Scroll with acceleration |
 
@@ -181,31 +304,30 @@ The essentials:
 
 | Key | Action |
 |-----|--------|
-| Alt+C | Copy selection |
-| Alt+X | Cut selection |
-| Alt+V | Paste |
-| Alt+Shift+K | Cut entire line |
-| Alt+D | Duplicate line |
+| Ctrl+C | Copy (whole line if no selection) |
+| Ctrl+X | Cut (whole line if no selection) |
+| Ctrl+V | Paste |
+| Ctrl+D | Duplicate line |
 
 ### Editing
 
 | Key | Action |
 |-----|--------|
 | Enter | Insert newline with auto-indent |
-| Backspace / Ctrl+H | Delete character before cursor |
+| Backspace | Delete character before cursor |
 | Delete | Delete character at cursor |
-| Ctrl+U | Undo |
-| Ctrl+R | Redo |
+| Ctrl+Z | Undo |
+| Ctrl+Y | Redo |
+| Ctrl+/ | Toggle line comment (filetype-aware) |
 | Tab | Insert tab, or indent selection |
 | Shift+Tab | Dedent selection |
-| Alt+/ | Toggle line comment (filetype-aware) |
 
 ### Search
 
 | Key | Action |
 |-----|--------|
-| Alt+F / Ctrl+F | Incremental search |
-| Alt+R | Find and replace |
+| Ctrl+F | Incremental search |
+| Ctrl+H | Find and replace |
 
 During search:
 
@@ -218,14 +340,29 @@ During search:
 | Enter | Accept current match |
 | ESC | Cancel and restore cursor position |
 
-### Display
+### Command Prompt
 
 | Key | Action |
 |-----|--------|
-| Alt+T | Cycle color theme |
-| Alt+N | Toggle line numbers |
-| Alt+W | Toggle word wrap |
-| F11 / Alt+? | Help screen |
+| ESC | Open command prompt (clears selection first if active) |
+| Ctrl+Space | Open command prompt (always) |
+| F1 / F11 | Help screen |
+
+### Legacy Shortcuts
+
+These Alt shortcuts still work but will be removed in a future release in favor of commands:
+
+| Key | Action | Command equivalent |
+|-----|--------|--------------------|
+| Alt+T | Cycle theme | `theme` |
+| Alt+N | Toggle line numbers | `numbers` |
+| Alt+W | Toggle word wrap | `wrap` |
+| Alt+S | Save | `save` |
+| Alt+Q | Quit | `quit` |
+| Alt+Shift+S | Save as | `save as` |
+| Alt+F | Find | `find` |
+| Alt+G | Go to line | `goto` |
+| Alt+Shift+K | Cut line | `cut line` |
 
 ## Configuration
 
@@ -267,7 +404,7 @@ CLI flags override the config file.
 
 ## Themes
 
-All 7 themes use 24-bit RGB color. Cycle at runtime with Alt+T. The selected theme is saved to the config file automatically.
+All 7 themes use 24-bit RGB color. Cycle at runtime with the `theme` command or Alt+T. Set a specific theme with `theme <name>`. The selected theme is saved to the config file automatically.
 
 | Theme | Description |
 |-------|-------------|
@@ -338,7 +475,7 @@ Encoding is UTF-8 only. Non-UTF-8 bytes produce Unicode replacement characters.
 ## Limitations
 
 - **No LSP integration** -- no code completion, diagnostics, or go-to-definition.
-- **No plugin system** -- behavior is compiled in. Customization is limited to the config file.
+- **No plugin system** -- behavior is compiled in. Customization is limited to the config file and commands.
 - **No multi-buffer / tabs / splits** -- single file, single view. Use terminal tabs or tmux panes for multiple files.
 - **No soft wrapping at word boundaries** -- word wrap breaks at the screen edge, not between words.
 - **UTF-8 only** -- files in other encodings are not transcoded.
